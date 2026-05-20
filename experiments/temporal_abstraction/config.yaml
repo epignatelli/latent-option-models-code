@@ -1,0 +1,30 @@
+# Experiment: does temporal abstraction improve latent option quality?
+#
+# Conditions (set in run.sh):
+#   LAM (baseline)  horizon=1   num_options=98   (one code per atomic action)
+#   LOM (proposed)  horizon=128 num_options=256  (temporally extended options)
+#
+# Both conditions train a unified OptionEncoder + ActionEncoder + shared FrameDecoder.
+# The option VQ captures the horizon-level intent; the action VQ grounds it to x_{t+1}.
+
+data:
+  context_len: 128      # frames of history fed to the encoder and decoder
+  horizon: 128          # k: steps between anchor and target frame
+
+model:
+  latent_dim: 512       # option and action code dimensionality
+  num_options: 256      # option VQ codebook size
+  predict_sequence: false   # true: LOM decoder predicts full sequence (teacher forcing)
+
+train:
+  ckpt_dir: /scratch/$USER/lom/checkpoints/temporal_abstraction
+  max_iters: 100_000
+  log_interval: 50
+  eval_interval: 500
+  eval_iters: 50
+
+wandb:
+  project: latent-option-models
+  entity: latent-option-models
+  group: benchmark
+  dir: /scratch/$USER/lom/wandb
