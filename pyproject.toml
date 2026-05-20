@@ -1,0 +1,37 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools >= 65", "wheel"]
+
+[project]
+name = "lom"
+version = "0.1.0"
+description = "Latent Option Models: learning abstract actions from actionless data (NeurIPS 2025)"
+authors = [
+  {name = "Eduardo Pignatelli", email = "edu.pignatelli@gmail.com"},
+]
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+
+dependencies = [
+  "torch>=2.0",
+  "numpy",
+  "tyro",
+  "wandb",
+  "tqdm",
+  # NLE and dataset — install separately (requires system NetHack build)
+  # pip install nle  (see https://github.com/NetHack-LE/nle)
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+nle = ["nle>=0.9"]
+
+[tool.setuptools.packages.find]
+include = ["lom*"]
+
+[tool.black]
+line-length = 100
+
+[project.scripts]
+lom-pretrain = "scripts.pretrain:main"

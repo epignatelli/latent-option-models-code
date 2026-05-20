@@ -1,0 +1,25 @@
+# PyTorch — installed from the official wheel index (CUDA 13.2)
+# The --index-url line makes the PyTorch wheel server the primary source for
+# torch / torchvision so pip picks up the CUDA build, not the PyPI CPU stub.
+# Everything else falls back to PyPI via --extra-index-url.
+--index-url https://download.pytorch.org/whl/cu132
+--extra-index-url https://pypi.org/simple
+
+torch
+torchvision
+
+# Core
+numpy>=1.26
+tyro>=0.8
+wandb>=0.17
+tqdm>=4.66
+
+# NetHack Learning Environment
+# Additional system deps needed before pip install (Ubuntu):
+#   apt-get install -y build-essential autoconf libtool pkg-config \
+#                      python3-dev flex bison libbz2-dev
+# Full install docs: https://github.com/NetHack-LE/nle
+nle>=0.9
+
+# Development / testing (optional)
+pytest>=8.0

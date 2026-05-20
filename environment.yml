@@ -1,0 +1,24 @@
+name: lom
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python
+  - python=3.11
+
+  # Build tools required by NLE (NetHack binary compilation)
+  - cmake>=3.28
+  - make
+  - autoconf
+  - libtool
+  - pkg-config
+  - flex
+  - bison
+  - bzip2
+  - zlib
+  - pip
+
+  # All pip packages (including PyTorch) — see requirements.txt
+  - pip:
+    - -r requirements.txt
