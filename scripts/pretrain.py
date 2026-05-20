@@ -5,8 +5,8 @@ Usage:
     python -m scripts.pretrain lom [options]
 
     # Load an experiment config, then override individual fields:
-    python -m scripts.pretrain lam --config experiments/temporal_abstraction/config.yaml
-    python -m scripts.pretrain lom --config experiments/temporal_abstraction/config.yaml \\
+    python -m scripts.pretrain lam --config experiments/benchmark/config.yaml
+    python -m scripts.pretrain lom --config experiments/benchmark/config.yaml \\
         --train.batch_size 64
 """
 

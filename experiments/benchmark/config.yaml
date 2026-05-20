@@ -17,7 +17,7 @@ model:
   predict_sequence: false   # true: LOM decoder predicts full sequence (teacher forcing)
 
 train:
-  ckpt_dir: /scratch/$USER/lom/checkpoints/temporal_abstraction
+  ckpt_dir: /scratch/$USER/lom/checkpoints/benchmark
   max_iters: 100_000
   log_interval: 50
   eval_interval: 500

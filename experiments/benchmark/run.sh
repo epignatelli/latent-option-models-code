@@ -26,7 +26,7 @@ NUM_WORKERS=${NUM_WORKERS:-4}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/../.."
 
-CONFIG=experiments/temporal_abstraction/config.yaml
+CONFIG=experiments/benchmark/config.yaml
 
 # Read base checkpoint dir from config (expands $USER and other env vars)
 BASE_CKPT=$(python -c "
