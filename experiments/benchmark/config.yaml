@@ -8,9 +8,10 @@
 # The option VQ captures the horizon-level intent; the action VQ grounds it to x_{t+1}.
 
 sweep:
-  seeds: [42, 43, 44]
+  seeds: [0, 1, 2]
 
 data:
+  nle_data_dir: /scratch/uceeepi/lom/datasets/nle/nao
   context_len: 128
   horizon: 128
 
