@@ -87,22 +87,25 @@ class LatentActionModel(SerialisableModule):
         bias: bool = False,
     ):
         super().__init__()
-        self._cfg = dict(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            codebook_size=codebook_size, horizon=horizon,
-            condition_dim=condition_dim, vq_dropout=vq_dropout,
-            vq_entropy_weight=vq_entropy_weight, vq_beta=vq_beta,
-            vq_reset_thresh=vq_reset_thresh, dropout=dropout, bias=bias,
-        )
         S = obs_h * obs_w
+        self.vocab_size = vocab_size
         self.obs_h = obs_h
         self.obs_w = obs_w
         self.S = S
+        self.n_layers = n_layers
+        self.n_heads = n_heads
         self.d_model = d_model
         self.latent_dim = latent_dim
         self.context_length = context_length
+        self.codebook_size = codebook_size
+        self.horizon = horizon
+        self.condition_dim = condition_dim
+        self.vq_dropout = vq_dropout
+        self.vq_entropy_weight = vq_entropy_weight
+        self.vq_beta = vq_beta
+        self.vq_reset_thresh = vq_reset_thresh
+        self.dropout = dropout
+        self.bias = bias
         self.has_condition = condition_dim is not None
 
         # temporal positions: history + optional cond token + OPT + future frames
@@ -221,23 +224,21 @@ class DynamicsModel(SerialisableModule):
         bias: bool = False,
     ):
         super().__init__()
-        self._cfg = dict(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            option_dim=option_dim, predict_sequence=predict_sequence,
-            horizon=horizon, dropout=dropout, bias=bias,
-        )
         S = obs_h * obs_w
+        self.vocab_size = vocab_size
         self.obs_h = obs_h
         self.obs_w = obs_w
         self.S = S
+        self.n_layers = n_layers
+        self.n_heads = n_heads
         self.d_model = d_model
         self.context_length = context_length
         self.latent_dim = latent_dim
-        self.vocab_size = vocab_size
-
+        self.option_dim = option_dim
         self.predict_sequence = predict_sequence
+        self.horizon = horizon
+        self.dropout = dropout
+        self.bias = bias
 
         max_temporal_len = context_length + horizon - 1 if predict_sequence else context_length
 

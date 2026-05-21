@@ -29,10 +29,9 @@ class SerialisableModule(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
     def save(self, path: str) -> None:
-        if not hasattr(self, "_cfg"):
-            raise AttributeError(f"{self.__class__.__name__} must set self._cfg in __init__")
+        config = {k: v for k, v in vars(self).items() if not isinstance(v, nn.Module)}
         torch.save(
-            {"config": self._cfg, "params": self.state_dict(), "class": self.__class__.__name__}, path
+            {"config": config, "params": self.state_dict(), "class": self.__class__.__name__}, path
         )
         logging.info("Saved %s to %s", self.__class__.__name__, path)
 
@@ -41,7 +40,9 @@ class SerialisableModule(nn.Module):
         dic = torch.load(path, map_location=device, weights_only=False)
         if dic["class"] != cls.__name__:
             raise ValueError(f"Checkpoint is {dic['class']}, loading as {cls.__name__}")
-        obj = cls(**dic["config"])
+        sig = inspect.signature(cls.__init__).parameters
+        cfg = {k: v for k, v in dic["config"].items() if k in sig}
+        obj = cls(**cfg)
         obj.load_state_dict(dic["params"])
         logging.info("Loaded %s from %s", cls.__name__, path)
         return obj
