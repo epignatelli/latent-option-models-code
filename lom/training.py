@@ -345,7 +345,7 @@ class LOMTrainer(Trainer):
                 history,
                 z_act.detach(),
                 option_code=z_opt.detach(),
-                n_steps=self.cfg.data.horizon,
+                horizon=self.cfg.data.horizon,
                 teacher_frames=sequence,
             )
             lom_recon = reconstruction_loss(lom_logits, sequence, self.cfg.env.vocab_size)
@@ -354,7 +354,7 @@ class LOMTrainer(Trainer):
                 history,
                 z_act.detach(),
                 option_code=z_opt.detach(),
-                n_steps=1,
+                horizon=1,
             )
             lom_recon = reconstruction_loss(lom_logits, future_frame, self.cfg.env.vocab_size)
 

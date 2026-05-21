@@ -98,13 +98,13 @@ def test_dynamics_single_frame():
 def test_dynamics_sequence_teacher():
     dyn = make_dynamics(predict_sequence=True)
     teacher = frame_sequence(HORIZON)
-    logits = dyn(history(), action(), n_steps=HORIZON, teacher_frames=teacher)
+    logits = dyn(history(), action(), horizon=HORIZON, teacher_frames=teacher)
     assert logits.shape == (BATCH, HORIZON, S, VOCAB)
 
 
 def test_dynamics_sequence_autoregressive():
     dyn = make_dynamics(predict_sequence=True)
-    logits = dyn(history(), action(), n_steps=HORIZON)
+    logits = dyn(history(), action(), horizon=HORIZON)
     assert logits.shape == (BATCH, HORIZON, S, VOCAB)
 
 

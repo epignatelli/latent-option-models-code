@@ -24,7 +24,7 @@ Compose to build LAM or LOM:
     z_act = action_lam(history, x_{t+1}, condition=z_opt)
 
     lam_dynamics(history, z_act)                                        → x̂_{t+1}   [LAM loss]
-    lom_dynamics(history, z_act, option_code=z_opt, n_steps=k)         → x̂_{t+k}   [LOM loss]
+    lom_dynamics(history, z_act, option_code=z_opt, horizon=k)         → x̂_{t+k}   [LOM loss]
 """
 
 from __future__ import annotations
@@ -190,7 +190,7 @@ class DynamicsModel(SerialisableModule):
     action is broadcast-added to all input embeddings as the primary conditioning.
     option_code is an optional secondary conditioning (z_option for LOM dynamics).
 
-    n_steps controls how many frames to predict.
+    horizon controls how many frames to predict.
 
     Training: pass teacher_frames for efficient teacher-forced sequence prediction.
     Inference: leave teacher_frames=None; single-step is a plain forward pass,
@@ -253,7 +253,7 @@ class DynamicsModel(SerialisableModule):
         history: torch.Tensor,
         action: torch.Tensor,
         option_code: Optional[torch.Tensor] = None,
-        n_steps: int = 1,
+        horizon: int = 1,
         teacher_frames: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
@@ -261,11 +261,11 @@ class DynamicsModel(SerialisableModule):
             history:        (B, c, H, W) long
             action:         (B, latent_dim)
             option_code:    (B, goal_dim) optional — z_option for LOM dynamics
-            n_steps:        number of frames to predict
-            teacher_frames: (B, n_steps, H, W) long — teacher forcing, training only
+            horizon:        number of frames to predict
+            teacher_frames: (B, horizon, H, W) long — teacher forcing, training only
         Returns:
             (B, S, vocab_size)            if predict_sequence=False
-            (B, n_steps, S, vocab_size)   if predict_sequence=True
+            (B, horizon, S, vocab_size)   if predict_sequence=True
         """
         B, c = history.shape[:2]
         S = self.S
@@ -277,13 +277,13 @@ class DynamicsModel(SerialisableModule):
                 # Input:  [h_0, …, h_{c-1}, f_0, …, f_{n-2}]
                 # Targets at positions c-1 … c+n-2 predict f_0 … f_{n-1}
                 inp = torch.cat([history, teacher_frames[:, :-1]], dim=1)  # (B, c+n-1, H, W)
-                emb = self.char_embed(inp.reshape(B, c + n_steps - 1, S)) + cond
+                emb = self.char_embed(inp.reshape(B, c + horizon - 1, S)) + cond
                 hid = self.ln_trunk(self.trunk(emb))
-                return self.state_head(hid[:, c - 1 : c + n_steps - 1, :, :])  # (B, n, S, V)
+                return self.state_head(hid[:, c - 1 : c + horizon - 1, :, :])  # (B, n, S, V)
             else:
                 # Autoregressive rollout (inference).
                 frames, current = [], history
-                for _ in range(n_steps):
+                for _ in range(horizon):
                     emb = self.char_embed(current.reshape(B, current.shape[1], S)) + cond
                     hid = self.ln_trunk(self.trunk(emb))
                     logits = self.state_head(hid[:, -1, :, :])  # (B, S, V)
