@@ -195,17 +195,18 @@ class TrajectoryDataset(Dataset):
         self._index: List[Tuple[int, int]] = []
 
         min_len = context_len + horizon
-        for traj_idx, seq in enumerate(sequences):
+        for i, seq in enumerate(sequences):
             if seq.ndim == 2:
                 seq = seq.reshape(-1, obs_h, obs_w)
             T = len(seq)
             if T < min_len + 1:
                 continue
+            internal_idx = len(self._seqs)
             self._seqs.append(seq.astype(np.uint8))
             if action_sequences is not None:
-                self._acts.append(action_sequences[traj_idx].astype(np.int64))
+                self._acts.append(action_sequences[i].astype(np.int64))
             for t in range(context_len - 1, T - horizon):
-                self._index.append((traj_idx, t))
+                self._index.append((internal_idx, t))
 
         log.info(
             "TrajectoryDataset: %d episodes → %d samples (c=%d, k=%d, seq=%s, actions=%s)",

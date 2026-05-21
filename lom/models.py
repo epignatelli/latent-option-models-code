@@ -209,6 +209,7 @@ class DynamicsModel(SerialisableModule):
         latent_dim: int,
         goal_dim: Optional[int] = None,
         predict_sequence: bool = False,
+        max_future_len: int = 1,
         dropout: float = 0.0,
         bias: bool = False,
     ):
@@ -224,6 +225,10 @@ class DynamicsModel(SerialisableModule):
 
         self.predict_sequence = predict_sequence
 
+        # Teacher-forced sequence prediction concatenates history + future[:-1],
+        # so the trunk must accommodate max_context + max_future_len - 1 time steps.
+        max_temporal_len = (max_context + max_future_len - 1) if predict_sequence else max_context
+
         self.char_embed = nn.Embedding(vocab_size, d_model)
         self.action_proj = nn.Linear(latent_dim, d_model, bias=bias)
         self.goal_proj = nn.Linear(goal_dim, d_model, bias=bias) if goal_dim is not None else None
@@ -232,7 +237,7 @@ class DynamicsModel(SerialisableModule):
             n_layers=n_layers,
             n_heads=n_heads,
             n_spatial_positions=S,
-            max_temporal_len=max_context,
+            max_temporal_len=max_temporal_len,
             dropout=dropout,
             bias=bias,
             causal_temporal=True,
