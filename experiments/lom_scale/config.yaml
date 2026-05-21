@@ -4,18 +4,19 @@
 # All other hyperparameters are held fixed.
 
 sweep:
-  num_options_list: [4, 8, 16, 32, 64, 128, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+  num_options_list: [4, 16, 64, 256, 1024, 4096, 16384]
   seeds: [0, 1, 2]
 
 data:
   nle_data_dir: /scratch/uceeepi/lom/datasets
-  dataset: nao-top10
-  context_len: 128
+  dataset: nld-nao
+  context_len: 4
   horizon: 128
   num_workers: 4
 
 model:
   latent_dim: 512
+  patch_size: 4
   predict_sequence: false
 
 train:

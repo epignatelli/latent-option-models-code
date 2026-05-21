@@ -18,7 +18,7 @@ class ModelCfg:
     n_layers: int = 4
     n_heads: int = 4
     context_length: int = 256
-    latent_dim: int = 64
+    latent_dim: int = 512
     num_options: int = 256
     vq_dropout: float = 0.1
     vq_entropy_weight: float = 0.01

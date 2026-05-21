@@ -12,14 +12,15 @@ sweep:
 
 data:
   nle_data_dir: /scratch/uceeepi/lom/datasets
-  dataset: nao-top10
-  context_len: 128
+  dataset: nld-nao
+  context_len: 4
   horizon: 128
   num_workers: 4
 
 model:
   latent_dim: 512
   num_options: 256
+  patch_size: 4
   predict_sequence: false
 
 train:

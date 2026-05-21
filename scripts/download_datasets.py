@@ -18,42 +18,73 @@ Usage:
     python -m scripts.download_datasets nld-aa    --output_dir /scratch/uceeepi/lom/datasets
     python -m scripts.download_datasets nld-nao   --output_dir /scratch/uceeepi/lom/datasets
     python -m scripts.download_datasets nao-top10 --output_dir /scratch/uceeepi/lom/datasets
+    python -m scripts.download_datasets all       --output_dir /scratch/uceeepi/lom/datasets
 """
 
 from __future__ import annotations
 
-import argparse
 import os
 import tarfile
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Annotated, Union
 
+import tyro
 from tqdm import tqdm
+
+
+# --------------------------------------------------------------------------- #
+# --- Config ----------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class DownloadArgs:
+    output_dir: str = "nle_data"
+    """Root directory where datasets are stored."""
+    workers: int = 4
+    """Parallel download workers (zip datasets only)."""
+    keep_zips: bool = False
+    """Keep archives after extraction."""
 
 
 # --------------------------------------------------------------------------- #
 # --- Dataset manifests ------------------------------------------------------ #
 # --------------------------------------------------------------------------- #
 
-_NLD_AA_BASE  = "https://dl.fbaipublicfiles.com/nld/nld-aa/"
-_NLD_NAO_BASE = "https://dl.fbaipublicfiles.com/nld/nld-nao/"
+_NLD_AA_BASE   = "https://dl.fbaipublicfiles.com/nld/nld-aa/"
+_NLD_NAO_BASE  = "https://dl.fbaipublicfiles.com/nld/nld-nao/"
 _NAO_TOP10_URL = "https://storage.googleapis.com/dm_nethack/nao_top10.tar"
 
 
 def _nld_aa_zips() -> list[str]:
-    # nld-aa-dir-aa.zip … nld-aa-dir-ap.zip  (16 archives)
     return [f"nld-aa-dir-a{c}.zip" for c in "abcdefghijklmnop"]
 
 
 def _nld_nao_zips() -> list[str]:
-    # nld-nao-dir-aa.zip … nld-nao-dir-az.zip (26) + ba … bn (14) = 40 data
-    # + nld-nao_xlogfiles.zip = 41 total
     suffixes = [f"a{c}" for c in "abcdefghijklmnopqrstuvwxyz"]
     suffixes += [f"b{c}" for c in "abcdefghijklmn"]
     zips = [f"nld-nao-dir-{s}.zip" for s in suffixes]
     zips.append("nld-nao_xlogfiles.zip")
     return zips
+
+
+# --------------------------------------------------------------------------- #
+# --- Sentinel helpers ------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+def _sentinel(directory: str) -> str:
+    return os.path.join(directory, ".done")
+
+
+def _is_done(directory: str) -> bool:
+    return os.path.exists(_sentinel(directory))
+
+
+def _mark_done(directory: str) -> None:
+    with open(_sentinel(directory), "w") as f:
+        f.write("")
 
 
 # --------------------------------------------------------------------------- #
@@ -103,11 +134,15 @@ def _populate_nle_db(unzipped_dir: str, db_path: str, dataset_name: str, use_alt
 
 
 def _parallel_download(base_url: str, filenames: list[str], zip_dir: str, workers: int) -> None:
-    print(f"Downloading {len(filenames)} archives to {zip_dir} ({workers} workers) ...")
+    pending = [n for n in filenames if not os.path.exists(os.path.join(zip_dir, n))]
+    if not pending:
+        print(f"All {len(filenames)} archives already downloaded, skipping.")
+        return
+    print(f"Downloading {len(pending)}/{len(filenames)} archives to {zip_dir} ({workers} workers) ...")
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(_download, base_url + name, os.path.join(zip_dir, name)): name
-            for name in filenames
+            for name in pending
         }
         with tqdm(total=len(futures), unit="file") as bar:
             for future in as_completed(futures):
@@ -121,9 +156,13 @@ def _parallel_download(base_url: str, filenames: list[str], zip_dir: str, worker
 
 
 def _extract_zips(filenames: list[str], zip_dir: str, unzip_dir: str) -> None:
+    if _is_done(unzip_dir):
+        print(f"Already extracted to {unzip_dir}, skipping.")
+        return
     print(f"\nExtracting {len(filenames)} archives to {unzip_dir} ...")
     for name in tqdm(filenames, unit="file"):
         _unzip(os.path.join(zip_dir, name), unzip_dir)
+    _mark_done(unzip_dir)
 
 
 def _remove_zips(filenames: list[str], zip_dir: str) -> None:
@@ -141,7 +180,7 @@ def _remove_zips(filenames: list[str], zip_dir: str) -> None:
 # --- Dataset-specific routines --------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
-def _download_nld_aa(args: argparse.Namespace) -> None:
+def _download_nld_aa(args: DownloadArgs) -> None:
     filenames = _nld_aa_zips()
     zip_dir   = os.path.join(args.output_dir, "zips", "nld-aa")
     unzip_dir = os.path.join(args.output_dir, "nld-aa")
@@ -156,13 +195,16 @@ def _download_nld_aa(args: argparse.Namespace) -> None:
     if not args.keep_zips:
         _remove_zips(filenames, zip_dir)
 
-    print(f"\nBuilding NLE database at {db_path} ...")
-    _populate_nle_db(unzip_dir, db_path, "nld-aa", use_altorg=False)
+    if os.path.exists(db_path):
+        print(f"\nNLE database already exists at {db_path}, skipping.")
+    else:
+        print(f"\nBuilding NLE database at {db_path} ...")
+        _populate_nle_db(unzip_dir, db_path, "nld-aa", use_altorg=False)
 
     print(f"\nDone. Set data.nle_data_dir: {args.output_dir} in your experiment config.")
 
 
-def _download_nld_nao(args: argparse.Namespace) -> None:
+def _download_nld_nao(args: DownloadArgs) -> None:
     filenames = _nld_nao_zips()
     zip_dir   = os.path.join(args.output_dir, "zips", "nld-nao")
     unzip_dir = os.path.join(args.output_dir, "nld-nao")
@@ -177,15 +219,18 @@ def _download_nld_nao(args: argparse.Namespace) -> None:
     if not args.keep_zips:
         _remove_zips(filenames, zip_dir)
 
-    print(f"\nBuilding NLE database at {db_path} ...")
-    _populate_nle_db(unzip_dir, db_path, "nld-nao", use_altorg=True)
+    if os.path.exists(db_path):
+        print(f"\nNLE database already exists at {db_path}, skipping.")
+    else:
+        print(f"\nBuilding NLE database at {db_path} ...")
+        _populate_nle_db(unzip_dir, db_path, "nld-nao", use_altorg=True)
 
     print(f"\nDone. Set data.nle_data_dir: {args.output_dir} in your experiment config.")
 
 
-def _download_nao_top10(args: argparse.Namespace) -> None:
-    tar_dir    = os.path.join(args.output_dir, "zips", "nao-top10")
-    tar_path   = os.path.join(tar_dir, "nao_top10.tar")
+def _download_nao_top10(args: DownloadArgs) -> None:
+    tar_dir     = os.path.join(args.output_dir, "zips", "nao-top10")
+    tar_path    = os.path.join(tar_dir, "nao_top10.tar")
     extract_dir = os.path.join(args.output_dir, "nao-top10")
 
     os.makedirs(tar_dir, exist_ok=True)
@@ -194,11 +239,16 @@ def _download_nao_top10(args: argparse.Namespace) -> None:
     print(f"Downloading nao_top10.tar (~11.8 GB) to {tar_path} ...")
     _download(_NAO_TOP10_URL, tar_path)
 
-    print(f"\nExtracting to {extract_dir} ...")
-    _untar(tar_path, extract_dir)
+    if _is_done(extract_dir):
+        print(f"Already extracted to {extract_dir}, skipping.")
+    else:
+        print(f"\nExtracting to {extract_dir} ...")
+        _untar(tar_path, extract_dir)
+        _mark_done(extract_dir)
 
     if not args.keep_zips:
-        os.remove(tar_path)
+        if os.path.exists(tar_path):
+            os.remove(tar_path)
         try:
             os.rmdir(tar_dir)
         except OSError:
@@ -207,9 +257,33 @@ def _download_nao_top10(args: argparse.Namespace) -> None:
     print(f"\nDone. Set data.nle_data_dir: {args.output_dir} in your experiment config.")
 
 
-def _download_all(args: argparse.Namespace) -> None:
+def _download_all(args: DownloadArgs) -> None:
     for fn in (_download_nld_aa, _download_nld_nao, _download_nao_top10):
         fn(args)
+
+
+# --------------------------------------------------------------------------- #
+# --- Subcommand types ------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class NldAaArgs(DownloadArgs):
+    """NLD-AA (Autoascend AI gameplay, 16 zips, ~100 GB)"""
+
+
+@dataclass
+class NldNaoArgs(DownloadArgs):
+    """NLD-NAO (NetHack.alt.org, 41 zips, ~500 GB)"""
+
+
+@dataclass
+class NaoTop10Args(DownloadArgs):
+    """NAO Top-10 processed .npz dataset from DeepMind (1 tar, ~12 GB)"""
+
+
+@dataclass
+class AllArgs(DownloadArgs):
+    """Download all three datasets sequentially"""
 
 
 # --------------------------------------------------------------------------- #
@@ -217,38 +291,22 @@ def _download_all(args: argparse.Namespace) -> None:
 # --------------------------------------------------------------------------- #
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Download NLD datasets for LOM pre-training.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    cfg = tyro.cli(
+        Union[
+            Annotated[NldAaArgs,    tyro.conf.subcommand("nld-aa")],
+            Annotated[NldNaoArgs,   tyro.conf.subcommand("nld-nao")],
+            Annotated[NaoTop10Args, tyro.conf.subcommand("nao-top10")],
+            Annotated[AllArgs,      tyro.conf.subcommand("all")],
+        ]
     )
-    sub = parser.add_subparsers(dest="dataset", required=True)
-
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--output_dir", default="nle_data",
-                        help="Root directory for the dataset")
-    common.add_argument("--workers", type=int, default=4,
-                        help="Parallel download workers (zip datasets only)")
-    common.add_argument("--keep_zips", action="store_true",
-                        help="Keep archives after extraction")
-
-    sub.add_parser("nld-aa",    parents=[common],
-                   help="NLD-AA (Autoascend AI gameplay, 16 zips)")
-    sub.add_parser("nld-nao",   parents=[common],
-                   help="NLD-NAO (NetHack.alt.org, 41 zips)")
-    sub.add_parser("nao-top10", parents=[common],
-                   help="NAO Top-10 processed .npz dataset from DeepMind (1 tar)")
-    sub.add_parser("all",       parents=[common],
-                   help="Download all three datasets")
-
-    args = parser.parse_args()
-
-    dispatch = {
-        "nld-aa":    _download_nld_aa,
-        "nld-nao":   _download_nld_nao,
-        "nao-top10": _download_nao_top10,
-        "all":       _download_all,
-    }
-    dispatch[args.dataset](args)
+    if isinstance(cfg, NldAaArgs):
+        _download_nld_aa(cfg)
+    elif isinstance(cfg, NldNaoArgs):
+        _download_nld_nao(cfg)
+    elif isinstance(cfg, NaoTop10Args):
+        _download_nao_top10(cfg)
+    elif isinstance(cfg, AllArgs):
+        _download_all(cfg)
 
 
 if __name__ == "__main__":
