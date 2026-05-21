@@ -32,6 +32,34 @@ _SCREEN_W = 80
 # --------------------------------------------------------------------------- #
 
 
+def _ensure_nao_db(nle_data_dir: str, db_path: str) -> None:
+    """Build nao.db from local unzipped altorg files if the database is missing."""
+    if os.path.exists(db_path):
+        return
+
+    unzipped = os.path.join(nle_data_dir, "nld-nao")
+    if not os.path.isdir(unzipped):
+        raise RuntimeError(
+            f"NAO database not found at {db_path}.\n"
+            f"Download the dataset first:\n"
+            f"  python -m scripts.download_nao --output_dir {nle_data_dir}"
+        )
+
+    log.info("nao.db not found — building from %s ...", unzipped)
+    try:
+        import nle.dataset as nld
+        import nle.dataset.db as nld_db
+    except ImportError:
+        raise ImportError(
+            "NLE is not installed.\n"
+            "  pip install git+https://github.com/NetHack-LE/nle.git@main"
+        )
+
+    nld_db.create(filename=db_path)
+    nld.add_altorg_directory(unzipped, "nao", filename=db_path)
+    log.info("NAO database built at %s", db_path)
+
+
 def _load_from_nle_db(
     db_path: str,
     top_n: Optional[int],
@@ -47,8 +75,8 @@ def _load_from_nle_db(
         from nle.dataset import dataset as nle_dataset  # nle ≥ 0.9
     except ImportError:
         raise ImportError(
-            "NLE is not installed. Install it with: pip install nle\n"
-            "See https://github.com/NetHack-LE/nle for system requirements."
+            "NLE is not installed.\n"
+            "  pip install git+https://github.com/NetHack-LE/nle.git@main"
         )
 
     keys = [_OBS_KEY, _ACTION_KEY] if include_actions else [_OBS_KEY]
@@ -116,11 +144,11 @@ def load_nao_top10(
         (obs_seqs, action_seqs) — action_seqs is empty when include_actions=False
     """
     db = os.path.join(nle_data_dir, "nao.db")
-    if os.path.exists(db):
-        try:
-            return _load_from_nle_db(db_path=db, top_n=10, include_actions=include_actions)
-        except ImportError as e:
-            log.warning("NLE import failed (%s); trying numpy fallback.", e)
+    try:
+        _ensure_nao_db(nle_data_dir, db)
+        return _load_from_nle_db(db_path=db, top_n=10, include_actions=include_actions)
+    except (RuntimeError, ImportError) as e:
+        log.warning("NLE DB unavailable (%s); trying numpy fallback.", e)
 
     if fallback_numpy_dir and os.path.isdir(fallback_numpy_dir):
         return _load_from_numpy(fallback_numpy_dir, top_n=10)
@@ -129,7 +157,7 @@ def load_nao_top10(
         "Could not load NAO Top-10 dataset.\n"
         f"  Tried NLE DB at: {db}\n"
         f"  Tried numpy dir: {fallback_numpy_dir}\n"
-        "Install NLE (pip install nle) or provide pre-extracted numpy files."
+        "Run: python -m scripts.download_nao --output_dir <nle_data_dir>"
     )
 
 
@@ -144,16 +172,19 @@ def load_nao_full(
     Same API as load_nao_top10 but without the top-10 restriction.
     """
     db = os.path.join(nle_data_dir, "nao.db")
-    if os.path.exists(db):
-        try:
-            return _load_from_nle_db(db_path=db, top_n=max_games, include_actions=include_actions)
-        except ImportError as e:
-            log.warning("NLE import failed (%s); trying numpy fallback.", e)
+    try:
+        _ensure_nao_db(nle_data_dir, db)
+        return _load_from_nle_db(db_path=db, top_n=max_games, include_actions=include_actions)
+    except (RuntimeError, ImportError) as e:
+        log.warning("NLE DB unavailable (%s); trying numpy fallback.", e)
 
     if fallback_numpy_dir and os.path.isdir(fallback_numpy_dir):
         return _load_from_numpy(fallback_numpy_dir, top_n=max_games)
 
-    raise RuntimeError("Could not load NAO full dataset. See load_nao_top10 for details.")
+    raise RuntimeError(
+        "Could not load NAO full dataset.\n"
+        "Run: python -m scripts.download_nao --output_dir <nle_data_dir>"
+    )
 
 
 # --------------------------------------------------------------------------- #

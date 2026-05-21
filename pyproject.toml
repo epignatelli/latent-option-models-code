@@ -19,13 +19,11 @@ dependencies = [
   "tyro",
   "wandb",
   "tqdm",
-  # NLE and dataset — install separately (requires system NetHack build)
-  # pip install nle  (see https://github.com/NetHack-LE/nle)
+  "nle @ git+https://github.com/NetHack-LE/nle.git@main",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov"]
-nle = ["nle>=0.9"]
 
 [tool.setuptools.packages.find]
 include = ["lom*"]
@@ -35,6 +33,7 @@ line-length = 100
 
 [project.scripts]
 lom-pretrain = "scripts.pretrain:main"
+lom-download-nao = "scripts.download_nao:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
