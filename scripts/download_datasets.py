@@ -207,6 +207,11 @@ def _download_nao_top10(args: argparse.Namespace) -> None:
     print(f"\nDone. Set data.nle_data_dir: {args.output_dir} in your experiment config.")
 
 
+def _download_all(args: argparse.Namespace) -> None:
+    for fn in (_download_nld_aa, _download_nld_nao, _download_nao_top10):
+        fn(args)
+
+
 # --------------------------------------------------------------------------- #
 # --- Main ------------------------------------------------------------------ #
 # --------------------------------------------------------------------------- #
@@ -232,6 +237,8 @@ def main() -> None:
                    help="NLD-NAO (NetHack.alt.org, 41 zips)")
     sub.add_parser("nao-top10", parents=[common],
                    help="NAO Top-10 processed .npz dataset from DeepMind (1 tar)")
+    sub.add_parser("all",       parents=[common],
+                   help="Download all three datasets")
 
     args = parser.parse_args()
 
@@ -239,6 +246,7 @@ def main() -> None:
         "nld-aa":    _download_nld_aa,
         "nld-nao":   _download_nld_nao,
         "nao-top10": _download_nao_top10,
+        "all":       _download_all,
     }
     dispatch[args.dataset](args)
 
