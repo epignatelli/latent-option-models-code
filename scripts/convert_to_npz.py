@@ -14,9 +14,8 @@ Usage:
     python -m scripts.convert_to_npz --dataset all     --nle-data-dir /scratch/uceeepi/lom/datasets
 
 Memory note:
-    nld-aa games are 2.5M frames (~15 GB peak per worker). Use --workers 2 if RAM
-    is limited. nld-nao games are short (<10k frames); --workers 8+ is fine.
-    --dataset all runs nld-aa first (workers=2), then nld-nao (workers=8).
+    nld-aa peaks at ~15 GB RAM per worker. On this machine (375 GB, 128 cores)
+    --workers 20 is safe for nld-aa. nld-nao is I/O-bound; 32 is a good cap.
 """
 
 from __future__ import annotations
@@ -47,8 +46,10 @@ class Args:
     """Root directory containing nld-aa/ or nld-nao/ subdirectories."""
     output_dir: str = ""
     """Output directory. Defaults to <nle_data_dir>/<dataset>-npz (ignored for 'all')."""
-    workers: int = 4
-    """Number of parallel worker processes."""
+    workers: int = 20
+    """Number of parallel worker processes.
+    On this machine (375 GB RAM, 128 cores): nld-aa peaks at ~15 GB/worker
+    so 20 workers is safe. nld-nao is I/O-bound; 32 is a reasonable cap."""
     min_frames: int = 50
     """Minimum decoded frames to keep. Applied to nld-nao only (nld-aa: no filter)."""
 
@@ -230,8 +231,7 @@ def main() -> None:
     args = tyro.cli(Args)
 
     if args.dataset == "all":
-        # nld-aa first (memory-heavy, fewer workers), then nld-nao
-        _run_one("nld-aa",  args.nle_data_dir, "", 2,            args.min_frames)
+        _run_one("nld-aa",  args.nle_data_dir, "", args.workers, args.min_frames)
         _run_one("nld-nao", args.nle_data_dir, "", args.workers, args.min_frames)
     else:
         _run_one(args.dataset, args.nle_data_dir, args.output_dir, args.workers, args.min_frames)
