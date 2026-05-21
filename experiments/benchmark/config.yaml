@@ -12,7 +12,7 @@ sweep:
 
 data:
   nle_data_dir: /scratch/uceeepi/lom/datasets
-  dataset: top10
+  dataset: nao-top10
   context_len: 128
   horizon: 128
   num_workers: 4

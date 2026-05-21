@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from .config import LAMCfg, LOMCfg
-from .dataset import build_dataloaders, load_nao_full, load_nao_top10
+from .dataset import build_dataloaders, load_nao_top10, load_nld_nao, load_nld_aa
 from .models import DynamicsModel, LatentActionModel
 
 log = logging.getLogger(__name__)
@@ -65,7 +65,8 @@ class Trainer(ABC):
         torch.manual_seed(t.seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        loader_fn = load_nao_top10 if d.dataset == "top10" else load_nao_full
+        _loaders = {"nao-top10": load_nao_top10, "nld-nao": load_nld_nao, "nld-aa": load_nld_aa}
+        loader_fn = _loaders[d.dataset]
         sequences, _ = loader_fn(
             nle_data_dir=d.nle_data_dir, fallback_numpy_dir=d.fallback_numpy_dir
         )

@@ -39,7 +39,7 @@ class LOMModelCfg(ModelCfg):
 
 @dataclass
 class DataCfg:
-    dataset: Literal["top10", "full"] = "top10"
+    dataset: Literal["nao-top10", "nld-nao", "nld-aa"] = "nao-top10"
     nle_data_dir: str = "nle_data"
     fallback_numpy_dir: Optional[str] = None
     context_len: int = 4
