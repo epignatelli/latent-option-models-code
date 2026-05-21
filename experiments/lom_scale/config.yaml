@@ -4,7 +4,7 @@
 # All other hyperparameters are held fixed.
 
 # --- Paths -------------------------------------------------------------------
-ckpt_root: /scratch/$USER/lom/checkpoints/lom_scale
+ckpt_root: /scratch/uceeepi/lom/checkpoints/lom_scale
 nle_data_dir: nle_data
 
 # --- Data --------------------------------------------------------------------
@@ -30,4 +30,4 @@ eval_iters: 50
 wandb_project: latent-option-models
 wandb_entity: epignatelli_
 wandb_group: lom_scale
-wandb_dir: /scratch/$USER/lom/wandb
+wandb_dir: /scratch/uceeepi/lom/wandb
