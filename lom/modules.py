@@ -25,6 +25,9 @@ from torch.nn import functional as F
 class SerialisableModule(nn.Module):
     """nn.Module with save / load helpers."""
 
+    def num_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+
     def save(self, path: str) -> None:
         config = {k: v for k, v in vars(self).items() if not isinstance(v, nn.Module)}
         torch.save(

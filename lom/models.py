@@ -175,8 +175,6 @@ class LatentActionModel(SerialisableModule):
         z = self.ln_vq(self.vq_proj(opt_pooled))
         return self.vq(z)
 
-    def num_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters())
 
 
 # --------------------------------------------------------------------------- #
@@ -229,7 +227,9 @@ class DynamicsModel(SerialisableModule):
 
         self.char_embed = nn.Embedding(vocab_size, d_model)
         self.action_proj = nn.Linear(latent_dim, d_model, bias=bias)
-        self.goal_proj = nn.Linear(option_dim, d_model, bias=bias) if option_dim is not None else None
+        self.goal_proj = (
+            nn.Linear(option_dim, d_model, bias=bias) if option_dim is not None else None
+        )
         self.trunk = SpatioTemporalTransformer(
             d_model=d_model,
             n_layers=n_layers,
