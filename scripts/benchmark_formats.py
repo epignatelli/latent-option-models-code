@@ -32,12 +32,13 @@ def _load_episodes(db_path: str, dataset_name: str, n: int):
         dataset_name=dataset_name,
         dbfilename=db_path,
         seq_length=SEQ_LEN,
+        batch_size=1,
     )
     episodes = []
     for i, ep in enumerate(ds):
         if i >= n:
             break
-        arr = ep["tty_chars"]  # (T, 24, 80) uint8, possibly zero-padded
+        arr = ep["tty_chars"][0]  # (1, T, 24, 80) → (T, 24, 80) uint8, possibly zero-padded
         # trim trailing all-zero frames (padding)
         nonzero = np.any(arr != 0, axis=(1, 2))
         last = int(np.max(np.where(nonzero))) + 1 if nonzero.any() else 1
