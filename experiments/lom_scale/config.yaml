@@ -8,7 +8,7 @@ sweep:
   seeds: [0, 1, 2]
 
 data:
-  nle_data_dir: /scratch/uceeepi/lom/datasets/nle/nao
+  nle_data_dir: /scratch/uceeepi/lom/datasets
   dataset: top10
   context_len: 128
   horizon: 128
