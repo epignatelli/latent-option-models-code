@@ -26,16 +26,22 @@ class Args:
 
 def _load_episodes(db_path: str, dataset_name: str, n: int):
     from nle.dataset import dataset as nle_dataset
+    # TtyrecDataset requires a fixed seq_length; use a large cap and trim trailing blank frames
+    SEQ_LEN = 100_000
     ds = nle_dataset.TtyrecDataset(
         dataset_name=dataset_name,
         dbfilename=db_path,
-        seq_length=None,
+        seq_length=SEQ_LEN,
     )
     episodes = []
     for i, ep in enumerate(ds):
         if i >= n:
             break
-        episodes.append(ep["tty_chars"])  # (T, 24, 80) uint8
+        arr = ep["tty_chars"]  # (T, 24, 80) uint8, possibly zero-padded
+        # trim trailing all-zero frames (padding)
+        nonzero = np.any(arr != 0, axis=(1, 2))
+        last = int(np.max(np.where(nonzero))) + 1 if nonzero.any() else 1
+        episodes.append(arr[:last])
     return episodes
 
 
