@@ -37,6 +37,7 @@ from torch.nn import functional as F
 
 from .modules import (
     LayerNorm,
+    PatchEmbedding,
     SpatioTemporalTransformer,
     VectorQuantizer,
     SerialisableModule,
@@ -78,6 +79,7 @@ class LatentActionModel(SerialisableModule):
         latent_dim: int,
         codebook_size: int,
         horizon: int = 1,
+        patch_size: int = 1,
         condition_dim: Optional[int] = None,
         vq_dropout: float = 0.1,
         vq_entropy_weight: float = 0.01,
@@ -87,11 +89,9 @@ class LatentActionModel(SerialisableModule):
         bias: bool = False,
     ):
         super().__init__()
-        S = obs_h * obs_w
         self.vocab_size = vocab_size
         self.obs_h = obs_h
         self.obs_w = obs_w
-        self.S = S
         self.n_layers = n_layers
         self.n_heads = n_heads
         self.d_model = d_model
@@ -99,6 +99,7 @@ class LatentActionModel(SerialisableModule):
         self.context_length = context_length
         self.codebook_size = codebook_size
         self.horizon = horizon
+        self.patch_size = patch_size
         self.condition_dim = condition_dim
         self.vq_dropout = vq_dropout
         self.vq_entropy_weight = vq_entropy_weight
@@ -108,10 +109,12 @@ class LatentActionModel(SerialisableModule):
         self.bias = bias
         self.has_condition = condition_dim is not None
 
+        self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
+        S = self.S = self.embed.n_tokens
+
         # temporal positions: history + optional cond token + OPT + future frames
         max_temporal_len = context_length + (1 if self.has_condition else 0) + 1 + horizon
 
-        self.char_embed = nn.Embedding(vocab_size, d_model)
         self.cond_proj = (
             nn.Linear(condition_dim, d_model, bias=bias) if self.has_condition else None
         )
@@ -165,8 +168,8 @@ class LatentActionModel(SerialisableModule):
             future = future.unsqueeze(1)  # (B, 1, H, W)
         k = future.shape[1]
 
-        hist_emb = self.char_embed(history.reshape(B, c, self.S))
-        fut_emb = self.char_embed(future.reshape(B, k, self.S))
+        hist_emb = self.embed(history)           # (B, c, S, D)
+        fut_emb  = self.embed(future)            # (B, k, S, D)
         opt_emb = self.opt_token.expand(B, 1, self.S, self.d_model)
 
         parts = [hist_emb]
@@ -220,15 +223,14 @@ class DynamicsModel(SerialisableModule):
         option_dim: Optional[int] = None,
         predict_sequence: bool = False,
         horizon: int = 1,
+        patch_size: int = 1,
         dropout: float = 0.0,
         bias: bool = False,
     ):
         super().__init__()
-        S = obs_h * obs_w
         self.vocab_size = vocab_size
         self.obs_h = obs_h
         self.obs_w = obs_w
-        self.S = S
         self.n_layers = n_layers
         self.n_heads = n_heads
         self.d_model = d_model
@@ -237,12 +239,15 @@ class DynamicsModel(SerialisableModule):
         self.option_dim = option_dim
         self.predict_sequence = predict_sequence
         self.horizon = horizon
+        self.patch_size = patch_size
         self.dropout = dropout
         self.bias = bias
 
+        self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
+        S = self.S = self.embed.n_tokens
+
         max_temporal_len = context_length + horizon - 1 if predict_sequence else context_length
 
-        self.char_embed = nn.Embedding(vocab_size, d_model)
         self.action_proj = nn.Linear(latent_dim, d_model, bias=bias)
         self.goal_proj = (
             nn.Linear(option_dim, d_model, bias=bias) if option_dim is not None else None
@@ -258,13 +263,33 @@ class DynamicsModel(SerialisableModule):
             causal_temporal=True,
         )
         self.ln_trunk = LayerNorm(d_model, bias)
-        self.state_head = nn.Linear(d_model, vocab_size, bias=bias)
+        # each patch token predicts all patch_size² characters in its patch
+        self.state_head = nn.Linear(d_model, vocab_size * patch_size ** 2, bias=bias)
 
     def _cond(self, action: torch.Tensor, option_code: Optional[torch.Tensor]) -> torch.Tensor:
         c = self.action_proj(action)
         if option_code is not None and self.goal_proj is not None:
             c = c + self.goal_proj(option_code)
         return c.view(action.shape[0], 1, 1, self.d_model)  # (B, 1, 1, D) — broadcasts over (T, S)
+
+    def _unpatch_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """Convert patch-level logits to character-level logits.
+
+        Args:
+            logits: (..., n_tokens, patch_size² * vocab_size)
+        Returns:
+            (..., H*W, vocab_size)
+        """
+        P = self.patch_size
+        if P == 1:
+            return logits
+        H, W, V = self.obs_h, self.obs_w, self.vocab_size
+        prefix = logits.shape[:-2]
+        # (..., n_tokens, P²*V) → (N, H/P, W/P, P, P, V) → (N, H, W, V) → (..., H*W, V)
+        flat = logits.reshape(-1, H // P, W // P, P, P, V)
+        flat = flat.permute(0, 1, 3, 2, 4, 5).contiguous()   # (N, H/P, P, W/P, P, V)
+        flat = flat.reshape(-1, H * W, V)
+        return flat.reshape(*prefix, H * W, V)
 
     def forward(
         self,
@@ -282,38 +307,33 @@ class DynamicsModel(SerialisableModule):
             horizon:        number of frames to predict
             teacher_frames: (B, horizon, H, W) long — teacher forcing, training only
         Returns:
-            (B, S, vocab_size)            if predict_sequence=False
-            (B, horizon, S, vocab_size)   if predict_sequence=True
+            (B, H*W, vocab_size)            if predict_sequence=False
+            (B, horizon, H*W, vocab_size)   if predict_sequence=True
         """
         B, c = history.shape[:2]
-        S = self.S
         cond = self._cond(action, option_code)  # (B, 1, 1, D)
 
         if self.predict_sequence:
             if teacher_frames is not None:
-                # Single forward pass with teacher forcing (training).
-                # Input:  [h_0, …, h_{c-1}, f_0, …, f_{n-2}]
-                # Targets at positions c-1 … c+n-2 predict f_0 … f_{n-1}
                 inp = torch.cat([history, teacher_frames[:, :-1]], dim=1)  # (B, c+n-1, H, W)
-                emb = self.char_embed(inp.reshape(B, c + horizon - 1, S)) + cond
+                emb = self.embed(inp) + cond
                 hid = self.ln_trunk(self.trunk(emb))
-                return self.state_head(hid[:, c - 1 : c + horizon - 1, :, :])  # (B, n, S, V)
+                logits = self.state_head(hid[:, c - 1 : c + horizon - 1])  # (B, n, S, P²V)
+                return self._unpatch_logits(logits)                          # (B, n, H*W, V)
             else:
-                # Autoregressive rollout (inference).
                 frames, current = [], history
                 for _ in range(horizon):
-                    emb = self.char_embed(current.reshape(B, current.shape[1], S)) + cond
+                    emb = self.embed(current) + cond
                     hid = self.ln_trunk(self.trunk(emb))
-                    logits = self.state_head(hid[:, -1, :, :])  # (B, S, V)
+                    logits = self._unpatch_logits(self.state_head(hid[:, -1]))  # (B, H*W, V)
                     frames.append(logits)
                     next_f = logits.argmax(dim=-1).reshape(B, 1, self.obs_h, self.obs_w)
-                    current = torch.cat([current[:, 1:], next_f], dim=1)  # slide window
-                return torch.stack(frames, dim=1)  # (B, n, S, V)
+                    current = torch.cat([current[:, 1:], next_f], dim=1)
+                return torch.stack(frames, dim=1)  # (B, n, H*W, V)
 
-        # Single-frame prediction.
-        emb = self.char_embed(history.reshape(B, c, S)) + cond
+        emb = self.embed(history) + cond
         hid = self.ln_trunk(self.trunk(emb))
-        return self.state_head(hid[:, -1, :, :])  # (B, S, V)
+        return self._unpatch_logits(self.state_head(hid[:, -1]))  # (B, H*W, V)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())

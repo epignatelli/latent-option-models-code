@@ -154,3 +154,67 @@ def test_dynamics_backward():
     target = torch.randint(0, VOCAB, (BATCH, S))
     loss = torch.nn.functional.cross_entropy(logits.reshape(-1, VOCAB), target.reshape(-1))
     loss.backward()
+
+
+# --------------------------------------------------------------------------- #
+# --- Patch embedding in models --------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+PATCH = 2  # OBS_H=OBS_W=4, so 4//2=2 tokens per dim → 4 tokens/frame
+
+
+def make_lam_patched(horizon=1):
+    return LatentActionModel(
+        vocab_size=VOCAB, obs_h=OBS_H, obs_w=OBS_W, d_model=D_MODEL,
+        n_layers=N_LAYERS, n_heads=N_HEADS, context_length=CONTEXT,
+        latent_dim=LATENT_DIM, codebook_size=32, horizon=horizon, patch_size=PATCH,
+    )
+
+
+def make_dynamics_patched(predict_sequence=False):
+    return DynamicsModel(
+        vocab_size=VOCAB, obs_h=OBS_H, obs_w=OBS_W, d_model=D_MODEL,
+        n_layers=N_LAYERS, n_heads=N_HEADS, context_length=CONTEXT,
+        latent_dim=LATENT_DIM, predict_sequence=predict_sequence,
+        horizon=HORIZON if predict_sequence else 1, patch_size=PATCH,
+    )
+
+
+def test_lam_patch_output_shape():
+    lam = make_lam_patched()
+    z, _, idx = lam(history(), single_frame())
+    assert z.shape == (BATCH, LATENT_DIM)
+    assert idx.shape == (BATCH,)
+
+
+def test_lam_patch_sequence_future():
+    lam = make_lam_patched(horizon=HORIZON)
+    z, _, _ = lam(history(), frame_sequence(HORIZON))
+    assert z.shape == (BATCH, LATENT_DIM)
+
+
+def test_dynamics_patch_single_frame():
+    # output must be character-level regardless of patch size
+    dyn = make_dynamics_patched()
+    logits = dyn(history(), action())
+    assert logits.shape == (BATCH, S, VOCAB)
+
+
+def test_dynamics_patch_sequence_teacher():
+    dyn = make_dynamics_patched(predict_sequence=True)
+    logits = dyn(history(), action(), horizon=HORIZON, teacher_frames=frame_sequence(HORIZON))
+    assert logits.shape == (BATCH, HORIZON, S, VOCAB)
+
+
+def test_dynamics_patch_sequence_autoregressive():
+    dyn = make_dynamics_patched(predict_sequence=True)
+    logits = dyn(history(), action(), horizon=HORIZON)
+    assert logits.shape == (BATCH, HORIZON, S, VOCAB)
+
+
+def test_dynamics_patch_backward():
+    dyn = make_dynamics_patched()
+    logits = dyn(history(), action())
+    target = torch.randint(0, VOCAB, (BATCH, S))
+    loss = torch.nn.functional.cross_entropy(logits.reshape(-1, VOCAB), target.reshape(-1))
+    loss.backward()

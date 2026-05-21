@@ -281,6 +281,7 @@ class LAMTrainer(Trainer):
             n_heads=m.n_heads,
             context_length=m.context_length,
             latent_dim=m.latent_dim,
+            patch_size=m.patch_size,
             dropout=m.dropout,
             bias=m.bias,
         )
@@ -331,6 +332,7 @@ class LOMTrainer(Trainer):
             n_heads=m.n_heads,
             context_length=m.context_length,
             latent_dim=m.latent_dim,
+            patch_size=m.patch_size,
             dropout=m.dropout,
             bias=m.bias,
         )

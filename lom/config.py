@@ -24,6 +24,7 @@ class ModelCfg:
     vq_entropy_weight: float = 0.01
     vq_beta: float = 0.25
     vq_reset_thresh: int = 100
+    patch_size: int = 1
     dropout: float = 0.0
     bias: bool = False
 

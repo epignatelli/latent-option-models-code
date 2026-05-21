@@ -1,8 +1,8 @@
 import pytest
 import torch
-from lom.modules import VectorQuantizer, SpatioTemporalTransformer
+from lom.modules import PatchEmbedding, VectorQuantizer, SpatioTemporalTransformer
 
-from conftest import BATCH, D_MODEL, LATENT_DIM, N_HEADS, N_LAYERS, S
+from conftest import BATCH, CONTEXT, D_MODEL, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 
 
 # --------------------------------------------------------------------------- #
@@ -98,3 +98,33 @@ def test_stt_temporal_mask(stt):
     mask[0, 0, 0, 1:] = float("-inf")
     out = stt(x, temporal_mask=mask)
     assert out.shape == (BATCH, T, S, D_MODEL)
+
+
+# --------------------------------------------------------------------------- #
+# --- PatchEmbedding -------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+def test_patch_embed_no_patch_shape():
+    pe = PatchEmbedding(VOCAB, D_MODEL, OBS_H, OBS_W, patch_size=1)
+    x = torch.randint(0, VOCAB, (BATCH, CONTEXT, OBS_H, OBS_W))
+    out = pe(x)
+    assert out.shape == (BATCH, CONTEXT, OBS_H * OBS_W, D_MODEL)
+
+
+def test_patch_embed_with_patch_shape():
+    # OBS_H=OBS_W=4, patch_size=2 → 2×2=4 tokens per frame
+    pe = PatchEmbedding(VOCAB, D_MODEL, OBS_H, OBS_W, patch_size=2)
+    x = torch.randint(0, VOCAB, (BATCH, CONTEXT, OBS_H, OBS_W))
+    out = pe(x)
+    n_tokens = (OBS_H // 2) * (OBS_W // 2)
+    assert out.shape == (BATCH, CONTEXT, n_tokens, D_MODEL)
+
+
+def test_patch_embed_token_count():
+    pe = PatchEmbedding(VOCAB, D_MODEL, OBS_H, OBS_W, patch_size=2)
+    assert pe.n_tokens == (OBS_H // 2) * (OBS_W // 2)
+
+
+def test_patch_embed_bad_divisibility():
+    with pytest.raises(AssertionError):
+        PatchEmbedding(VOCAB, D_MODEL, OBS_H, OBS_W, patch_size=3)  # 4 not divisible by 3

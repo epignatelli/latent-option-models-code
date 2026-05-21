@@ -3,7 +3,7 @@ from .config import (
     LAMCfg, LOMCfg,
 )
 from .models import LatentActionModel, DynamicsModel
-from .modules import SpatioTemporalTransformer, VectorQuantizer
+from .modules import PatchEmbedding, SpatioTemporalTransformer, VectorQuantizer
 from .dataset import TrajectoryDataset, load_nao_top10, load_nld_nao, load_nld_aa, build_dataloaders
 from .training import Trainer, LAMTrainer, LOMTrainer
 
@@ -11,7 +11,7 @@ __all__ = [
     "EnvCfg", "ModelCfg", "LOMModelCfg", "DataCfg", "TrainCfg", "WandbCfg",
     "LAMCfg", "LOMCfg",
     "LatentActionModel", "DynamicsModel",
-    "SpatioTemporalTransformer", "VectorQuantizer",
+    "PatchEmbedding", "SpatioTemporalTransformer", "VectorQuantizer",
     "TrajectoryDataset", "load_nao_top10", "load_nld_nao", "load_nld_aa", "build_dataloaders",
     "Trainer", "LAMTrainer", "LOMTrainer",
 ]

@@ -256,6 +256,69 @@ class SpatioTemporalTransformer(nn.Module):
 
 
 # --------------------------------------------------------------------------- #
+# --- Patch Embedding ------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+
+class PatchEmbedding(nn.Module):
+    """Embeds (B, T, H, W) discrete frames into (B, T, n_tokens, d_model) patch tokens.
+
+    patch_size=1  — equivalent to a plain character embedding (no spatial compression).
+    patch_size=P  — each P×P block of characters is embedded and linearly projected
+                    into a single d_model token.  n_tokens = (H//P) * (W//P).
+
+    H and W must be divisible by patch_size.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        obs_h: int,
+        obs_w: int,
+        patch_size: int = 1,
+        bias: bool = False,
+    ):
+        super().__init__()
+        assert obs_h % patch_size == 0 and obs_w % patch_size == 0, (
+            f"obs_h={obs_h} and obs_w={obs_w} must both be divisible by patch_size={patch_size}"
+        )
+        self.patch_size = patch_size
+        self.obs_h = obs_h
+        self.obs_w = obs_w
+        self.d_model = d_model
+        self.n_tokens = (obs_h // patch_size) * (obs_w // patch_size)
+
+        self.char_embed = nn.Embedding(vocab_size, d_model)
+        self.patch_proj = (
+            nn.Linear(patch_size ** 2 * d_model, d_model, bias=bias)
+            if patch_size > 1 else None
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, T, H, W) long
+        Returns:
+            (B, T, n_tokens, d_model)
+        """
+        B, T, H, W = x.shape
+        P, D = self.patch_size, self.d_model
+
+        emb = self.char_embed(x)  # (B, T, H, W, D)
+
+        if self.patch_proj is not None:
+            emb = emb.reshape(B, T, H // P, P, W // P, P, D)
+            emb = emb.permute(0, 1, 2, 4, 3, 5, 6).contiguous()  # (B, T, H/P, W/P, P, P, D)
+            emb = emb.reshape(B, T, self.n_tokens, P * P * D)
+            emb = self.patch_proj(emb)                             # (B, T, n_tokens, D)
+        else:
+            emb = emb.reshape(B, T, self.n_tokens, D)
+
+        return emb
+
+
+# --------------------------------------------------------------------------- #
 # --- Vector Quantizer ------------------------------------------------------ #
 # --------------------------------------------------------------------------- #
 
