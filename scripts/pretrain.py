@@ -25,6 +25,8 @@ from lom.training import LAMTrainer, LOMTrainer
 def yaml_to_args(d: dict, prefix: str = "") -> list[str]:
     args = []
     for k, v in d.items():
+        if not prefix and k == "sweep":  # experiment metadata, not model config
+            continue
         key = f"{prefix}.{k}" if prefix else k
         if isinstance(v, dict):
             args.extend(yaml_to_args(v, key))

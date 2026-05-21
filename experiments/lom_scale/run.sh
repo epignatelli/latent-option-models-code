@@ -22,7 +22,9 @@ cd "${ROOT}"
 _cfg() { python3 -c "
 import yaml, os
 c = yaml.safe_load(open('${CFG}'))
-v = c['$1']
+v = c
+for k in '$1'.split('.'):
+    v = v[k]
 expand = lambda s: os.path.expandvars(str(s))
 print(' '.join(expand(str(x)) for x in v) if isinstance(v, list) else expand(v))
 "; }
@@ -91,25 +93,9 @@ _cleanup() {
 trap _cleanup SIGINT SIGTERM
 
 # ---------------------------------------------------------------------------
-CKPT_ROOT=$(_cfg ckpt_root)
-NLE_DATA_DIR=$(_cfg nle_data_dir)
-DATASET=$(_cfg dataset)
-BATCH_SIZE=$(_cfg batch_size)
-NUM_WORKERS=$(_cfg num_workers)
-MAX_ITERS=$(_cfg max_iters)
-LOG_INTERVAL=$(_cfg log_interval)
-EVAL_INTERVAL=$(_cfg eval_interval)
-EVAL_ITERS=$(_cfg eval_iters)
-LATENT_DIM=$(_cfg latent_dim)
-PREDICT_SEQUENCE=$(_cfg predict_sequence)
-CONTEXT_LEN=$(_cfg context_len)
-HORIZON=$(_cfg horizon)
-WANDB_PROJECT=$(_cfg wandb_project)
-WANDB_ENTITY=$(_cfg wandb_entity)
-WANDB_GROUP=$(_cfg wandb_group)
-WANDB_DIR=$(_cfg wandb_dir)
-read -ra NUM_OPTIONS_LIST <<< "$(_cfg num_options_list)"
-read -ra SEEDS <<< "$(_cfg seeds)"
+CKPT_ROOT=$(_cfg train.ckpt_dir)
+read -ra NUM_OPTIONS_LIST <<< "$(_cfg sweep.num_options_list)"
+read -ra SEEDS <<< "$(_cfg sweep.seeds)"
 
 # ---------------------------------------------------------------------------
 echo "===== LOM codebook size scaling — ${#NUM_OPTIONS_LIST[@]} sizes × ${#SEEDS[@]} seeds ====="
@@ -120,25 +106,10 @@ for size in "${NUM_OPTIONS_LIST[@]}"; do
     echo "  num_options=${size}  seed=${seed}  ckpt=${CKPT_DIR}"
     if ! _done "${CKPT_DIR}"; then
       _launch python3 -m scripts.pretrain lom \
-        --data.nle_data_dir    "${NLE_DATA_DIR}" \
-        --data.dataset         "${DATASET}" \
-        --data.context_len     "${CONTEXT_LEN}" \
-        --data.horizon         "${HORIZON}" \
-        --data.num_workers     "${NUM_WORKERS}" \
-        --model.num_options    "${size}" \
-        --model.latent_dim     "${LATENT_DIM}" \
-        --model.predict_sequence "${PREDICT_SEQUENCE}" \
-        --train.seed           "${seed}" \
-        --train.batch_size     "${BATCH_SIZE}" \
-        --train.max_iters      "${MAX_ITERS}" \
-        --train.log_interval   "${LOG_INTERVAL}" \
-        --train.eval_interval  "${EVAL_INTERVAL}" \
-        --train.eval_iters     "${EVAL_ITERS}" \
-        --train.ckpt_dir       "${CKPT_DIR}" \
-        --wandb.project        "${WANDB_PROJECT}" \
-        --wandb.entity         "${WANDB_ENTITY}" \
-        --wandb.group          "${WANDB_GROUP}" \
-        --wandb.dir            "${WANDB_DIR}" \
+        --config              "${CFG}" \
+        --model.num_options   "${size}" \
+        --train.seed          "${seed}" \
+        --train.ckpt_dir      "${CKPT_DIR}" \
       && touch "${CKPT_DIR}/done"
     fi
   done

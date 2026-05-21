@@ -1,58 +1,129 @@
 #!/usr/bin/env bash
-# Experiment: temporal abstraction
+# Experiment: does temporal abstraction improve latent option quality?
 #
-# Tests whether a latent option spanning k>1 steps (LOM) produces better
-# representations than a single-step latent action code (LAM, baseline).
+# Runs LAM (baseline, horizon=1) and LOM (proposed, horizon=128) across
+# multiple seeds (see config.yaml).
+# If 2+ GPUs are available, fills one slot per GPU, waits when all are busy.
 #
-# Conditions:
-#   LAM  — horizon=1,   num_options=98   (option VQ = one code per atomic action)
-#   LOM  — horizon=128, num_options=256  (option VQ spans 128 steps)
+# Usage:
+#   bash run.sh [--force]
 #
-# Both conditions share the same unified architecture (OptionEncoder + ActionEncoder
-# + shared FrameDecoder) and train in a single stage.
-#
-# Deployment overrides (environment variables):
-#   NLE_DATA_DIR   path to nle_data/    (default: nle_data)
-#   DATASET        top10 | full         (default: top10)
-#   BATCH_SIZE     samples per step     (default: 32)
-#   NUM_WORKERS    DataLoader workers   (default: 4)
+#   --force   re-run jobs even if a 'done' sentinel exists
 set -euo pipefail
 
-NLE_DATA_DIR=${NLE_DATA_DIR:-nle_data}
-DATASET=${DATASET:-top10}
-BATCH_SIZE=${BATCH_SIZE:-32}
-NUM_WORKERS=${NUM_WORKERS:-4}
+FORCE=0
+for _arg in "$@"; do [ "$_arg" = "--force" ] && FORCE=1; done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR/../.."
+ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+CFG="${SCRIPT_DIR}/config.yaml"
+cd "${ROOT}"
 
-CONFIG=experiments/benchmark/config.yaml
-
-# Read base checkpoint dir from config (expands $USER and other env vars)
-BASE_CKPT=$(python -c "
+_cfg() { python3 -c "
 import yaml, os
-d = yaml.safe_load(open('$CONFIG'))
-print(os.path.expandvars(d['train']['ckpt_dir']))
-")
+c = yaml.safe_load(open('${CFG}'))
+v = c
+for k in '$1'.split('.'):
+    v = v[k]
+expand = lambda s: os.path.expandvars(str(s))
+print(' '.join(expand(str(x)) for x in v) if isinstance(v, list) else expand(v))
+"; }
 
-BASE=(
-  --config "$CONFIG"
-  --data.nle_data_dir "$NLE_DATA_DIR"
-  --data.dataset      "$DATASET"
-  --train.batch_size  "$BATCH_SIZE"
-  --data.num_workers  "$NUM_WORKERS"
-)
-
-# ---------------------------------------------------------------------------
-echo "=== LAM (baseline): single encoder, horizon=1, codebook=98 ==="
-python -m scripts.pretrain "${BASE[@]}" \
-  --model.model_type lam --data.horizon 1 --model.num_options 98 \
-  --train.ckpt_dir "$BASE_CKPT/lam" \
-  --wandb.group benchmark_lam
+_done() {
+  [ "${FORCE}" = "1" ] && return 1
+  [ -f "$1/done" ] || return 1
+  echo "    skipping — $1/done sentinel exists"
+}
 
 # ---------------------------------------------------------------------------
-echo "=== LOM (proposed): two encoders + two dynamics, horizon=128, codebook=256 ==="
-python -m scripts.pretrain "${BASE[@]}" \
-  --model.model_type lom \
-  --train.ckpt_dir "$BASE_CKPT/lom" \
-  --wandb.group benchmark_lom
+# GPU parallelism
+# ---------------------------------------------------------------------------
+if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+  IFS=',' read -ra GPU_IDS <<< "${CUDA_VISIBLE_DEVICES}"
+else
+  NUM_DETECTED=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 1)
+  GPU_IDS=()
+  for i in $(seq 0 $((NUM_DETECTED - 1))); do GPU_IDS+=("$i"); done
+fi
+NUM_GPUS=${#GPU_IDS[@]}
+echo "Using ${NUM_GPUS} GPU(s): ${GPU_IDS[*]}"
+
+_GPU_SLOT=0
+_PIDS=()
+
+_COMPILE_STAGGER=30
+
+_launch() {
+  if [ "${NUM_GPUS}" -ge 2 ]; then
+    if [ ${#_PIDS[@]} -ge "${NUM_GPUS}" ]; then
+      wait -n
+      local alive=()
+      for pid in "${_PIDS[@]}"; do
+        kill -0 "$pid" 2>/dev/null && alive+=("$pid")
+      done
+      _PIDS=("${alive[@]+"${alive[@]}"}")
+    fi
+    CUDA_VISIBLE_DEVICES=${GPU_IDS[${_GPU_SLOT}]} "$@" &
+    _PIDS+=($!)
+    _GPU_SLOT=$(( (_GPU_SLOT + 1) % NUM_GPUS ))
+    sleep "${_COMPILE_STAGGER}" & wait $!
+  else
+    "$@"
+  fi
+}
+
+_flush() {
+  if [ ${#_PIDS[@]} -gt 0 ]; then
+    wait "${_PIDS[@]}"
+    _PIDS=()
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# SIGINT/SIGTERM handler — kill all background jobs then exit
+# ---------------------------------------------------------------------------
+_cleanup() {
+  echo ""
+  echo "Caught signal — killing all background jobs..."
+  if [ ${#_PIDS[@]} -gt 0 ]; then
+    kill "${_PIDS[@]}" 2>/dev/null || true
+  fi
+  exit 1
+}
+trap _cleanup SIGINT SIGTERM
+
+# ---------------------------------------------------------------------------
+CKPT_ROOT=$(_cfg train.ckpt_dir)
+read -ra SEEDS <<< "$(_cfg sweep.seeds)"
+
+# ---------------------------------------------------------------------------
+echo "===== benchmark — LAM vs LOM, ${#SEEDS[@]} seeds ====="
+
+for seed in "${SEEDS[@]}"; do
+  echo "  === seed=${seed} ==="
+
+  CKPT_LAM="${CKPT_ROOT}/lam_seed${seed}"
+  echo "  LAM  horizon=1  num_options=98"
+  if ! _done "${CKPT_LAM}"; then
+    _launch python3 -m scripts.pretrain lam \
+      --config           "${CFG}" \
+      --data.horizon     1 \
+      --model.num_options 98 \
+      --train.seed       "${seed}" \
+      --train.ckpt_dir   "${CKPT_LAM}" \
+    && touch "${CKPT_LAM}/done"
+  fi
+
+  CKPT_LOM="${CKPT_ROOT}/lom_seed${seed}"
+  echo "  LOM  horizon=128  num_options=256"
+  if ! _done "${CKPT_LOM}"; then
+    _launch python3 -m scripts.pretrain lom \
+      --config           "${CFG}" \
+      --train.seed       "${seed}" \
+      --train.ckpt_dir   "${CKPT_LOM}" \
+    && touch "${CKPT_LOM}/done"
+  fi
+done
+
+_flush
+echo "===== benchmark complete ====="

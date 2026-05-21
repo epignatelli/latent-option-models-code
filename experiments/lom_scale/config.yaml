@@ -3,31 +3,31 @@
 # Sweeps num_options over a wide range with multiple seeds.
 # All other hyperparameters are held fixed.
 
-# --- Paths -------------------------------------------------------------------
-ckpt_root: /scratch/uceeepi/lom/checkpoints/lom_scale
-nle_data_dir: nle_data
+sweep:
+  num_options_list: [4, 8, 16, 32, 64, 128, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+  seeds: [42, 43, 44]
 
-# --- Data --------------------------------------------------------------------
-dataset: top10
-context_len: 128
-horizon: 128
-batch_size: 32
-num_workers: 4
+data:
+  nle_data_dir: nle_data
+  dataset: top10
+  context_len: 128
+  horizon: 128
+  batch_size: 32
+  num_workers: 4
 
-# --- Model -------------------------------------------------------------------
-latent_dim: 512
-predict_sequence: false
-num_options_list: [4, 8, 16, 32, 64, 128, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+model:
+  latent_dim: 512
+  predict_sequence: false
 
-# --- Training ----------------------------------------------------------------
-seeds: [42, 43, 44]
-max_iters: 100_000
-log_interval: 50
-eval_interval: 500
-eval_iters: 50
+train:
+  ckpt_dir: /scratch/uceeepi/lom/checkpoints/lom_scale
+  max_iters: 100_000
+  log_interval: 50
+  eval_interval: 500
+  eval_iters: 50
 
-# --- Logging -----------------------------------------------------------------
-wandb_project: latent-option-models
-wandb_entity: epignatelli_
-wandb_group: lom_scale
-wandb_dir: /scratch/uceeepi/lom/wandb
+wandb:
+  project: latent-option-models
+  entity: epignatelli_
+  group: lom_scale
+  dir: /scratch/uceeepi/lom/wandb
