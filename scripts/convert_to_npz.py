@@ -5,16 +5,18 @@ One .npz per episode. Fields saved:
   nld-nao: tty_chars, tty_colors, tty_cursor, done
 
 Output layout:
-  nld-aa:  <output_dir>/<game_dir>.npz
+  nld-aa:  <output_dir>/autoascend/<game_dir>.npz
   nld-nao: <output_dir>/<player>/<game>.npz
 
 Usage:
-    python -m scripts.convert_to_npz nld-aa  --nle-data-dir /scratch/uceeepi/lom/datasets
-    python -m scripts.convert_to_npz nld-nao --nle-data-dir /scratch/uceeepi/lom/datasets
+    python -m scripts.convert_to_npz --dataset nld-aa  --nle-data-dir /scratch/uceeepi/lom/datasets
+    python -m scripts.convert_to_npz --dataset nld-nao --nle-data-dir /scratch/uceeepi/lom/datasets
+    python -m scripts.convert_to_npz --dataset all     --nle-data-dir /scratch/uceeepi/lom/datasets
 
 Memory note:
     nld-aa games are 2.5M frames (~15 GB peak per worker). Use --workers 2 if RAM
     is limited. nld-nao games are short (<10k frames); --workers 8+ is fine.
+    --dataset all runs nld-aa first (workers=2), then nld-nao (workers=8).
 """
 
 from __future__ import annotations
@@ -39,12 +41,12 @@ _KEYS_NAO = ("tty_chars", "tty_colors", "tty_cursor", "done")
 
 @dataclass
 class Args:
-    dataset: Literal["nld-aa", "nld-nao"]
-    """Which dataset to convert."""
+    dataset: Literal["nld-aa", "nld-nao", "all"]
+    """Which dataset to convert. 'all' converts nld-aa then nld-nao."""
     nle_data_dir: str
     """Root directory containing nld-aa/ or nld-nao/ subdirectories."""
     output_dir: str = ""
-    """Output directory. Defaults to <nle_data_dir>/<dataset>-npz."""
+    """Output directory. Defaults to <nle_data_dir>/<dataset>-npz (ignored for 'all')."""
     workers: int = 4
     """Number of parallel worker processes."""
     min_frames: int = 50
@@ -176,25 +178,21 @@ def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> li
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
-def main() -> None:
-    args = tyro.cli(Args)
+def _run_one(dataset: str, nle_data_dir: str, output_dir: str, workers: int, min_frames: int) -> None:
+    output_dir = output_dir or os.path.join(nle_data_dir, f"{dataset}-npz")
+    os.makedirs(output_dir, exist_ok=True)
 
-    if not args.output_dir:
-        args.output_dir = os.path.join(args.nle_data_dir, f"{args.dataset}-npz")
-
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    print(f"dataset    : {args.dataset}")
-    print(f"output     : {args.output_dir}")
-    print(f"workers    : {args.workers}")
-    if args.dataset == "nld-nao":
-        print(f"min_frames : {args.min_frames}")
+    print(f"dataset    : {dataset}")
+    print(f"output     : {output_dir}")
+    print(f"workers    : {workers}")
+    if dataset == "nld-nao":
+        print(f"min_frames : {min_frames}")
     print()
 
-    if args.dataset == "nld-aa":
-        tasks = _discover_nld_aa(args.nle_data_dir, args.output_dir)
+    if dataset == "nld-aa":
+        tasks = _discover_nld_aa(nle_data_dir, output_dir)
     else:
-        tasks = _discover_nld_nao(args.nle_data_dir, args.output_dir, args.min_frames)
+        tasks = _discover_nld_nao(nle_data_dir, output_dir, min_frames)
 
     total = len(tasks)
     print(f"games found: {total:,}\n")
@@ -202,7 +200,7 @@ def main() -> None:
     counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
     errors: list[str] = []
 
-    with mp.Pool(args.workers) as pool:
+    with mp.Pool(workers) as pool:
         for i, result in enumerate(pool.imap_unordered(_convert_one, tasks), 1):
             counts[result["status"]] += 1
             if result["status"] == "error":
@@ -219,12 +217,24 @@ def main() -> None:
     print(f"\n{'='*60}")
     print(f"converted : {counts['ok']:,}")
     print(f"skipped   : {counts['skip']:,}  (already existed)")
-    print(f"filtered  : {counts['filter']:,}  (< {args.min_frames} frames)")
+    print(f"filtered  : {counts['filter']:,}  (< {min_frames} frames)")
     print(f"errors    : {counts['error']:,}")
     if errors:
         print("\nFirst 10 errors:")
         for msg in errors[:10]:
             print(f"  {msg}")
+    print()
+
+
+def main() -> None:
+    args = tyro.cli(Args)
+
+    if args.dataset == "all":
+        # nld-aa first (memory-heavy, fewer workers), then nld-nao
+        _run_one("nld-aa",  args.nle_data_dir, "", 2,            args.min_frames)
+        _run_one("nld-nao", args.nle_data_dir, "", args.workers, args.min_frames)
+    else:
+        _run_one(args.dataset, args.nle_data_dir, args.output_dir, args.workers, args.min_frames)
 
 
 if __name__ == "__main__":
