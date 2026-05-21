@@ -12,6 +12,8 @@ import os
 import tempfile
 from dataclasses import dataclass
 
+os.environ.setdefault("NLE_DATA_PATH", os.path.abspath("nle_data"))
+
 import numpy as np
 import tyro
 

@@ -18,6 +18,9 @@ import logging
 import os
 from typing import List, Optional, Tuple
 
+# Prevent NLE from creating a stray nle_data/ in the current working directory.
+os.environ.setdefault("NLE_DATA_PATH", os.path.abspath("nle_data"))
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader

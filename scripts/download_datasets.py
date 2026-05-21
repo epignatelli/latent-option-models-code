@@ -24,6 +24,11 @@ Usage:
 from __future__ import annotations
 
 import os
+
+# Must be set before any NLE import to prevent NLE from creating a stray
+# nle_data/ directory in the current working directory.
+os.environ.setdefault("NLE_DATA_PATH", os.path.abspath("nle_data"))
+
 import tarfile
 import urllib.request
 import zipfile
