@@ -188,7 +188,7 @@ def _run_one(dataset: str, nle_data_dir: str, output_dir: str, workers: int, min
     print(f"workers    : {workers}")
     if dataset == "nld-nao":
         print(f"min_frames : {min_frames}")
-    print()
+    print(flush=True)
 
     if dataset == "nld-aa":
         tasks = _discover_nld_aa(nle_data_dir, output_dir)
@@ -196,23 +196,25 @@ def _run_one(dataset: str, nle_data_dir: str, output_dir: str, workers: int, min
         tasks = _discover_nld_nao(nle_data_dir, output_dir, min_frames)
 
     total = len(tasks)
-    print(f"games found: {total:,}\n")
+    print(f"games found: {total:,}\n", flush=True)
 
     counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
     errors: list[str] = []
+    log_every = max(1, total // 100)  # ~100 progress lines regardless of dataset size
 
     with mp.Pool(workers) as pool:
         for i, result in enumerate(pool.imap_unordered(_convert_one, tasks), 1):
             counts[result["status"]] += 1
             if result["status"] == "error":
                 errors.append(result.get("msg", "unknown"))
-            if i % 500 == 0 or i == total:
+            if i % log_every == 0 or i == total:
                 print(
                     f"  [{i:>9,} / {total:,}]  "
                     f"ok={counts['ok']:,}  "
                     f"skip={counts['skip']:,}  "
                     f"filter={counts['filter']:,}  "
-                    f"error={counts['error']:,}"
+                    f"error={counts['error']:,}",
+                    flush=True,
                 )
 
     print(f"\n{'='*60}")
