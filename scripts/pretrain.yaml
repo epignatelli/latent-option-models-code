@@ -11,7 +11,7 @@ model:                             # architecture hyperparameters
   d_model: 256                     # must be divisible by n_heads
   n_layers: 4
   n_heads: 4
-  max_context: 256                 # capacity: max temporal length the model supports
+  context_length: 256                 # capacity: max temporal length the model supports
   latent_dim: 64
   num_options: 256
   vq_dropout: 0.1
@@ -25,7 +25,7 @@ data:
   dataset: top10                   # "top10" | "full"
   nle_data_dir: nle_data
   fallback_numpy_dir: null
-  context_len: 4                   # c — also sets model max_context
+  context_len: 4                   # c — also sets model context_length
   horizon: 8                       # k
   val_fraction: 0.05
   num_workers: 4

@@ -17,7 +17,7 @@ class ModelCfg:
     d_model: int = 256
     n_layers: int = 4
     n_heads: int = 4
-    max_context: int = 256
+    context_length: int = 256
     latent_dim: int = 64
     num_options: int = 256
     vq_dropout: float = 0.1

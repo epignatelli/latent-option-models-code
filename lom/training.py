@@ -59,8 +59,8 @@ class Trainer(ABC):
         self.cfg = cfg
         t, d, m = cfg.train, cfg.data, cfg.model
 
-        if d.context_len > m.max_context:
-            raise ValueError(f"context_len={d.context_len} exceeds max_context={m.max_context}")
+        if d.context_len > m.context_length:
+            raise ValueError(f"context_len={d.context_len} exceeds context_length={m.context_length}")
 
         torch.manual_seed(t.seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -248,7 +248,7 @@ class LAMTrainer(Trainer):
             d_model=m.d_model,
             n_layers=m.n_layers,
             n_heads=m.n_heads,
-            max_context=m.max_context,
+            context_length=m.context_length,
             latent_dim=m.latent_dim,
             dropout=m.dropout,
             bias=m.bias,
@@ -262,7 +262,7 @@ class LAMTrainer(Trainer):
         return nn.ModuleDict(
             {
                 "lam": LatentActionModel(
-                    **base, codebook_size=m.num_options, max_future_len=1, **vq
+                    **base, codebook_size=m.num_options, horizon=1, **vq
                 ),
                 "dynamics": DynamicsModel(**base, predict_sequence=False),
             }
@@ -298,7 +298,7 @@ class LOMTrainer(Trainer):
             d_model=m.d_model,
             n_layers=m.n_layers,
             n_heads=m.n_heads,
-            max_context=m.max_context,
+            context_length=m.context_length,
             latent_dim=m.latent_dim,
             dropout=m.dropout,
             bias=m.bias,
@@ -312,19 +312,20 @@ class LOMTrainer(Trainer):
         return nn.ModuleDict(
             {
                 "option_lam": LatentActionModel(
-                    **base, codebook_size=m.num_options, max_future_len=d.horizon, **vq
+                    **base, codebook_size=m.num_options, horizon=d.horizon, **vq
                 ),
                 "action_lam": LatentActionModel(
                     **base,
                     codebook_size=e.n_actions,
-                    max_future_len=1,
+                    horizon=1,
                     condition_dim=m.latent_dim,
                     **vq,
                 ),
                 "lam_dynamics": DynamicsModel(**base, predict_sequence=False),
                 "lom_dynamics": DynamicsModel(
-                    **base, goal_dim=m.latent_dim, predict_sequence=m.predict_sequence,
-                    max_future_len=d.horizon,
+                    **{**base, "context_length": m.context_length + d.horizon - 1 if m.predict_sequence else m.context_length},
+                    option_dim=m.latent_dim,
+                    predict_sequence=m.predict_sequence,
                 ),
             }
         )
@@ -343,7 +344,7 @@ class LOMTrainer(Trainer):
             lom_logits = self.models["lom_dynamics"](
                 history,
                 z_act.detach(),
-                goal=z_opt.detach(),
+                option_code=z_opt.detach(),
                 n_steps=self.cfg.data.horizon,
                 teacher_frames=sequence,
             )
@@ -352,7 +353,7 @@ class LOMTrainer(Trainer):
             lom_logits = self.models["lom_dynamics"](
                 history,
                 z_act.detach(),
-                goal=z_opt.detach(),
+                option_code=z_opt.detach(),
                 n_steps=1,
             )
             lom_recon = reconstruction_loss(lom_logits, future_frame, self.cfg.env.vocab_size)

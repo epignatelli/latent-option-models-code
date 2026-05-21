@@ -1,29 +1,30 @@
 """Two composable primitives:
 
   LatentActionModel  — bidirectional encoder: (history, future[, condition]) → z via VQ
-  DynamicsModel      — causal decoder:        (history, action[, goal])       → frame(s)
+  DynamicsModel      — causal decoder:        (history, action[, option_code]) → frame(s)
 
 Compose to build LAM or LOM:
 
   LAM (baseline):
-    lam          = LatentActionModel(codebook_size=n_actions, max_future_len=1)
+    lam          = LatentActionModel(codebook_size=n_actions, horizon=1)
     lam_dynamics = DynamicsModel(predict_sequence=False)
 
     z_act = lam(history, x_{t+1})
     x̂     = lam_dynamics(history, z_act)            → x_{t+1}
 
   LOM (proposed):
-    option_lam   = LatentActionModel(codebook_size=num_options, max_future_len=k)
-    action_lam   = LatentActionModel(codebook_size=n_actions,   max_future_len=1,
+    option_lam   = LatentActionModel(codebook_size=num_options, horizon=k)
+    action_lam   = LatentActionModel(codebook_size=n_actions,   horizon=1,
                                      condition_dim=latent_dim)
     lam_dynamics = DynamicsModel(predict_sequence=False)
-    lom_dynamics = DynamicsModel(goal_dim=latent_dim, predict_sequence=False|True)
+    lom_dynamics = DynamicsModel(option_dim=latent_dim, predict_sequence=False|True,
+                                 context_length=context_length + k - 1)
 
     z_opt = option_lam(history, sequence)                            # x_{t+1}…x_{t+k}
     z_act = action_lam(history, x_{t+1}, condition=z_opt)
 
-    lam_dynamics(history, z_act)                                     → x̂_{t+1}   [LAM loss]
-    lom_dynamics(history, z_act, goal=z_opt, n_steps=k)              → x̂_{t+k}   [LOM loss]
+    lam_dynamics(history, z_act)                                        → x̂_{t+1}   [LAM loss]
+    lom_dynamics(history, z_act, option_code=z_opt, n_steps=k)         → x̂_{t+k}   [LOM loss]
 """
 
 from __future__ import annotations
@@ -73,10 +74,10 @@ class LatentActionModel(SerialisableModule):
         d_model: int,
         n_layers: int,
         n_heads: int,
-        max_context: int,
+        context_length: int,
         latent_dim: int,
         codebook_size: int,
-        max_future_len: int = 1,
+        horizon: int = 1,
         condition_dim: Optional[int] = None,
         vq_dropout: float = 0.1,
         vq_entropy_weight: float = 0.01,
@@ -92,11 +93,11 @@ class LatentActionModel(SerialisableModule):
         self.S = S
         self.d_model = d_model
         self.latent_dim = latent_dim
-        self.max_context = max_context
+        self.context_length = context_length
         self.has_condition = condition_dim is not None
 
         # temporal positions: history + optional cond token + OPT + future frames
-        max_temporal_len = max_context + (1 if self.has_condition else 0) + 1 + max_future_len
+        max_temporal_len = context_length + (1 if self.has_condition else 0) + 1 + horizon
 
         self.char_embed = nn.Embedding(vocab_size, d_model)
         self.cond_proj = (
@@ -184,13 +185,12 @@ class LatentActionModel(SerialisableModule):
 
 
 class DynamicsModel(SerialisableModule):
-    """Causal STP-Transformer: (history, action[, goal]) → frame(s).
+    """Causal STP-Transformer: (history, action[, option_code]) → frame(s).
 
     action is broadcast-added to all input embeddings as the primary conditioning.
-    goal is an optional secondary conditioning (e.g. z_option for hierarchical use).
+    option_code is an optional secondary conditioning (z_option for LOM dynamics).
 
     n_steps controls how many frames to predict.
-    return_sequence controls whether all frames or only the last are returned.
 
     Training: pass teacher_frames for efficient teacher-forced sequence prediction.
     Inference: leave teacher_frames=None; single-step is a plain forward pass,
@@ -205,11 +205,10 @@ class DynamicsModel(SerialisableModule):
         d_model: int,
         n_layers: int,
         n_heads: int,
-        max_context: int,
+        context_length: int,
         latent_dim: int,
-        goal_dim: Optional[int] = None,
+        option_dim: Optional[int] = None,
         predict_sequence: bool = False,
-        max_future_len: int = 1,
         dropout: float = 0.0,
         bias: bool = False,
     ):
@@ -219,19 +218,17 @@ class DynamicsModel(SerialisableModule):
         self.obs_w = obs_w
         self.S = S
         self.d_model = d_model
-        self.max_context = max_context
+        self.context_length = context_length
         self.latent_dim = latent_dim
         self.vocab_size = vocab_size
 
         self.predict_sequence = predict_sequence
 
-        # Teacher-forced sequence prediction concatenates history + future[:-1],
-        # so the trunk must accommodate max_context + max_future_len - 1 time steps.
-        max_temporal_len = (max_context + max_future_len - 1) if predict_sequence else max_context
+        max_temporal_len = context_length
 
         self.char_embed = nn.Embedding(vocab_size, d_model)
         self.action_proj = nn.Linear(latent_dim, d_model, bias=bias)
-        self.goal_proj = nn.Linear(goal_dim, d_model, bias=bias) if goal_dim is not None else None
+        self.goal_proj = nn.Linear(option_dim, d_model, bias=bias) if option_dim is not None else None
         self.trunk = SpatioTemporalTransformer(
             d_model=d_model,
             n_layers=n_layers,
@@ -245,17 +242,17 @@ class DynamicsModel(SerialisableModule):
         self.ln_trunk = LayerNorm(d_model, bias)
         self.state_head = nn.Linear(d_model, vocab_size, bias=bias)
 
-    def _cond(self, action: torch.Tensor, goal: Optional[torch.Tensor]) -> torch.Tensor:
+    def _cond(self, action: torch.Tensor, option_code: Optional[torch.Tensor]) -> torch.Tensor:
         c = self.action_proj(action)
-        if goal is not None and self.goal_proj is not None:
-            c = c + self.goal_proj(goal)
+        if option_code is not None and self.goal_proj is not None:
+            c = c + self.goal_proj(option_code)
         return c.view(action.shape[0], 1, 1, self.d_model)  # (B, 1, 1, D) — broadcasts over (T, S)
 
     def forward(
         self,
         history: torch.Tensor,
         action: torch.Tensor,
-        goal: Optional[torch.Tensor] = None,
+        option_code: Optional[torch.Tensor] = None,
         n_steps: int = 1,
         teacher_frames: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -263,7 +260,7 @@ class DynamicsModel(SerialisableModule):
         Args:
             history:        (B, c, H, W) long
             action:         (B, latent_dim)
-            goal:           (B, goal_dim) optional — e.g. z_option for LOM dynamics
+            option_code:    (B, goal_dim) optional — z_option for LOM dynamics
             n_steps:        number of frames to predict
             teacher_frames: (B, n_steps, H, W) long — teacher forcing, training only
         Returns:
@@ -272,7 +269,7 @@ class DynamicsModel(SerialisableModule):
         """
         B, c = history.shape[:2]
         S = self.S
-        cond = self._cond(action, goal)  # (B, 1, 1, D)
+        cond = self._cond(action, option_code)  # (B, 1, 1, D)
 
         if self.predict_sequence:
             if teacher_frames is not None:

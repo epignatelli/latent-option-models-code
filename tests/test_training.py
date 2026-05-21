@@ -66,12 +66,12 @@ def make_env_cfg():
 
 def make_model_cfg():
     return ModelCfg(d_model=D_MODEL, n_layers=N_LAYERS, n_heads=N_HEADS,
-                    max_context=CONTEXT, latent_dim=LATENT_DIM, num_options=16)
+                    context_length=CONTEXT, latent_dim=LATENT_DIM, num_options=16)
 
 
 def make_lom_model_cfg():
     return LOMModelCfg(d_model=D_MODEL, n_layers=N_LAYERS, n_heads=N_HEADS,
-                       max_context=CONTEXT, latent_dim=LATENT_DIM, num_options=16)
+                       context_length=CONTEXT, latent_dim=LATENT_DIM, num_options=16)
 
 
 def make_data_cfg():

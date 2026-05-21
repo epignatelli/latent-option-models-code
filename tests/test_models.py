@@ -5,7 +5,7 @@ from lom.models import DynamicsModel, LatentActionModel
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 
 
-def make_lam(max_future_len=1, condition_dim=None):
+def make_lam(horizon=1, condition_dim=None):
     return LatentActionModel(
         vocab_size=VOCAB,
         obs_h=OBS_H,
@@ -13,15 +13,16 @@ def make_lam(max_future_len=1, condition_dim=None):
         d_model=D_MODEL,
         n_layers=N_LAYERS,
         n_heads=N_HEADS,
-        max_context=CONTEXT,
+        context_length=CONTEXT,
         latent_dim=LATENT_DIM,
         codebook_size=32,
-        max_future_len=max_future_len,
+        horizon=horizon,
         condition_dim=condition_dim,
     )
 
 
-def make_dynamics(goal_dim=None, predict_sequence=False):
+def make_dynamics(option_dim=None, predict_sequence=False):
+    ctx = CONTEXT + HORIZON - 1 if predict_sequence else CONTEXT
     return DynamicsModel(
         vocab_size=VOCAB,
         obs_h=OBS_H,
@@ -29,11 +30,10 @@ def make_dynamics(goal_dim=None, predict_sequence=False):
         d_model=D_MODEL,
         n_layers=N_LAYERS,
         n_heads=N_HEADS,
-        max_context=CONTEXT,
+        context_length=ctx,
         latent_dim=LATENT_DIM,
-        goal_dim=goal_dim,
+        option_dim=option_dim,
         predict_sequence=predict_sequence,
-        max_future_len=HORIZON if predict_sequence else 1,
     )
 
 
@@ -61,7 +61,7 @@ def test_lam_single_future():
 
 
 def test_lam_sequence_future():
-    lam = make_lam(max_future_len=HORIZON)
+    lam = make_lam(horizon=HORIZON)
     z_q, _, indices = lam(history(), frame_sequence(HORIZON))
     assert z_q.shape == (BATCH, LATENT_DIM)
     assert indices.shape == (BATCH,)
@@ -108,10 +108,10 @@ def test_dynamics_sequence_autoregressive():
     assert logits.shape == (BATCH, HORIZON, S, VOCAB)
 
 
-def test_dynamics_with_goal():
-    dyn = make_dynamics(goal_dim=LATENT_DIM)
-    goal = torch.randn(BATCH, LATENT_DIM)
-    logits = dyn(history(), action(), goal=goal)
+def test_dynamics_with_option_code():
+    dyn = make_dynamics(option_dim=LATENT_DIM)
+    option_code = torch.randn(BATCH, LATENT_DIM)
+    logits = dyn(history(), action(), option_code=option_code)
     assert logits.shape == (BATCH, S, VOCAB)
 
 
