@@ -110,13 +110,6 @@ class Trainer(ABC):
 
         os.makedirs(t.ckpt_dir, exist_ok=True)
         self.ckpt_path = os.path.join(t.ckpt_dir, f"{self.label()}_pretrain.pt")
-        self.start_step = 0
-        if t.resume and os.path.exists(self.ckpt_path):
-            ckpt = torch.load(self.ckpt_path, map_location=self.device)
-            self.models.load_state_dict(ckpt["models"])
-            self.optimizer.load_state_dict(ckpt["optimizer"])
-            self.start_step = ckpt["step"]
-            log.info("Resumed from step %d", self.start_step)
 
         self.wandb_run = None
         try:
@@ -134,8 +127,54 @@ class Trainer(ABC):
         except Exception as exc:
             log.warning("WandB init failed: %s", exc)
 
+        self.start_step = self.restore_checkpoint() if t.resume else 0
+
     def label(self) -> str:
         return "lam" if isinstance(self.cfg, LAMCfg) else "lom"
+
+    def save_checkpoint(self, step: int) -> None:
+        torch.save(
+            {
+                "models": self.models.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
+                "step": step,
+                "config": asdict(self.cfg),
+            },
+            self.ckpt_path,
+        )
+        log.info("Checkpoint saved to %s", self.ckpt_path)
+        if self.wandb_run is not None:
+            import wandb
+            artifact = wandb.Artifact(
+                name=f"{self.label()}_checkpoint",
+                type="checkpoint",
+                metadata={"step": step},
+            )
+            artifact.add_file(self.ckpt_path)
+            self.wandb_run.log_artifact(artifact, aliases=["latest", f"step-{step}"])
+            log.info("Checkpoint uploaded to wandb (step %d)", step)
+
+    def restore_checkpoint(self) -> int:
+        if os.path.exists(self.ckpt_path):
+            ckpt = torch.load(self.ckpt_path, map_location=self.device)
+            self.models.load_state_dict(ckpt["models"])
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+            log.info("Resumed from local checkpoint (step %d)", ckpt["step"])
+            return ckpt["step"]
+        if self.wandb_run is not None:
+            try:
+                import wandb
+                artifact = self.wandb_run.use_artifact(f"{self.label()}_checkpoint:latest")
+                artifact_dir = artifact.download()
+                path = os.path.join(artifact_dir, os.path.basename(self.ckpt_path))
+                ckpt = torch.load(path, map_location=self.device)
+                self.models.load_state_dict(ckpt["models"])
+                self.optimizer.load_state_dict(ckpt["optimizer"])
+                log.info("Resumed from wandb artifact (step %d)", ckpt["step"])
+                return ckpt["step"]
+            except Exception as exc:
+                log.warning("WandB restore failed: %s", exc)
+        return 0
 
     @abstractmethod
     def build_models(self) -> nn.ModuleDict: ...
@@ -216,16 +255,7 @@ class Trainer(ABC):
                 log.info("  [val] %s", "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items()))
                 if self.wandb_run:
                     self.wandb_run.log({f"val/{k}": v for k, v in val_metrics.items()}, step=s + 1)
-                torch.save(
-                    {
-                        "models": self.models.state_dict(),
-                        "optimizer": self.optimizer.state_dict(),
-                        "step": s + 1,
-                        "config": asdict(self.cfg),
-                    },
-                    self.ckpt_path,
-                )
-                log.info("  Checkpoint saved to %s", self.ckpt_path)
+                self.save_checkpoint(s + 1)
 
         log.info("Training complete.")
         if self.wandb_run:

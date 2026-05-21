@@ -87,6 +87,15 @@ class LatentActionModel(SerialisableModule):
         bias: bool = False,
     ):
         super().__init__()
+        self._cfg = dict(
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            codebook_size=codebook_size, horizon=horizon,
+            condition_dim=condition_dim, vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight, vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh, dropout=dropout, bias=bias,
+        )
         S = obs_h * obs_w
         self.obs_h = obs_h
         self.obs_w = obs_w
@@ -212,6 +221,13 @@ class DynamicsModel(SerialisableModule):
         bias: bool = False,
     ):
         super().__init__()
+        self._cfg = dict(
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            option_dim=option_dim, predict_sequence=predict_sequence,
+            horizon=horizon, dropout=dropout, bias=bias,
+        )
         S = obs_h * obs_w
         self.obs_h = obs_h
         self.obs_w = obs_w

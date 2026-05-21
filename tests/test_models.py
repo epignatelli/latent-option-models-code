@@ -81,6 +81,39 @@ def test_lam_backward():
     loss_dict["vq_loss"].backward()
 
 
+def test_lam_opt_ignores_future():
+    lam = make_lam().eval()
+    hist = history()
+    with torch.no_grad():
+        z1, _, _ = lam(hist, single_frame())
+        z2, _, _ = lam(hist, single_frame())  # different random future
+    assert torch.allclose(z1, z2), "OPT output must not depend on future content"
+
+
+def test_lam_serialise_roundtrip(tmp_path):
+    lam = make_lam().eval()
+    hist, fut = history(), single_frame()
+    with torch.no_grad():
+        z_before, _, _ = lam(hist, fut)
+    lam.save(str(tmp_path / "lam.pt"))
+    lam2 = LatentActionModel.load(str(tmp_path / "lam.pt")).eval()
+    with torch.no_grad():
+        z_after, _, _ = lam2(hist, fut)
+    assert torch.allclose(z_before, z_after)
+
+
+def test_dynamics_serialise_roundtrip(tmp_path):
+    dyn = make_dynamics().eval()
+    hist, act = history(), action()
+    with torch.no_grad():
+        logits_before = dyn(hist, act)
+    dyn.save(str(tmp_path / "dyn.pt"))
+    dyn2 = DynamicsModel.load(str(tmp_path / "dyn.pt")).eval()
+    with torch.no_grad():
+        logits_after = dyn2(hist, act)
+    assert torch.allclose(logits_before, logits_after)
+
+
 # --------------------------------------------------------------------------- #
 # --- DynamicsModel --------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
