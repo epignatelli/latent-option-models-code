@@ -323,9 +323,10 @@ class LOMTrainer(Trainer):
                 ),
                 "lam_dynamics": DynamicsModel(**base, predict_sequence=False),
                 "lom_dynamics": DynamicsModel(
-                    **{**base, "context_length": m.context_length + d.horizon - 1 if m.predict_sequence else m.context_length},
+                    **base,
                     option_dim=m.latent_dim,
                     predict_sequence=m.predict_sequence,
+                    horizon=d.horizon,
                 ),
             }
         )

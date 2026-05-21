@@ -18,7 +18,7 @@ Compose to build LAM or LOM:
                                      condition_dim=latent_dim)
     lam_dynamics = DynamicsModel(predict_sequence=False)
     lom_dynamics = DynamicsModel(option_dim=latent_dim, predict_sequence=False|True,
-                                 context_length=context_length + k - 1)
+                                 horizon=k)
 
     z_opt = option_lam(history, sequence)                            # x_{t+1}…x_{t+k}
     z_act = action_lam(history, x_{t+1}, condition=z_opt)
@@ -209,6 +209,7 @@ class DynamicsModel(SerialisableModule):
         latent_dim: int,
         option_dim: Optional[int] = None,
         predict_sequence: bool = False,
+        horizon: int = 1,
         dropout: float = 0.0,
         bias: bool = False,
     ):
@@ -224,7 +225,7 @@ class DynamicsModel(SerialisableModule):
 
         self.predict_sequence = predict_sequence
 
-        max_temporal_len = context_length
+        max_temporal_len = context_length + horizon - 1 if predict_sequence else context_length
 
         self.char_embed = nn.Embedding(vocab_size, d_model)
         self.action_proj = nn.Linear(latent_dim, d_model, bias=bias)

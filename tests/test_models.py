@@ -22,7 +22,6 @@ def make_lam(horizon=1, condition_dim=None):
 
 
 def make_dynamics(option_dim=None, predict_sequence=False):
-    ctx = CONTEXT + HORIZON - 1 if predict_sequence else CONTEXT
     return DynamicsModel(
         vocab_size=VOCAB,
         obs_h=OBS_H,
@@ -30,10 +29,11 @@ def make_dynamics(option_dim=None, predict_sequence=False):
         d_model=D_MODEL,
         n_layers=N_LAYERS,
         n_heads=N_HEADS,
-        context_length=ctx,
+        context_length=CONTEXT,
         latent_dim=LATENT_DIM,
         option_dim=option_dim,
         predict_sequence=predict_sequence,
+        horizon=HORIZON if predict_sequence else 1,
     )
 
 
