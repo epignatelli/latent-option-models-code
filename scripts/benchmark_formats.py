@@ -30,7 +30,6 @@ def _load_episodes(db_path: str, dataset_name: str, n: int):
         dataset_name=dataset_name,
         dbfilename=db_path,
         seq_length=None,
-        observation_keys=("tty_chars",),
     )
     episodes = []
     for i, ep in enumerate(ds):
