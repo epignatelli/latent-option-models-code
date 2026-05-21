@@ -12,7 +12,6 @@ data:
   dataset: top10
   context_len: 128
   horizon: 128
-  batch_size: 32
   num_workers: 4
 
 model:
@@ -21,6 +20,7 @@ model:
 
 train:
   ckpt_dir: /scratch/uceeepi/lom/checkpoints/lom_scale
+  batch_size: 2048
   max_iters: 100_000
   log_interval: 50
   eval_interval: 500
