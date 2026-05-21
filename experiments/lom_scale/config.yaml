@@ -1,0 +1,28 @@
+# Experiment: how does LOM performance scale with codebook size?
+#
+# Sweep: num_options in [4, 8, 16, 32, 64, 128, 512, 1024, 2048, 4096,
+#                        8192, 16384, 32768]
+# Seeds: 3 per condition (42, 43, 44)
+#
+# All other hyperparameters are held fixed.
+
+data:
+  context_len: 128
+  horizon: 128
+
+model:
+  latent_dim: 512
+  predict_sequence: false
+
+train:
+  ckpt_dir: /scratch/$USER/lom/checkpoints/lom_scale
+  max_iters: 100_000
+  log_interval: 50
+  eval_interval: 500
+  eval_iters: 50
+
+wandb:
+  project: latent-option-models
+  entity: epignatelli_
+  group: lom_scale
+  dir: /scratch/$USER/lom/wandb
