@@ -286,7 +286,17 @@ def load_nao_top10(
 
 
 class TrajectoryDataset(Dataset):
-    """(history, next_frame, future_frame[, sequence][, action]) dataset.
+    """GENIE-style random-sampling trajectory dataset.
+
+    Each call to __getitem__ samples a random trajectory (weighted by length)
+    and a random valid starting timestep within it — independent of the index
+    argument.  This avoids the dense step-1 sliding window and its ~window_size×
+    inflation of highly-correlated samples.
+
+    __len__ is defined as total_valid_timesteps // (context_len + horizon), so
+    one "epoch" corresponds to each timestep being seen approximately once on
+    average.  The split() method partitions trajectories (not samples) into
+    train / val subsets.
 
     Each item:
         history:      (context_len, H, W) long  — frames [t-c+1 … t]
@@ -316,26 +326,28 @@ class TrajectoryDataset(Dataset):
 
         self._seqs: List[np.ndarray] = []
         self._acts: Optional[List[np.ndarray]] = None if action_sequences is None else []
-        self._index: List[Tuple[int, int]] = []
 
-        min_len = context_len + horizon
+        min_len = context_len + horizon + 1
         for i, seq in enumerate(sequences):
             if seq.ndim == 2:
                 seq = seq.reshape(-1, obs_h, obs_w)
-            T = len(seq)
-            if T < min_len + 1:
+            if len(seq) < min_len:
                 continue
-            internal_idx = len(self._seqs)
             self._seqs.append(seq.astype(np.uint8))
             if action_sequences is not None:
                 self._acts.append(action_sequences[i].astype(np.int64))
-            for t in range(context_len - 1, T - horizon):
-                self._index.append((internal_idx, t))
+
+        # valid starting positions per trajectory: t in [context_len-1, T-horizon-1]
+        valid_starts = [len(s) - context_len - horizon + 1 for s in self._seqs]
+        total_valid = sum(valid_starts)
+        self._epoch_len = max(1, total_valid // (context_len + horizon))
+        weights = np.array(valid_starts, dtype=np.float64)
+        self._weights = weights / weights.sum() if weights.sum() > 0 else weights
 
         log.info(
-            "TrajectoryDataset: %d episodes → %d samples (c=%d, k=%d, seq=%s, actions=%s)",
+            "TrajectoryDataset: %d episodes → epoch_len=%d (c=%d, k=%d, seq=%s, actions=%s)",
             len(self._seqs),
-            len(self._index),
+            self._epoch_len,
             context_len,
             horizon,
             return_sequence,
@@ -343,11 +355,13 @@ class TrajectoryDataset(Dataset):
         )
 
     def __len__(self) -> int:
-        return len(self._index)
+        return self._epoch_len
 
     def __getitem__(self, idx: int):
-        traj_idx, t = self._index[idx]
+        # idx is unused — sample a random (trajectory, timestep) pair
+        traj_idx = int(np.random.choice(len(self._seqs), p=self._weights))
         seq = self._seqs[traj_idx]
+        t = int(np.random.randint(self.context_len - 1, len(seq) - self.horizon))
 
         history      = torch.tensor(seq[t - self.context_len + 1 : t + 1], dtype=torch.long)
         next_frame   = torch.tensor(seq[t + 1],             dtype=torch.long)
@@ -371,13 +385,28 @@ class TrajectoryDataset(Dataset):
         val_fraction: float = 0.05,
         seed: int = 42,
     ) -> Tuple[TrajectoryDataset, TrajectoryDataset]:
-        """Randomly split a TrajectoryDataset into train / val subsets."""
-        import torch.utils.data as tud
+        """Split trajectories into train / val subsets."""
+        rng = np.random.default_rng(seed)
+        n = len(dataset._seqs)
+        n_val = max(1, int(n * val_fraction))
+        perm = rng.permutation(n)
+        val_idxs   = perm[:n_val].tolist()
+        train_idxs = perm[n_val:].tolist()
 
-        n_val   = max(1, int(len(dataset) * val_fraction))
-        n_train = len(dataset) - n_val
-        gen = torch.Generator().manual_seed(seed)
-        return tud.random_split(dataset, [n_train, n_val], generator=gen)
+        def _make(idxs: list) -> TrajectoryDataset:
+            seqs = [dataset._seqs[i] for i in idxs]
+            acts = None if dataset._acts is None else [dataset._acts[i] for i in idxs]
+            return TrajectoryDataset(
+                seqs,
+                context_len=dataset.context_len,
+                horizon=dataset.horizon,
+                obs_h=dataset.obs_h,
+                obs_w=dataset.obs_w,
+                action_sequences=acts,
+                return_sequence=dataset.return_sequence,
+            )
+
+        return _make(train_idxs), _make(val_idxs)
 
 
 def build_dataloaders(

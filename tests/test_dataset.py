@@ -55,26 +55,26 @@ def test_dataset_filters_short():
     long = make_seq(min_len + 5)
     ds = TrajectoryDataset([short, long], context_len=CONTEXT, horizon=HORIZON,
                            obs_h=OBS_H, obs_w=OBS_W)
+    assert len(ds._seqs) == 1   # short trajectory dropped
     assert len(ds) > 0
-    # All items should come from the long sequence only
-    for traj_idx, _ in ds._index:
-        assert traj_idx == 0   # index 0 because short was dropped
 
 
 def test_dataset_len():
     T = 20
     ds = TrajectoryDataset([make_seq(T)], context_len=CONTEXT, horizon=HORIZON,
                            obs_h=OBS_H, obs_w=OBS_W)
-    expected = T - CONTEXT - HORIZON + 1   # valid t values: [CONTEXT-1, T-HORIZON)
+    valid = T - CONTEXT - HORIZON + 1
+    expected = valid // (CONTEXT + HORIZON)
     assert len(ds) == expected
 
 
 def test_dataset_split():
-    ds = TrajectoryDataset([make_seq(40)], context_len=CONTEXT, horizon=HORIZON,
+    seqs = [make_seq(40) for _ in range(20)]
+    ds = TrajectoryDataset(seqs, context_len=CONTEXT, horizon=HORIZON,
                            obs_h=OBS_H, obs_w=OBS_W)
     train_ds, val_ds = TrajectoryDataset.split(ds, val_fraction=0.2, seed=0)
-    assert len(train_ds) + len(val_ds) == len(ds)
-    assert len(val_ds) >= 1
+    assert len(train_ds._seqs) + len(val_ds._seqs) == len(ds._seqs)
+    assert len(val_ds._seqs) >= 1
 
 
 def test_build_dataloaders():
