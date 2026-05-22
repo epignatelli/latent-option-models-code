@@ -70,7 +70,7 @@ class TrainCfg:
     eval_iters: int = 50
     log_interval: int = 50
     compile_model: bool = True
-    mixed_dtype: str = "float16"
+    mixed_dtype: str = "bfloat16"
     seed: int = 42
     ckpt_dir: str = "checkpoints"
     resume: bool = False
