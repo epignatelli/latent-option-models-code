@@ -66,6 +66,9 @@ class Args:
     index_only: bool = False
     """Skip ttyrec conversion; scan the output directory for existing .npz files
     and (re)build index.npz. Useful when conversion ran without index support."""
+    nld_aa_subdir: str = "nle_data"
+    """Subdirectory under nld-aa/ that contains the per-game ttyrec directories.
+    NLE places them in 'nle_data/' by default; override if your layout differs."""
 
 
 # ── score helpers ─────────────────────────────────────────────────────────────
@@ -197,10 +200,13 @@ def _convert_one(task: tuple) -> dict:
 
 # ── task discovery ────────────────────────────────────────────────────────────
 
-def _discover_nld_aa(nle_data_dir: str, output_dir: str) -> list[tuple]:
-    data_root = os.path.join(nle_data_dir, "nld-aa", "nle_data")
+def _discover_nld_aa(nle_data_dir: str, output_dir: str, subdir: str = "nle_data") -> list[tuple]:
+    data_root = os.path.join(nle_data_dir, "nld-aa", subdir)
     if not os.path.isdir(data_root):
-        raise FileNotFoundError(f"nld-aa data not found at {data_root}")
+        raise FileNotFoundError(
+            f"nld-aa data not found at {data_root}\n"
+            f"Pass --nld-aa-subdir to override (current value: '{subdir}')"
+        )
 
     tasks = []
     for gdir in sorted(os.listdir(data_root)):
@@ -217,7 +223,7 @@ def _discover_nld_aa(nle_data_dir: str, output_dir: str) -> list[tuple]:
 
 
 def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
-    data_root = os.path.join(nle_data_dir, "nld-nao", "nld-nao-unzipped")
+    data_root = os.path.join(nle_data_dir, "nld-nao")
     if not os.path.isdir(data_root):
         raise FileNotFoundError(f"nld-nao data not found at {data_root}")
 
@@ -296,7 +302,7 @@ def _run_index_only(output_dir: str, workers: int) -> None:
 
 
 def _run_one(dataset: str, nle_data_dir: str, output_dir: str, workers: int, min_frames: int,
-             index_only: bool) -> None:
+             index_only: bool, nld_aa_subdir: str = "nle_data") -> None:
     output_dir = output_dir or os.path.join(nle_data_dir, f"{dataset}-npz")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -312,7 +318,7 @@ def _run_one(dataset: str, nle_data_dir: str, output_dir: str, workers: int, min
         return
 
     if dataset == "nld-aa":
-        tasks = _discover_nld_aa(nle_data_dir, output_dir)
+        tasks = _discover_nld_aa(nle_data_dir, output_dir, subdir=nld_aa_subdir)
     else:
         tasks = _discover_nld_nao(nle_data_dir, output_dir, min_frames)
 
@@ -378,11 +384,12 @@ def main() -> None:
     args = tyro.cli(Args)
 
     if args.dataset == "all":
-        _run_one("nld-aa",  args.nle_data_dir, "", args.workers, args.min_frames, args.index_only)
+        _run_one("nld-aa",  args.nle_data_dir, "", args.workers, args.min_frames, args.index_only,
+                 nld_aa_subdir=args.nld_aa_subdir)
         _run_one("nld-nao", args.nle_data_dir, "", args.workers, args.min_frames, args.index_only)
     else:
         _run_one(args.dataset, args.nle_data_dir, args.output_dir, args.workers, args.min_frames,
-                 args.index_only)
+                 args.index_only, nld_aa_subdir=args.nld_aa_subdir)
 
 
 if __name__ == "__main__":

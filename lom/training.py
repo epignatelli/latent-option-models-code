@@ -323,7 +323,7 @@ class LAMTrainer(Trainer):
     def step(self, batch: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         history, next_frame = batch[0], batch[1]
         z, vq, _ = self.models["lam"](history, next_frame)
-        logits = self.models["dynamics"](history, z.detach())
+        logits = self.models["dynamics"](history, z)
         recon = reconstruction_loss(logits, tokenise(next_frame), self.cfg.env.vocab_size)
         total = recon + vq["vq_loss"]
         return {
@@ -389,16 +389,16 @@ class LOMTrainer(Trainer):
         m = self.cfg.model
 
         z_opt, vq_opt, _ = self.models["option_lam"](history, sequence)
-        z_act, vq_act, _ = self.models["action_lam"](history, next_frame, z_opt.detach())
+        z_act, vq_act, _ = self.models["action_lam"](history, next_frame, z_opt)
 
-        lam_logits = self.models["lam_dynamics"](history, z_act.detach())
+        lam_logits = self.models["lam_dynamics"](history, z_act)
         lam_recon = reconstruction_loss(lam_logits, tokenise(next_frame), self.cfg.env.vocab_size)
 
         if m.predict_sequence:
             lom_logits = self.models["lom_dynamics"](
                 history,
-                z_act.detach(),
-                option_code=z_opt.detach(),
+                z_act,
+                option_code=z_opt,
                 horizon=self.cfg.data.horizon,
                 teacher_frames=sequence,
             )
@@ -406,8 +406,8 @@ class LOMTrainer(Trainer):
         else:
             lom_logits = self.models["lom_dynamics"](
                 history,
-                z_act.detach(),
-                option_code=z_opt.detach(),
+                z_act,
+                option_code=z_opt,
                 horizon=1,
             )
             lom_recon = reconstruction_loss(lom_logits, tokenise(future_frame), self.cfg.env.vocab_size)

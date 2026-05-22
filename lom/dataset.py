@@ -26,6 +26,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+from .modules import COLOR_VOCAB
+
 log = logging.getLogger(__name__)
 
 _OBS_KEY    = "tty_chars"   # (T, H, W) uint8 — ASCII char codes
@@ -112,8 +114,14 @@ def _load_from_nle_db(
     for i, episode in enumerate(ds):
         if top_n is not None and i >= top_n:
             break
-        chars = episode[_OBS_KEY]
-        obs_seqs.append(chars.reshape(len(chars), -1).astype(np.uint8))
+        chars = episode[_OBS_KEY]                          # (T, H, W) uint8
+        colors_raw = episode.get("tty_colors")
+        if colors_raw is not None:
+            colors = np.clip(colors_raw.astype(np.int16), 0, COLOR_VOCAB - 1).astype(np.uint8)
+        else:
+            colors = np.zeros_like(chars)
+        stacked = np.stack([chars, colors], axis=-1)       # (T, H, W, 2) uint8
+        obs_seqs.append(stacked.reshape(len(chars), -1))
         if include_actions:
             act_seqs.append(episode[_ACTION_KEY].astype(np.int64))
         log.debug("Loaded episode %d: T=%d", i, len(chars))
@@ -148,8 +156,10 @@ def _load_from_nao_top10_dir(
     obs_seqs: List[np.ndarray] = []
     for f in npz_files:
         data = np.load(f)
-        chars = data["tty_chars"]                      # (T, 24, 80)
-        obs_seqs.append(chars.reshape(len(chars), -1).astype(np.uint8))
+        chars = data["tty_chars"].astype(np.uint8)     # (T, 24, 80)
+        colors = np.zeros_like(chars)                  # no color in NAO-TOP10
+        stacked = np.stack([chars, colors], axis=-1)   # (T, 24, 80, 2)
+        obs_seqs.append(stacked.reshape(len(chars), -1))
 
     log.info("Loaded %d sessions from %s", len(obs_seqs), directory)
     return obs_seqs, []
@@ -334,7 +344,12 @@ class TrajectoryDataset(Dataset):
         min_len = context_len + horizon + 1
         for i, seq in enumerate(sequences):
             if seq.ndim == 2:
+                # flat (T, H*W) — char-only legacy format; zero the color channel
                 seq = seq.reshape(-1, obs_h, obs_w)
+                seq = np.stack([seq, np.zeros_like(seq)], axis=-1)  # (T, H, W, 2)
+            elif seq.ndim == 3:
+                # (T, H, W) — char-only; zero the color channel
+                seq = np.stack([seq, np.zeros_like(seq)], axis=-1)  # (T, H, W, 2)
             if len(seq) < min_len:
                 continue
             self._seqs.append(seq.astype(np.uint8))
@@ -367,14 +382,14 @@ class TrajectoryDataset(Dataset):
         seq = self._seqs[traj_idx]
         t = int(np.random.randint(self.context_len - 1, len(seq) - self.horizon))
 
-        history      = torch.tensor(seq[t - self.context_len + 1 : t + 1], dtype=torch.long)
-        next_frame   = torch.tensor(seq[t + 1],             dtype=torch.long)
-        future_frame = torch.tensor(seq[t + self.horizon],  dtype=torch.long)
+        history      = torch.from_numpy(seq[t - self.context_len + 1 : t + 1].copy())
+        next_frame   = torch.from_numpy(seq[t + 1].copy())
+        future_frame = torch.from_numpy(seq[t + self.horizon].copy())
 
         out = (history, next_frame, future_frame)
 
         if self.return_sequence:
-            sequence = torch.tensor(seq[t + 1 : t + self.horizon + 1], dtype=torch.long)
+            sequence = torch.from_numpy(seq[t + 1 : t + self.horizon + 1].copy())
             out = out + (sequence,)
 
         if self._acts is not None:
@@ -474,13 +489,13 @@ class _GameBuffer:
 
     def _load(self, idx: int) -> np.ndarray:
         with np.load(self._paths[idx]) as f:
-            chars  = f["tty_chars"]                    # (T, H, W) uint8
-            colors = f["tty_colors"].astype(np.uint8)  # (T, H, W) int8 → uint8
+            chars  = f["tty_chars"]                                                    # (T, H, W) uint8
+            colors = np.clip(f["tty_colors"].astype(np.int16), 0, COLOR_VOCAB - 1).astype(np.uint8)
         return np.stack([chars, colors], axis=-1)      # (T, H, W, 2) uint8
 
     def _make_weights(self, games: list) -> np.ndarray:
         valid = np.maximum(
-            np.array([len(g) for g in games], dtype=np.float64) - (self._ctx + self._horizon),
+            np.array([len(g) for g in games], dtype=np.float64) - (self._ctx + self._horizon - 1),
             0.0,
         )
         s = valid.sum()

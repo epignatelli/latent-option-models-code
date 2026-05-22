@@ -112,6 +112,12 @@ class SelfAttention(nn.Module):
         k = k.view(B, T, self.n_heads, head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_heads, head_dim).transpose(1, 2)
 
+        # scaled_dot_product_attention cannot combine is_causal=True with an explicit mask;
+        # fold the causal constraint into the mask so both apply correctly.
+        if self.causal and attn_mask is not None:
+            causal_mask = torch.full((T, T), float("-inf"), device=x.device, dtype=x.dtype).triu(diagonal=1)
+            attn_mask = attn_mask + causal_mask
+
         if self.flash:
             y = F.scaled_dot_product_attention(
                 q,
@@ -123,7 +129,7 @@ class SelfAttention(nn.Module):
             )
         else:
             att = (q @ k.transpose(-2, -1)) / math.sqrt(head_dim)
-            if self.causal:
+            if self.causal and attn_mask is None:
                 mask_val = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
                 att = att.masked_fill(mask_val, float("-inf"))
             if attn_mask is not None:

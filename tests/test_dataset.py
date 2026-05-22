@@ -25,18 +25,18 @@ def test_dataset_basic_shapes():
     ds = TrajectoryDataset([make_seq(20)], context_len=CONTEXT, horizon=HORIZON,
                            obs_h=OBS_H, obs_w=OBS_W)
     history, next_frame, future_frame = ds[0]
-    assert history.shape == (CONTEXT, OBS_H, OBS_W)
-    assert next_frame.shape == (OBS_H, OBS_W)
-    assert future_frame.shape == (OBS_H, OBS_W)
-    assert history.dtype == torch.long
-    assert next_frame.dtype == torch.long
+    assert history.shape == (CONTEXT, OBS_H, OBS_W, 2)
+    assert next_frame.shape == (OBS_H, OBS_W, 2)
+    assert future_frame.shape == (OBS_H, OBS_W, 2)
+    assert history.dtype == torch.uint8
+    assert next_frame.dtype == torch.uint8
 
 
 def test_dataset_return_sequence():
     ds = TrajectoryDataset([make_seq(20)], context_len=CONTEXT, horizon=HORIZON,
                            obs_h=OBS_H, obs_w=OBS_W, return_sequence=True)
     history, next_frame, future_frame, sequence = ds[0]
-    assert sequence.shape == (HORIZON, OBS_H, OBS_W)
+    assert sequence.shape == (HORIZON, OBS_H, OBS_W, 2)
 
 
 def test_dataset_with_actions():
@@ -85,9 +85,9 @@ def test_build_dataloaders():
     )
     batch = next(iter(train_loader))
     history, next_frame, future_frame = batch
-    assert history.shape[1:] == (CONTEXT, OBS_H, OBS_W)
-    assert next_frame.shape[1:] == (OBS_H, OBS_W)
-    assert future_frame.shape[1:] == (OBS_H, OBS_W)
+    assert history.shape[1:] == (CONTEXT, OBS_H, OBS_W, 2)
+    assert next_frame.shape[1:] == (OBS_H, OBS_W, 2)
+    assert future_frame.shape[1:] == (OBS_H, OBS_W, 2)
 
 
 # --------------------------------------------------------------------------- #
@@ -120,7 +120,7 @@ def test_load_nao_top10_dir_shapes(tmp_path):
     obs, acts = _load_from_nao_top10_dir(str(tmp_path), top_n=None)
     assert len(obs) == 3
     assert len(acts) == 0
-    assert obs[0].shape == (20, OBS_H * OBS_W)
+    assert obs[0].shape == (20, OBS_H * OBS_W * 2)
     assert obs[0].dtype == np.uint8
 
 

@@ -189,7 +189,7 @@ class LatentActionModel(SerialisableModule):
         seq = torch.cat(parts, dim=1)
         hidden = self.transformer(seq, temporal_mask=self._build_mask(c, k, history.device))
 
-        opt_pos = c + (1 if condition is not None and self.has_condition else 0)
+        opt_pos = c + (1 if self.has_condition else 0)
         opt_pooled = hidden[:, opt_pos, :, :].mean(dim=1)  # (B, D)
         z = self.ln_vq(self.vq_proj(opt_pooled))
         return self.vq(z)
