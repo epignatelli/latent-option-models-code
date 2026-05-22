@@ -8,7 +8,7 @@ from typing import Literal, Optional
 class EnvCfg:
     obs_h: int = 24
     obs_w: int = 80
-    vocab_size: int = 256
+    vocab_size: int = 8192  # TOKEN_VOCAB = CHAR_VOCAB(256) * COLOR_VOCAB(32)
     n_actions: int = 98
 
 
@@ -43,10 +43,16 @@ class DataCfg:
     dataset: Literal["nao-top10", "nld-nao", "nld-aa"] = "nao-top10"
     nle_data_dir: str = "nle_data"
     fallback_numpy_dir: Optional[str] = None
+    index_path: str = ""
+    """Path to index.npz produced by convert_to_npz. When set, NpzTrajectoryDataset
+    is used instead of the in-memory loaders."""
     context_len: int = 4
     horizon: int = 8
     val_fraction: float = 0.05
     num_workers: int = 4
+    buffer_size: int = 1_000
+    """Number of games to keep in the NpzTrajectoryDataset buffer."""
+    steps_per_epoch: int = 10_000
 
 
 @dataclass

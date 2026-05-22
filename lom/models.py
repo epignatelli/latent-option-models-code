@@ -38,6 +38,7 @@ from torch.nn import functional as F
 from .modules import (
     LayerNorm,
     PatchEmbedding,
+    ScreenTokeniser,
     SpatioTemporalTransformer,
     VectorQuantizer,
     SerialisableModule,
@@ -109,6 +110,7 @@ class LatentActionModel(SerialisableModule):
         self.bias = bias
         self.has_condition = condition_dim is not None
 
+        self.tokeniser = ScreenTokeniser()
         self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
         S = self.S = self.embed.n_tokens
 
@@ -156,16 +158,18 @@ class LatentActionModel(SerialisableModule):
     ) -> Tuple[torch.Tensor, dict, torch.Tensor]:
         """
         Args:
-            history:   (B, c, H, W) long
-            future:    (B, H, W) or (B, k, H, W) long
+            history:   (B, c, H, W, 2) uint8/long — stacked (char, color)
+            future:    (B, H, W, 2) or (B, k, H, W, 2)
             condition: (B, condition_dim) optional
         Returns:
             z_q (B, latent_dim), vq loss dict, indices (B,)
         """
         B, c = history.shape[:2]
 
+        history = self.tokeniser(history)   # (B, c, H, W) long
+        future  = self.tokeniser(future)    # (B, H, W) or (B, k, H, W) long
         if future.ndim == 3:
-            future = future.unsqueeze(1)  # (B, 1, H, W)
+            future = future.unsqueeze(1)    # (B, 1, H, W)
         k = future.shape[1]
 
         hist_emb = self.embed(history)           # (B, c, S, D)
@@ -243,6 +247,7 @@ class DynamicsModel(SerialisableModule):
         self.dropout = dropout
         self.bias = bias
 
+        self.tokeniser = ScreenTokeniser()
         self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
         S = self.S = self.embed.n_tokens
 
@@ -301,16 +306,19 @@ class DynamicsModel(SerialisableModule):
     ) -> torch.Tensor:
         """
         Args:
-            history:        (B, c, H, W) long
+            history:        (B, c, H, W, 2) uint8/long — stacked (char, color)
             action:         (B, latent_dim)
             option_code:    (B, goal_dim) optional — z_option for LOM dynamics
             horizon:        number of frames to predict
-            teacher_frames: (B, horizon, H, W) long — teacher forcing, training only
+            teacher_frames: (B, horizon, H, W, 2) — teacher forcing, training only
         Returns:
             (B, H*W, vocab_size)            if predict_sequence=False
             (B, horizon, H*W, vocab_size)   if predict_sequence=True
         """
         B, c = history.shape[:2]
+        history = self.tokeniser(history)  # (B, c, H, W) long
+        if teacher_frames is not None:
+            teacher_frames = self.tokeniser(teacher_frames)  # (B, horizon, H, W) long
         cond = self._cond(action, option_code)  # (B, 1, 1, D)
 
         if self.predict_sequence:

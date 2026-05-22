@@ -12,8 +12,15 @@ import torch.nn as nn
 import torch.optim as optim
 
 from .config import LAMCfg, LOMCfg
-from .dataset import build_dataloaders, load_nao_top10, load_nld_nao, load_nld_aa
+from .dataset import (
+    build_dataloaders,
+    build_npz_dataloaders,
+    load_nao_top10,
+    load_nld_nao,
+    load_nld_aa,
+)
 from .models import DynamicsModel, LatentActionModel
+from .modules import tokenise
 
 log = logging.getLogger(__name__)
 
@@ -65,21 +72,34 @@ class Trainer(ABC):
         torch.manual_seed(t.seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        _loaders = {"nao-top10": load_nao_top10, "nld-nao": load_nld_nao, "nld-aa": load_nld_aa}
-        loader_fn = _loaders[d.dataset]
-        sequences, _ = loader_fn(
-            nle_data_dir=d.nle_data_dir, fallback_numpy_dir=d.fallback_numpy_dir
-        )
-        self.train_loader, self.val_loader = build_dataloaders(
-            sequences,
-            context_len=d.context_len,
-            horizon=d.horizon,
-            batch_size=t.batch_size,
-            val_fraction=d.val_fraction,
-            num_workers=d.num_workers,
-            seed=t.seed,
-            return_sequence=isinstance(cfg, LOMCfg),
-        )
+        if d.index_path:
+            self.train_loader, self.val_loader = build_npz_dataloaders(
+                index_path=d.index_path,
+                context_len=d.context_len,
+                horizon=d.horizon,
+                batch_size=t.batch_size,
+                buffer_size=d.buffer_size,
+                val_fraction=d.val_fraction,
+                steps_per_epoch=d.steps_per_epoch,
+                seed=t.seed,
+                return_sequence=isinstance(cfg, LOMCfg),
+            )
+        else:
+            _loaders = {"nao-top10": load_nao_top10, "nld-nao": load_nld_nao, "nld-aa": load_nld_aa}
+            loader_fn = _loaders[d.dataset]
+            sequences, _ = loader_fn(
+                nle_data_dir=d.nle_data_dir, fallback_numpy_dir=d.fallback_numpy_dir
+            )
+            self.train_loader, self.val_loader = build_dataloaders(
+                sequences,
+                context_len=d.context_len,
+                horizon=d.horizon,
+                batch_size=t.batch_size,
+                val_fraction=d.val_fraction,
+                num_workers=d.num_workers,
+                seed=t.seed,
+                return_sequence=isinstance(cfg, LOMCfg),
+            )
 
         self.models = self.build_models().to(self.device)
         if t.compile_model:
@@ -304,7 +324,7 @@ class LAMTrainer(Trainer):
         history, next_frame = batch[0], batch[1]
         z, vq, _ = self.models["lam"](history, next_frame)
         logits = self.models["dynamics"](history, z.detach())
-        recon = reconstruction_loss(logits, next_frame, self.cfg.env.vocab_size)
+        recon = reconstruction_loss(logits, tokenise(next_frame), self.cfg.env.vocab_size)
         total = recon + vq["vq_loss"]
         return {
             "recon": recon,
@@ -372,7 +392,7 @@ class LOMTrainer(Trainer):
         z_act, vq_act, _ = self.models["action_lam"](history, next_frame, z_opt.detach())
 
         lam_logits = self.models["lam_dynamics"](history, z_act.detach())
-        lam_recon = reconstruction_loss(lam_logits, next_frame, self.cfg.env.vocab_size)
+        lam_recon = reconstruction_loss(lam_logits, tokenise(next_frame), self.cfg.env.vocab_size)
 
         if m.predict_sequence:
             lom_logits = self.models["lom_dynamics"](
@@ -382,7 +402,7 @@ class LOMTrainer(Trainer):
                 horizon=self.cfg.data.horizon,
                 teacher_frames=sequence,
             )
-            lom_recon = reconstruction_loss(lom_logits, sequence, self.cfg.env.vocab_size)
+            lom_recon = reconstruction_loss(lom_logits, tokenise(sequence), self.cfg.env.vocab_size)
         else:
             lom_logits = self.models["lom_dynamics"](
                 history,
@@ -390,7 +410,7 @@ class LOMTrainer(Trainer):
                 option_code=z_opt.detach(),
                 horizon=1,
             )
-            lom_recon = reconstruction_loss(lom_logits, future_frame, self.cfg.env.vocab_size)
+            lom_recon = reconstruction_loss(lom_logits, tokenise(future_frame), self.cfg.env.vocab_size)
 
         vq_loss = vq_opt["vq_loss"] + vq_act["vq_loss"]
         total = lam_recon + lom_recon + vq_loss

@@ -473,7 +473,10 @@ class _GameBuffer:
         self._thread.start()
 
     def _load(self, idx: int) -> np.ndarray:
-        return np.load(self._paths[idx])["tty_chars"]
+        with np.load(self._paths[idx]) as f:
+            chars  = f["tty_chars"]                    # (T, H, W) uint8
+            colors = f["tty_colors"].astype(np.uint8)  # (T, H, W) int8 → uint8
+        return np.stack([chars, colors], axis=-1)      # (T, H, W, 2) uint8
 
     def _make_weights(self, games: list) -> np.ndarray:
         valid = np.maximum(
@@ -593,14 +596,15 @@ class NpzTrajectoryDataset(Dataset):
 
     def __getitem__(self, idx: int):
         game, t = self._buffer.sample(self._rng)
+        # game: (T, H, W, 2) uint8 — (char, color) per cell
 
-        history      = torch.tensor(game[t - self.context_len + 1 : t + 1], dtype=torch.long)
-        next_frame   = torch.tensor(game[t + 1],            dtype=torch.long)
-        future_frame = torch.tensor(game[t + self.horizon], dtype=torch.long)
+        history      = torch.from_numpy(game[t - self.context_len + 1 : t + 1].copy())
+        next_frame   = torch.from_numpy(game[t + 1].copy())
+        future_frame = torch.from_numpy(game[t + self.horizon].copy())
 
         out = (history, next_frame, future_frame)
         if self.return_sequence:
-            out = out + (torch.tensor(game[t + 1 : t + self.horizon + 1], dtype=torch.long),)
+            out = out + (torch.from_numpy(game[t + 1 : t + self.horizon + 1].copy()),)
         return out
 
     def close(self) -> None:

@@ -256,18 +256,52 @@ class SpatioTemporalTransformer(nn.Module):
 
 
 # --------------------------------------------------------------------------- #
+# --- Screen tokenisation --------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+CHAR_VOCAB  = 256
+COLOR_VOCAB = 32
+TOKEN_VOCAB = CHAR_VOCAB * COLOR_VOCAB  # 8192
+
+
+def tokenise(x: torch.Tensor) -> torch.Tensor:
+    """Map (..., H, W, 2) char+color pairs to (..., H, W) integer token IDs.
+
+    token_id = char * COLOR_VOCAB + color  ∈ [0, TOKEN_VOCAB)
+    """
+    return x[..., 0].long() * COLOR_VOCAB + x[..., 1].long()
+
+
+class ScreenTokeniser(nn.Module):
+    """Stateless module wrapping tokenise() so it composes with nn.Sequential
+    and survives torch.compile.
+
+    Input:  (..., H, W, 2) — last dim is (char uint8, color uint8)
+    Output: (..., H, W)    — long token IDs in [0, TOKEN_VOCAB)
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return tokenise(x)
+
+
+# --------------------------------------------------------------------------- #
 # --- Patch Embedding ------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
 
 class PatchEmbedding(nn.Module):
-    """Embeds (B, T, H, W) discrete frames into (B, T, n_tokens, d_model) patch tokens.
+    """Embeds (B, T, H, W) token IDs into (B, T, n_tokens, d_model) patch tokens.
 
-    patch_size=1  — equivalent to a plain character embedding (no spatial compression).
-    patch_size=P  — each P×P block of characters is embedded and linearly projected
-                    into a single d_model token.  n_tokens = (H//P) * (W//P).
+    Expects pre-tokenised integer IDs (e.g. from ScreenTokeniser).
 
-    H and W must be divisible by patch_size.
+    patch_size=1  — plain token embedding, no spatial compression.
+    patch_size=P  — each P×P block is embedded and projected into one d_model
+                    token.  n_tokens = (H//P) * (W//P).
+
+    Registers a `token_usage` buffer (shape: vocab_size,) that counts how many
+    times each token ID has been looked up across all forward passes.  Use it
+    to identify dead tokens after training:
+        dead = (model.embed.token_usage == 0).sum()
     """
 
     def __init__(
@@ -295,10 +329,20 @@ class PatchEmbedding(nn.Module):
             if patch_size > 1 else None
         )
 
+        self.register_buffer("token_usage", torch.zeros(vocab_size, dtype=torch.long))
+
+        def _usage_hook(_module, inputs, _output):
+            ids = inputs[0].detach().reshape(-1)
+            self.token_usage.index_add_(
+                0, ids, torch.ones(ids.numel(), dtype=torch.long, device=ids.device)
+            )
+
+        self.char_embed.register_forward_hook(_usage_hook)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (B, T, H, W) long
+            x: (B, T, H, W) long — token IDs
         Returns:
             (B, T, n_tokens, d_model)
         """
