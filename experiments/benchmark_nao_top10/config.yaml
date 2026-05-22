@@ -1,0 +1,41 @@
+# Experiment: LAM vs LOM on NAO-TOP10
+#
+# Conditions:
+#   LAM (baseline)  horizon=1    num_options=98   (one code per atomic action)
+#   LOM (proposed)  horizon=128  num_options=256  (temporally extended options)
+#
+# Dataset: NAO Top-10 (DeepMind, ~12 GB, 16,482 sessions, expert human play)
+# Data path: uses NpzTrajectoryDataset via index.npz (lazy loading, O(buffer_size) RAM)
+
+sweep:
+  seeds: [0, 1, 2]
+
+data:
+  nle_data_dir: /scratch/uceeepi/lom/datasets
+  dataset: nao-top10
+  index_path: /scratch/uceeepi/lom/datasets/nao-top10/nao_top10/index.npz
+  context_len: 4
+  horizon: 128
+  buffer_size: 200
+  steps_per_epoch: 10_000
+
+model:
+  context_length: 4
+  latent_dim: 512
+  num_options: 256
+  patch_size: 4
+
+train:
+  ckpt_dir: /scratch/uceeepi/lom/checkpoints/benchmark_nao_top10
+  batch_size: 256
+  max_iters: 100_000
+  warmup_iters: 1_000
+  log_interval: 50
+  eval_interval: 500
+  eval_iters: 50
+
+wandb:
+  project: latent-option-models
+  entity: epignatelli_
+  group: benchmark_nao_top10
+  dir: /scratch/uceeepi/lom/wandb

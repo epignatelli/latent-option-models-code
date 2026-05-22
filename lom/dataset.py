@@ -157,7 +157,10 @@ def _load_from_nao_top10_dir(
     for f in npz_files:
         data = np.load(f)
         chars = data["tty_chars"].astype(np.uint8)     # (T, 24, 80)
-        colors = np.zeros_like(chars)                  # no color in NAO-TOP10
+        if "tty_colors" in data:
+            colors = np.clip(data["tty_colors"].astype(np.int16), 0, COLOR_VOCAB - 1).astype(np.uint8)
+        else:
+            colors = np.zeros_like(chars)
         stacked = np.stack([chars, colors], axis=-1)   # (T, 24, 80, 2)
         obs_seqs.append(stacked.reshape(len(chars), -1))
 

@@ -51,8 +51,9 @@ _SCORE_RE = re.compile(rb"S:(\d+)")
 
 @dataclass
 class Args:
-    dataset: Literal["nld-aa", "nld-nao", "all"]
-    """Which dataset to convert. 'all' converts nld-aa then nld-nao."""
+    dataset: Literal["nld-aa", "nld-nao", "nao-top10", "all"]
+    """Which dataset to convert/index. 'nao-top10' only builds an index (files already in npz).
+    'all' converts nld-aa and nld-nao, then indexes nao-top10."""
     nle_data_dir: str
     """Root directory containing nld-aa/ or nld-nao/ subdirectories."""
     output_dir: str = ""
@@ -383,10 +384,19 @@ def _run_one(dataset: str, nle_data_dir: str, output_dir: str, workers: int, min
 def main() -> None:
     args = tyro.cli(Args)
 
+    if args.dataset == "nao-top10":
+        output_dir = args.output_dir or os.path.join(args.nle_data_dir, "nao-top10", "nao_top10")
+        os.makedirs(output_dir, exist_ok=True)
+        _run_index_only(output_dir, args.workers)
+        return
+
     if args.dataset == "all":
         _run_one("nld-aa",  args.nle_data_dir, "", args.workers, args.min_frames, args.index_only,
                  nld_aa_subdir=args.nld_aa_subdir)
         _run_one("nld-nao", args.nle_data_dir, "", args.workers, args.min_frames, args.index_only)
+        output_dir = os.path.join(args.nle_data_dir, "nao-top10", "nao_top10")
+        os.makedirs(output_dir, exist_ok=True)
+        _run_index_only(output_dir, args.workers)
     else:
         _run_one(args.dataset, args.nle_data_dir, args.output_dir, args.workers, args.min_frames,
                  args.index_only, nld_aa_subdir=args.nld_aa_subdir)
