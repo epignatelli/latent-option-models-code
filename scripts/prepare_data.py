@@ -324,6 +324,51 @@ def _convert_one(task: tuple) -> dict:
     return {"status": "ok", "frames": n_frames, "path": output_path, "max_score": max_score}
 
 
+def _convert_player(task: tuple) -> dict:
+    """Decode all games for one nld-nao player into a single per-player npz.
+
+    Each bz2 file is one game.  Valid games are concatenated along the time axis
+    and an ``offsets`` array (shape n_games+1) marks the boundary of each game::
+
+        tty_chars[offsets[i] : offsets[i+1]]  →  game i
+    """
+    input_files, output_path, ttyrec_version, min_frames, _save_keys = task
+    if os.path.exists(output_path):
+        return {"status": "skip"}
+
+    chars_parts, colors_parts = [], []
+    offsets = [0]
+    total_frames = 0
+
+    for bz2_path in input_files:
+        try:
+            arrays, n_frames = _decode([bz2_path], ttyrec_version)
+        except Exception:
+            continue
+        if not arrays or n_frames < min_frames:
+            continue
+        chars_parts.append(arrays["tty_chars"].astype(np.uint8))
+        if "tty_colors" in arrays:
+            colors_parts.append(arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8))
+        else:
+            colors_parts.append(np.zeros_like(arrays["tty_chars"], dtype=np.uint8))
+        total_frames += n_frames
+        offsets.append(total_frames)
+
+    if not chars_parts:
+        return {"status": "filter"}
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    np.savez_compressed(
+        output_path,
+        tty_chars=np.concatenate(chars_parts),
+        tty_colors=np.concatenate(colors_parts),
+        offsets=np.array(offsets, dtype=np.int64),
+    )
+    return {"status": "ok", "frames": total_frames, "games": len(offsets) - 1,
+            "path": output_path, "max_score": 0}
+
+
 def _discover_nld_aa(nle_data_dir: str, output_dir: str, subdir: str) -> list[tuple]:
     data_root = os.path.join(nle_data_dir, "nld-aa", subdir)
     if not os.path.isdir(data_root):
@@ -345,7 +390,10 @@ def _discover_nld_aa(nle_data_dir: str, output_dir: str, subdir: str) -> list[tu
 
 
 def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
-    data_root = os.path.join(nle_data_dir, "nld-nao")
+    # Extracted archives land in nld-nao/nld-nao-unzipped/ after zip extraction.
+    data_root = os.path.join(nle_data_dir, "nld-nao", "nld-nao-unzipped")
+    if not os.path.isdir(data_root):
+        data_root = os.path.join(nle_data_dir, "nld-nao")  # fallback
     if not os.path.isdir(data_root):
         raise FileNotFoundError(f"nld-nao data not found at {data_root}")
     tasks = []
@@ -353,23 +401,29 @@ def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> li
         player_dir = os.path.join(data_root, player)
         if not os.path.isdir(player_dir):
             continue
-        for fname in sorted(os.listdir(player_dir)):
-            if not fname.endswith(".bz2"):
-                continue
-            safe = fname.replace(":", "-").replace(".bz2", "") + ".npz"
-            tasks.append((
-                [os.path.join(player_dir, fname)],
-                os.path.join(output_dir, player, safe),
-                1, min_frames, _KEYS_NAO,
-            ))
+        bz2_files = sorted(
+            os.path.join(player_dir, f)
+            for f in os.listdir(player_dir)
+            if f.endswith(".bz2")
+        )
+        if not bz2_files:
+            continue
+        # One output file per player; all their games concatenated with an offsets array.
+        tasks.append((bz2_files, os.path.join(output_dir, f"{player}.npz"), 1, min_frames, _KEYS_NAO))
     return tasks
 
 
-def _run_convert(tasks: list[tuple], workers: int, min_frames: int,
-                 npz_dir: str) -> tuple[list[str], list[int], list[int]]:
+def _run_convert(
+    tasks: list[tuple],
+    workers: int,
+    min_frames: int,
+    npz_dir: str,
+    converter=_convert_one,
+    unit: str = "game",
+) -> tuple[list[str], list[int], list[int]]:
     """Convert ttyrec tasks → npz; return (paths, lengths, scores) for new files."""
     total = len(tasks)
-    print(f"  games found: {total:,}")
+    print(f"  {unit}s found: {total:,}", flush=True)
 
     index_path = os.path.join(npz_dir, "index.npz")
     if os.path.exists(index_path):
@@ -386,8 +440,8 @@ def _run_convert(tasks: list[tuple], workers: int, min_frames: int,
     new_entries: list[tuple[str, int, int]] = []
 
     with mp.Pool(workers) as pool:
-        with tqdm(total=total, unit="game", desc="  convert", dynamic_ncols=True) as bar:
-            for result in pool.imap_unordered(_convert_one, tasks):
+        with tqdm(total=total, unit=unit, desc=f"  convert", dynamic_ncols=True) as bar:
+            for result in pool.imap_unordered(converter, tasks):
                 counts[result["status"]] += 1
                 if result["status"] == "ok":
                     p = result["path"]
@@ -402,9 +456,9 @@ def _run_convert(tasks: list[tuple], workers: int, min_frames: int,
                 bar.update(1)
 
     if errors:
-        print(f"\n  first 10 errors:")
+        print(f"\n  first 10 errors:", flush=True)
         for msg in errors[:10]:
-            print(f"    {msg}")
+            print(f"    {msg}", flush=True)
 
     all_paths   = ex_paths   + [p for p, _, _ in new_entries]
     all_lengths = ex_lengths + [n for _, n, _ in new_entries]
@@ -418,6 +472,9 @@ def _run_convert(tasks: list[tuple], workers: int, min_frames: int,
 
 def _max_score_from_file(path: str) -> tuple[int, int]:
     with np.load(path) as f:
+        if "offsets" in f:
+            # Per-player file: total frames = last offset; score not stored.
+            return int(f["offsets"][-1]), 0
         if "scores" in f:
             scores = f["scores"]
             return int(scores.shape[0]), int(scores.max())
@@ -589,9 +646,16 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
         print(f"[convert]  → {npz_dir}")
         if dataset == "nld-aa":
             tasks = _discover_nld_aa(root, npz_dir, args.nld_aa_subdir)
+            paths, lengths, scores = _run_convert(
+                tasks, args.workers, args.min_frames, npz_dir,
+                converter=_convert_one, unit="game",
+            )
         else:
             tasks = _discover_nld_nao(root, npz_dir, args.min_frames)
-        paths, lengths, scores = _run_convert(tasks, args.workers, args.min_frames, npz_dir)
+            paths, lengths, scores = _run_convert(
+                tasks, args.workers, args.min_frames, npz_dir,
+                converter=_convert_player, unit="player",
+            )
     else:
         print("[convert]  skipped")
         paths, lengths, scores = None, None, None

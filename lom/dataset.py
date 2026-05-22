@@ -479,24 +479,33 @@ class _GameBuffer:
         self._refresh_rng = np.random.default_rng(seed + 1)
 
         init_idxs = rng.choice(len(paths), size=n_init, replace=False, p=self._pool_weights)
-        log.info("Loading initial buffer of %d games ...", n_init)
-        games = [self._load(i) for i in init_idxs]
-        # _state is replaced atomically; reads need no lock (CPython GIL)
-        self._state: tuple = (games, self._make_weights(games))
-        log.info("Buffer ready (%d games loaded).", n_init)
+        log.info("Loading initial buffer of %d files ...", n_init)
+        # Each _load call returns a list of games (one file may contain many games via offsets).
+        # _players tracks the per-file grouping for refresh; _state exposes a flat view for sampling.
+        self._players: list = [self._load(i) for i in init_idxs]
+        flat = [g for pg in self._players for g in pg]
+        self._state: tuple = (flat, self._make_weights(flat))
+        log.info("Buffer ready (%d games from %d files).", len(flat), n_init)
 
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
         self._thread.start()
 
-    def _load(self, idx: int) -> np.ndarray:
+    def _load(self, idx: int) -> list:
+        """Load one npz file and return a list of (T, H, W, 2) uint8 game arrays.
+
+        Supports both single-game npz (no ``offsets`` key) and per-player npz
+        produced by prepare_data.py (with ``offsets`` marking game boundaries).
+        """
         with np.load(self._paths[idx]) as f:
-            chars = f["tty_chars"].astype(np.uint8)   # reinterpret bytes; safe for int8 or uint8 source
+            chars = f["tty_chars"].astype(np.uint8)
             if "tty_colors" in f:
                 colors = np.clip(f["tty_colors"].astype(np.int16), 0, COLOR_VOCAB - 1).astype(np.uint8)
             else:
                 colors = np.zeros_like(chars)
-        return np.stack([chars, colors], axis=-1)      # (T, H, W, 2) uint8
+            offsets = f["offsets"] if "offsets" in f else np.array([0, len(chars)], dtype=np.int64)
+        stacked = np.stack([chars, colors], axis=-1)  # (total_T, H, W, 2)
+        return [stacked[offsets[i]:offsets[i + 1]] for i in range(len(offsets) - 1)]
 
     def _make_weights(self, games: list) -> np.ndarray:
         valid = np.maximum(
@@ -508,18 +517,19 @@ class _GameBuffer:
 
     def _refresh_loop(self) -> None:
         while not self._stop.wait(self._refresh_every):
-            games, _ = self._state
-            new_games = list(games)
+            players = list(self._players)
 
             new_idxs = self._refresh_rng.choice(
                 len(self._paths), size=self._n_refresh, replace=False, p=self._pool_weights
             )
-            slots = self._refresh_rng.choice(len(new_games), size=self._n_refresh, replace=False)
+            slots = self._refresh_rng.choice(len(players), size=self._n_refresh, replace=False)
 
             for slot, pool_idx in zip(slots, new_idxs):
-                new_games[slot] = self._load(pool_idx)
+                players[slot] = self._load(pool_idx)
 
-            self._state = (new_games, self._make_weights(new_games))
+            flat = [g for pg in players for g in pg]
+            self._players = players
+            self._state = (flat, self._make_weights(flat))
 
     def sample(self, rng: np.random.Generator) -> tuple:
         games, weights = self._state
