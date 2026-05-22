@@ -940,17 +940,27 @@ def _index_worker_rich(player_path: str) -> dict:
 
 
 def _build_rich_index_from_scan(
-    scan_dir: str, workers: int, index_path: str, nle_data_dir: str | None = None
+    scan_dir: str, workers: int, index_path: str,
+    nle_data_dir: str | None = None,
+    recursive: bool = True,
 ) -> None:
-    """Scan nld-nao-npz dir; rebuild rich index using source_timestamps + xlogfile."""
+    """Rebuild a rich index by scanning existing per-player npz files."""
     global _xl_by_player
 
-    npz_files = [
-        os.path.join(dp, f)
-        for dp, _, files in os.walk(scan_dir)
-        for f in files
-        if f.endswith(".npz") and f != "index.npz"
-    ]
+    if recursive:
+        npz_files = [
+            os.path.join(dp, f)
+            for dp, _, files in os.walk(scan_dir)
+            for f in files
+            if f.endswith(".npz") and f != "index.npz"
+        ]
+    else:
+        # Non-recursive: top-level flat files only (avoids source session sub-dirs).
+        npz_files = [
+            os.path.join(scan_dir, f)
+            for f in os.listdir(scan_dir)
+            if f.endswith(".npz") and f != "index.npz"
+        ]
     total = len(npz_files)
     print(f"  scanning {total:,} player files in {scan_dir} ...", flush=True)
 
