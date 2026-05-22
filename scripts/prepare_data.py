@@ -71,7 +71,7 @@ import numpy as np
 import tyro
 from tqdm import tqdm
 
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 ROWS, COLS = 24, 80
 
@@ -384,24 +384,22 @@ def _run_convert(tasks: list[tuple], workers: int, min_frames: int,
     counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
     errors: list[str] = []
     new_entries: list[tuple[str, int, int]] = []
-    log_every = max(1, total // 100)
 
     with mp.Pool(workers) as pool:
-        for i, result in enumerate(pool.imap_unordered(_convert_one, tasks), 1):
-            counts[result["status"]] += 1
-            if result["status"] == "ok":
-                p = result["path"]
-                if p not in existing:
-                    new_entries.append((p, result["frames"], result["max_score"]))
-            elif result["status"] == "error":
-                errors.append(result.get("msg", "unknown"))
-            if i % log_every == 0 or i == total:
-                print(
-                    f"  [{i:>9,} / {total:,}]  "
-                    f"ok={counts['ok']:,}  skip={counts['skip']:,}  "
-                    f"filter={counts['filter']:,}  error={counts['error']:,}",
-                    flush=True,
+        with tqdm(total=total, unit="game", desc="  convert", dynamic_ncols=True) as bar:
+            for result in pool.imap_unordered(_convert_one, tasks):
+                counts[result["status"]] += 1
+                if result["status"] == "ok":
+                    p = result["path"]
+                    if p not in existing:
+                        new_entries.append((p, result["frames"], result["max_score"]))
+                elif result["status"] == "error":
+                    errors.append(result.get("msg", "unknown"))
+                bar.set_postfix(
+                    ok=counts["ok"], skip=counts["skip"],
+                    filt=counts["filter"], err=counts["error"],
                 )
+                bar.update(1)
 
     if errors:
         print(f"\n  first 10 errors:")
@@ -469,26 +467,21 @@ def _build_index_from_scan(scan_dir: str, workers: int) -> tuple[list[str], list
         if f.endswith(".npz") and f != "index.npz"
     ]
     total = len(npz_files)
-    print(f"  scanning {total:,} files in {scan_dir} ...")
-    log_every = max(1, total // 100)
+    print(f"  scanning {total:,} files in {scan_dir} ...", flush=True)
 
     good_paths, good_lengths, good_scores = [], [], []
     errors = 0
     with mp.Pool(workers) as pool:
-        for i, (path, n, score) in enumerate(
-            pool.imap_unordered(_index_worker, npz_files), 1
-        ):
-            if n >= 0:
-                good_paths.append(path)
-                good_lengths.append(n)
-                good_scores.append(score)
-            else:
-                errors += 1
-            if i % log_every == 0 or i == total:
-                print(
-                    f"  [{i:>9,} / {total:,}]  ok={len(good_paths):,}  errors={errors}",
-                    flush=True,
-                )
+        with tqdm(total=total, unit="file", desc="  index", dynamic_ncols=True) as bar:
+            for path, n, score in pool.imap_unordered(_index_worker, npz_files):
+                if n >= 0:
+                    good_paths.append(path)
+                    good_lengths.append(n)
+                    good_scores.append(score)
+                else:
+                    errors += 1
+                bar.set_postfix(ok=len(good_paths), err=errors)
+                bar.update(1)
     return good_paths, good_lengths, good_scores
 
 
@@ -623,6 +616,10 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
 # --------------------------------------------------------------------------- #
 
 def main() -> None:
+    import sys
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+
     cfg = tyro.cli(
         Union[
             Annotated[NaoTop10Args, tyro.conf.subcommand("nao-top10")],
