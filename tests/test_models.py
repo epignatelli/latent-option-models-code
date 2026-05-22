@@ -37,16 +37,23 @@ def make_dynamics(option_dim=None, predict_sequence=False):
     )
 
 
+def _screen(*leading):
+    """Random (char, color) screen tensor: (*leading, H, W, 2) uint8."""
+    chars  = torch.randint(0, 256, (*leading, OBS_H, OBS_W, 1), dtype=torch.uint8)
+    colors = torch.randint(0, 32,  (*leading, OBS_H, OBS_W, 1), dtype=torch.uint8)
+    return torch.cat([chars, colors], dim=-1)
+
+
 def history():
-    return torch.randint(0, VOCAB, (BATCH, CONTEXT, OBS_H, OBS_W))
+    return _screen(BATCH, CONTEXT)
 
 
 def single_frame():
-    return torch.randint(0, VOCAB, (BATCH, OBS_H, OBS_W))
+    return _screen(BATCH)
 
 
 def frame_sequence(k):
-    return torch.randint(0, VOCAB, (BATCH, k, OBS_H, OBS_W))
+    return _screen(BATCH, k)
 
 
 # --------------------------------------------------------------------------- #

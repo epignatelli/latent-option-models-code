@@ -18,7 +18,7 @@ from conftest import CONTEXT, HORIZON, OBS_H, OBS_W, VOCAB
 
 
 def make_seq(T):
-    return np.random.randint(0, VOCAB, (T, OBS_H, OBS_W), dtype=np.uint8)
+    return np.random.randint(0, 256, (T, OBS_H, OBS_W), dtype=np.uint8)
 
 
 def test_dataset_basic_shapes():
@@ -99,7 +99,7 @@ def _write_npz_sessions(root, n_sessions=3, T=20):
     for i in range(n_sessions):
         user_dir = os.path.join(root, f"player{i}")
         os.makedirs(user_dir, exist_ok=True)
-        chars = np.random.randint(0, VOCAB, (T, OBS_H, OBS_W), dtype=np.uint8)
+        chars = np.random.randint(0, 256, (T, OBS_H, OBS_W), dtype=np.uint8)
         np.savez(os.path.join(user_dir, f"sess{i}.npz"), tty_chars=chars)
 
 
@@ -107,7 +107,7 @@ def _write_npy_sequences(root, n=3, T=20):
     """Write fake flat .npy observation files under root."""
     os.makedirs(root, exist_ok=True)
     for i in range(n):
-        arr = np.random.randint(0, VOCAB, (T, OBS_H * OBS_W), dtype=np.uint8)
+        arr = np.random.randint(0, 256, (T, OBS_H * OBS_W), dtype=np.uint8)
         np.save(os.path.join(root, f"ep{i:03d}.npy"), arr)
 
 

@@ -67,6 +67,12 @@ def test_reconstruction_loss_sequence():
 # --- Trainer.step ---------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
+def _screen(*leading):
+    chars  = torch.randint(0, 256, (*leading, OBS_H, OBS_W, 1), dtype=torch.uint8)
+    colors = torch.randint(0, 32,  (*leading, OBS_H, OBS_W, 1), dtype=torch.uint8)
+    return torch.cat([chars, colors], dim=-1)
+
+
 def make_env_cfg():
     return EnvCfg(obs_h=OBS_H, obs_w=OBS_W, vocab_size=VOCAB, n_actions=8)
 
@@ -102,17 +108,11 @@ def lom_trainer_with_models():
 
 
 def lam_batch():
-    history = torch.randint(0, VOCAB, (BATCH, CONTEXT, OBS_H, OBS_W))
-    next_frame = torch.randint(0, VOCAB, (BATCH, OBS_H, OBS_W))
-    return [history, next_frame]
+    return [_screen(BATCH, CONTEXT), _screen(BATCH)]
 
 
 def lom_batch():
-    history = torch.randint(0, VOCAB, (BATCH, CONTEXT, OBS_H, OBS_W))
-    next_frame = torch.randint(0, VOCAB, (BATCH, OBS_H, OBS_W))
-    future_frame = torch.randint(0, VOCAB, (BATCH, OBS_H, OBS_W))
-    sequence = torch.randint(0, VOCAB, (BATCH, HORIZON, OBS_H, OBS_W))
-    return [history, next_frame, future_frame, sequence]
+    return [_screen(BATCH, CONTEXT), _screen(BATCH), _screen(BATCH), _screen(BATCH, HORIZON)]
 
 
 def test_lam_step_keys():
