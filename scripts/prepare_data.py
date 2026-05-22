@@ -25,8 +25,8 @@ Output layout under --output-dir:
   nao-top10-npz/index.npz       rich index (game lengths; no xlogfile metadata)
   nld-aa/                       extracted ttyrec files
   nld-aa.db                     NLE SQLite database
-  nld-aa-npz/autoascend/        converted per-game .npz files
-  nld-aa-npz/index.npz
+  nld-aa-npz/                   converted per-game-dir .npz files (fake players)
+  nld-aa-npz/index.npz          rich index with per-game-dir and per-game metadata
   nld-nao/                      extracted ttyrec files
   nld-nao.db
   nld-nao-npz/                  converted per-player .npz files (one file per player)
@@ -79,9 +79,6 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 ROWS, COLS = 24, 80
 
-_KEYS_AA  = ("tty_chars", "tty_colors", "tty_cursor", "keypresses", "scores", "done")
-_KEYS_NAO = ("tty_chars", "tty_colors", "tty_cursor", "done")
-_SCORE_RE = re.compile(rb"S:(\d+)")
 _HEX_RE   = re.compile(r"^0x[0-9a-fA-F]+$")
 
 _NLD_AA_BASE   = "https://dl.fbaipublicfiles.com/nld/nld-aa/"
@@ -361,20 +358,6 @@ def _game_meta_from_xlog(entry: dict, n_frames: int, file_ts: int) -> dict:
 # --- ttyrec → npz conversion ------------------------------------------------ #
 # --------------------------------------------------------------------------- #
 
-def _max_score_from_arrays(arrays: dict, save_keys: tuple) -> int:
-    if "scores" in save_keys:
-        return int(arrays["scores"].max())
-    tty_chars = arrays["tty_chars"]
-    max_score = 0
-    for t in range(len(tty_chars)):
-        m = _SCORE_RE.search(bytes(tty_chars[t, 22]))
-        if m:
-            s = int(m.group(1))
-            if s > max_score:
-                max_score = s
-    return max_score
-
-
 def _decode(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
     from nle import _pyconverter as nle_converter
 
@@ -417,23 +400,6 @@ def _decode(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
     }, len(tty_chars)
 
 
-def _convert_one(task: tuple) -> dict:
-    """Decode one nld-aa game (potentially multi-part) into a single npz."""
-    input_files, output_path, ttyrec_version, min_frames, save_keys = task
-    if os.path.exists(output_path):
-        return {"status": "skip"}
-    try:
-        arrays, n_frames = _decode(input_files, ttyrec_version)
-    except Exception as exc:
-        return {"status": "error", "msg": f"{input_files[0]}: {exc}"}
-    if n_frames < min_frames:
-        return {"status": "filter"}
-    max_score = _max_score_from_arrays(arrays, save_keys)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    np.savez_compressed(output_path, **{k: arrays[k] for k in save_keys})
-    return {"status": "ok", "frames": n_frames, "path": output_path, "max_score": max_score}
-
-
 def _convert_player(task: tuple) -> dict:
     """Decode all games for one nld-nao player into a single per-player npz.
 
@@ -445,7 +411,7 @@ def _convert_player(task: tuple) -> dict:
     Uses the module-level ``_xl_by_player`` dict which workers inherit from the
     main process via fork.
     """
-    input_files, output_path, ttyrec_version, min_frames, _save_keys, player_name = task
+    input_files, output_path, ttyrec_version, min_frames, player_name = task
     xl_entries = _xl_by_player.get(player_name, [])
 
     # --- skip case: file already exists; rebuild game_meta without re-decoding ---
@@ -614,24 +580,126 @@ def _consolidate_nao_top10_player(task: tuple) -> dict:
     }
 
 
-def _discover_nld_aa(nle_data_dir: str, output_dir: str, subdir: str) -> list[tuple]:
-    data_root = os.path.join(nle_data_dir, "nld-aa", subdir)
+def _read_aa_xlogfile(game_dir: str) -> dict[str, dict]:
+    """Return mapping ttyrecname → xlogfile entry for all games in game_dir."""
+    for fname in os.listdir(game_dir):
+        if fname.endswith(".xlogfile"):
+            result: dict[str, dict] = {}
+            with open(os.path.join(game_dir, fname), "r", errors="replace") as fh:
+                for line in fh:
+                    entry = _parse_xlog_line(line)
+                    key = entry.get("ttyrecname", "")
+                    if key:
+                        result[key] = entry
+            return result
+    return {}
+
+
+def _discover_nld_aa_grouped(nle_data_dir: str, output_dir: str,
+                              min_frames: int) -> list[tuple]:
+    """One task per game dir (fake player = one Autoascend run, ~100 games each)."""
+    data_root = os.path.join(nle_data_dir, "nld-aa", "nle_data")
     if not os.path.isdir(data_root):
         raise FileNotFoundError(
             f"nld-aa data not found at {data_root}\n"
-            f"Pass --nld-aa-subdir to override (current: '{subdir}')"
+            "Pass --nld-aa-subdir to point at the right sub-directory."
         )
-    tasks = []
+    tasks: list[tuple] = []
     for gdir in sorted(os.listdir(data_root)):
-        dir_path = os.path.join(data_root, gdir)
-        parts = sorted(
-            glob.glob(os.path.join(dir_path, "*.ttyrec*.bz2")),
-            key=lambda f: int(os.path.basename(f).split(".")[2]),
-        )
-        if not parts:
+        game_dir = os.path.join(data_root, gdir)
+        if not os.path.isdir(game_dir):
             continue
-        tasks.append((parts, os.path.join(output_dir, "autoascend", f"{gdir}.npz"), 3, 0, _KEYS_AA))
+        bz2_files = [
+            os.path.join(game_dir, f)
+            for f in os.listdir(game_dir)
+            if f.endswith(".bz2")
+        ]
+        if not bz2_files:
+            continue
+        tasks.append((
+            bz2_files,
+            os.path.join(output_dir, f"{gdir}.npz"),
+            3, min_frames, game_dir,
+        ))
     return tasks
+
+
+def _convert_aa_group(task: tuple) -> dict:
+    """Decode all games in one nld-aa game dir into a single per-fake-player npz.
+
+    Each bz2 file is one complete game.  Xlogfile entries are matched via the
+    ``ttyrecname`` field so metadata is accurate for every game.
+    """
+    bz2_files, output_path, ttyrec_version, min_frames, game_dir = task
+
+    xl_by_name = _read_aa_xlogfile(game_dir)
+
+    if os.path.exists(output_path):
+        try:
+            with np.load(output_path) as f:
+                offsets = f["offsets"]
+                src_ids = f["source_game_ids"] if "source_game_ids" in f else None
+        except Exception as exc:
+            return {"status": "error", "msg": f"failed to read {output_path}: {exc}"}
+        n_games = len(offsets) - 1
+        game_meta: list[dict] = []
+        for i in range(n_games):
+            n_frames = int(offsets[i + 1]) - int(offsets[i])
+            entry = xl_by_name.get(str(src_ids[i]) if src_ids is not None and i < len(src_ids) else "", {})
+            ts = int(entry.get("starttime", 0) or 0)
+            game_meta.append(_game_meta_from_xlog(entry, n_frames, ts))
+        return {"status": "skip", "path": output_path,
+                "frames": int(offsets[-1]), "games": n_games, "game_meta": game_meta}
+
+    chars_parts: list[np.ndarray] = []
+    colors_parts: list[np.ndarray] = []
+    offsets_list: list[int] = [0]
+    source_game_ids: list[str] = []
+    game_meta: list[dict] = []
+    total_frames = 0
+
+    bz2_sorted = sorted(
+        bz2_files,
+        key=lambda p: int(os.path.basename(p).split(".")[2]),
+    )
+    for bz2_path in bz2_sorted:
+        basename = os.path.basename(bz2_path)
+        entry = xl_by_name.get(basename, {})
+        try:
+            arrays, n_frames = _decode([bz2_path], ttyrec_version)
+        except Exception:
+            continue
+        if not arrays or n_frames < min_frames:
+            continue
+        chars_parts.append(arrays["tty_chars"].astype(np.uint8))
+        colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
+                  if "tty_colors" in arrays
+                  else np.zeros_like(arrays["tty_chars"], dtype=np.uint8))
+        colors_parts.append(colors)
+        total_frames += n_frames
+        offsets_list.append(total_frames)
+        source_game_ids.append(basename)
+        ts = int(entry.get("starttime", 0) or 0)
+        game_meta.append(_game_meta_from_xlog(entry, n_frames, ts))
+
+    if not chars_parts:
+        return {"status": "filter"}
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    np.savez_compressed(
+        output_path,
+        tty_chars=np.concatenate(chars_parts),
+        tty_colors=np.concatenate(colors_parts),
+        offsets=np.array(offsets_list, dtype=np.int64),
+        source_game_ids=np.array(source_game_ids, dtype="U64"),
+    )
+    return {
+        "status": "ok",
+        "path": output_path,
+        "frames": total_frames,
+        "games": len(offsets_list) - 1,
+        "game_meta": game_meta,
+    }
 
 
 def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
@@ -662,7 +730,7 @@ def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> li
         tasks.append((
             bz2_files,
             os.path.join(output_dir, f"{player}.npz"),
-            1, min_frames, _KEYS_NAO, player,
+            1, min_frames, player,
         ))
     return tasks
 
@@ -707,27 +775,6 @@ def _write_index_rich(index_path: str, a: dict) -> None:
         f"{len(a['gm_lengths']):,} games → {index_path}",
         flush=True,
     )
-
-
-def _write_index_simple(
-    index_path: str, paths: list[str], lengths: list[int], scores: list[int]
-) -> None:
-    np.savez_compressed(
-        index_path,
-        paths=np.array(paths, dtype="U512"),
-        lengths=np.array(lengths, dtype=np.int32),
-        max_scores=np.array(scores, dtype=np.int32),
-    )
-    scores_arr = np.array(scores, dtype=np.int32)
-    print(f"  index written: {index_path}  ({len(paths):,} entries)", flush=True)
-    if len(scores_arr):
-        print(
-            f"  scores: min={scores_arr.min():,}  "
-            f"median={int(np.median(scores_arr)):,}  "
-            f"p90={int(np.percentile(scores_arr, 90)):,}  "
-            f"max={scores_arr.max():,}",
-            flush=True,
-        )
 
 
 def _accum_player_result(a: dict, result: dict) -> None:
@@ -787,62 +834,6 @@ def _load_rich_accum(index_path: str) -> tuple[dict, set[str]]:
 # --------------------------------------------------------------------------- #
 # --- Conversion runners ----------------------------------------------------- #
 # --------------------------------------------------------------------------- #
-
-def _run_convert_simple(
-    tasks: list[tuple],
-    workers: int,
-    npz_dir: str,
-) -> tuple[list[str], list[int], list[int]]:
-    """Convert nld-aa tasks; return (paths, lengths, scores) for index writing."""
-    total = len(tasks)
-    print(f"  games found: {total:,}", flush=True)
-
-    index_path = os.path.join(npz_dir, "index.npz")
-    if os.path.exists(index_path):
-        ex = np.load(index_path)
-        ex_paths   = [str(p) for p in ex["paths"]]
-        ex_lengths = list(ex["lengths"].astype(int))
-        ex_scores  = (list(ex["max_scores"].astype(int)) if "max_scores" in ex
-                      else [0] * len(ex_paths))
-        existing   = set(ex_paths)
-    else:
-        ex_paths, ex_lengths, ex_scores, existing = [], [], [], set()
-
-    counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
-    errors: list[str] = []
-    new_entries: list[tuple[str, int, int]] = []
-
-    with mp.Pool(workers) as pool:
-        with tqdm(total=total, unit="game", desc="  convert", dynamic_ncols=True) as bar:
-            for result in pool.imap_unordered(_convert_one, tasks):
-                counts[result["status"]] += 1
-                if result["status"] == "ok":
-                    p = result["path"]
-                    if p not in existing:
-                        new_entries.append((p, result["frames"], result["max_score"]))
-                elif result["status"] == "error":
-                    errors.append(result.get("msg", "unknown"))
-                bar.set_postfix(
-                    ok=counts["ok"], skip=counts["skip"],
-                    filt=counts["filter"], err=counts["error"],
-                )
-                bar.update(1)
-
-    if errors:
-        print(f"\n  first 10 errors:", flush=True)
-        for msg in errors[:10]:
-            print(f"    {msg}", flush=True)
-
-    all_paths   = ex_paths   + [p for p, _, _ in new_entries]
-    all_lengths = ex_lengths + [n for _, n, _ in new_entries]
-    all_scores  = ex_scores  + [s for _, _, s in new_entries]
-    print(
-        f"  convert summary: ok={counts['ok']} skip={counts['skip']} "
-        f"filter={counts['filter']} error={counts['error']}",
-        flush=True,
-    )
-    return all_paths, all_lengths, all_scores
-
 
 def _run_convert_rich(
     tasks: list[tuple],
@@ -917,32 +908,6 @@ def _run_convert_rich(
 # --- Index scan (--skip-convert case) --------------------------------------- #
 # --------------------------------------------------------------------------- #
 
-def _max_score_from_file(path: str) -> tuple[int, int]:
-    with np.load(path) as f:
-        if "offsets" in f:
-            return int(f["offsets"][-1]), 0
-        if "scores" in f:
-            scores = f["scores"]
-            return int(scores.shape[0]), int(scores.max())
-        chars = f["tty_chars"]
-        n, max_score = int(chars.shape[0]), 0
-        for t in range(n):
-            m = _SCORE_RE.search(bytes(chars[t, 22]))
-            if m:
-                s = int(m.group(1))
-                if s > max_score:
-                    max_score = s
-        return n, max_score
-
-
-def _index_worker_simple(path: str) -> tuple[str, int, int]:
-    try:
-        n, max_score = _max_score_from_file(path)
-        return path, n, max_score
-    except Exception:
-        return path, -1, -1
-
-
 def _index_worker_rich(player_path: str) -> dict:
     """Read one per-player npz; rebuild per-game metadata from source_timestamps."""
     try:
@@ -972,33 +937,6 @@ def _index_worker_rich(player_path: str) -> dict:
         "games": n_games,
         "game_meta": game_meta,
     }
-
-
-def _build_index_from_scan(scan_dir: str, workers: int) -> tuple[list[str], list[int], list[int]]:
-    """Scan a directory for .npz files; return (paths, lengths, scores) for simple index."""
-    npz_files = [
-        os.path.join(dp, f)
-        for dp, _, files in os.walk(scan_dir)
-        for f in files
-        if f.endswith(".npz") and f != "index.npz"
-    ]
-    total = len(npz_files)
-    print(f"  scanning {total:,} files in {scan_dir} ...", flush=True)
-
-    good_paths, good_lengths, good_scores = [], [], []
-    errors = 0
-    with mp.Pool(workers) as pool:
-        with tqdm(total=total, unit="file", desc="  index", dynamic_ncols=True) as bar:
-            for path, n, score in pool.imap_unordered(_index_worker_simple, npz_files):
-                if n >= 0:
-                    good_paths.append(path)
-                    good_lengths.append(n)
-                    good_scores.append(score)
-                else:
-                    errors += 1
-                bar.set_postfix(ok=len(good_paths), err=errors)
-                bar.update(1)
-    return good_paths, good_lengths, good_scores
 
 
 def _build_rich_index_from_scan(
@@ -1149,31 +1087,23 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
         os.makedirs(npz_dir, exist_ok=True)
         print(f"[convert]  → {npz_dir}")
         if dataset == "nld-aa":
-            tasks = _discover_nld_aa(root, npz_dir, args.nld_aa_subdir)
-            paths, lengths, scores = _run_convert_simple(tasks, args.workers, npz_dir)
-            if not args.skip_index and paths:
-                print(f"[index]    → {index_path}")
-                _write_index_simple(index_path, paths, lengths, scores)
-            elif args.skip_index:
-                print("[index]    skipped")
+            tasks = _discover_nld_aa_grouped(root, npz_dir, args.min_frames)
         else:
             tasks = _discover_nld_nao(root, npz_dir, args.min_frames)
-            print(f"[index]    progressive → {index_path}")
-            _run_convert_rich(
-                tasks, args.workers, npz_dir,
-                write_index=not args.skip_index,
-            )
+        converter = _convert_aa_group if dataset == "nld-aa" else _convert_player
+        print(f"[index]    progressive → {index_path}")
+        _run_convert_rich(
+            tasks, args.workers, npz_dir,
+            converter=converter,
+            write_index=not args.skip_index,
+        )
     else:
         print("[convert]  skipped")
         if not args.skip_index:
             os.makedirs(npz_dir, exist_ok=True)
             print(f"[index]    → {index_path}")
-            if dataset == "nld-aa":
-                paths, lengths, scores = _build_index_from_scan(npz_dir, args.workers)
-                if paths:
-                    _write_index_simple(index_path, paths, lengths, scores)
-            else:
-                _build_rich_index_from_scan(npz_dir, args.workers, index_path, root)
+            nle_data_dir = root if dataset == "nld-nao" else None
+            _build_rich_index_from_scan(npz_dir, args.workers, index_path, nle_data_dir)
         else:
             print("[index]    skipped")
 
