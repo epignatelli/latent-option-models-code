@@ -56,7 +56,7 @@ def _ensure_nle_db(
         raise RuntimeError(
             f"Database not found at {db_path} and unzipped data not found at {unzipped}.\n"
             f"Download the dataset first:\n"
-            f"  python -m scripts.download_datasets {dataset_name} --output_dir {data_dir}"
+            f"  python -m scripts.prepare_data {dataset_name} --output_dir {data_dir}"
         )
 
     log.info("%s.db not found — building from %s ...", dataset_name, unzipped)
@@ -148,7 +148,7 @@ def _load_from_nao_top10_dir(
         raise FileNotFoundError(
             f"No .npz files found under {directory}.\n"
             "Download the dataset first:\n"
-            "  python -m scripts.download_datasets nao-top10 --output_dir <nle_data_dir>"
+            "  python -m scripts.prepare_data nao-top10 --output_dir <nle_data_dir>"
         )
     if top_n is not None:
         npz_files = npz_files[:top_n]
@@ -226,7 +226,7 @@ def load_nld_aa(
         "Could not load NLD-AA dataset.\n"
         f"  Tried NLE DB at: {db}\n"
         f"  Tried numpy dir: {fallback_numpy_dir}\n"
-        "Run: python -m scripts.download_datasets nld-aa --output_dir <nle_data_dir>"
+        "Run: python -m scripts.prepare_data nld-aa --output_dir <nle_data_dir>"
     )
 
 
@@ -258,7 +258,7 @@ def load_nld_nao(
         "Could not load NLD-NAO dataset.\n"
         f"  Tried NLE DB at: {db}\n"
         f"  Tried numpy dir: {fallback_numpy_dir}\n"
-        "Run: python -m scripts.download_datasets nld-nao --output_dir <nle_data_dir>"
+        "Run: python -m scripts.prepare_data nld-nao --output_dir <nle_data_dir>"
     )
 
 
@@ -293,7 +293,7 @@ def load_nao_top10(
         f"Could not load NAO-TOP10 dataset.\n"
         f"  Tried .npz dir: {top10_dir}\n"
         f"  Tried numpy dir: {fallback_numpy_dir}\n"
-        "Run: python -m scripts.download_datasets nao-top10 --output_dir <nle_data_dir>"
+        "Run: python -m scripts.prepare_data nao-top10 --output_dir <nle_data_dir>"
     )
 
 
@@ -586,7 +586,7 @@ class NpzTrajectoryDataset(Dataset):
 
     @classmethod
     def from_index(cls, index_path: str, **kwargs) -> "NpzTrajectoryDataset":
-        """Construct from an index.npz file produced by scripts/convert_to_npz.py."""
+        """Construct from an index.npz file produced by scripts/prepare_data.py."""
         idx = np.load(index_path, allow_pickle=True)
         return cls(idx["paths"], idx["lengths"].astype(np.int32), **kwargs)
 
@@ -650,7 +650,7 @@ def build_npz_dataloaders(
     seed: int = 42,
     return_sequence: bool = False,
 ) -> Tuple[DataLoader, DataLoader]:
-    """Build train + val DataLoaders from a convert_to_npz index file.
+    """Build train + val DataLoaders from a prepare_data index file.
 
     num_workers must be 0: IO is handled by each dataset's background thread.
     """
