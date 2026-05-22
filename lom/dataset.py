@@ -16,6 +16,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import threading
 from typing import List, Optional, Tuple
 
 # Prevent NLE from creating a stray nle_data/ in the current working directory.
@@ -410,6 +411,240 @@ class TrajectoryDataset(Dataset):
             )
 
         return _make(train_idxs), _make(val_idxs)
+
+
+# --------------------------------------------------------------------------- #
+# --- Buffer-based npz dataset (scalable, O(buffer_size) RAM) --------------- #
+# --------------------------------------------------------------------------- #
+
+
+class _GameBuffer:
+    """In-memory pool of loaded game arrays, refreshed by a background thread.
+
+    Uses atomic state replacement so sample() never acquires a lock.
+
+    Args:
+        paths:             (N,) object array of .npz file paths
+        lengths:           (N,) int32 array of frame counts
+        buffer_size:       number of games to keep in memory
+        context_len:       frames of history per sample
+        horizon:           look-ahead frames per sample
+        refresh_fraction:  fraction of buffer replaced per refresh cycle
+        refresh_every:     seconds between refresh cycles
+        seed:              RNG seed (refresh thread uses seed+1)
+    """
+
+    def __init__(
+        self,
+        paths: np.ndarray,
+        lengths: np.ndarray,
+        buffer_size: int,
+        context_len: int,
+        horizon: int,
+        refresh_fraction: float = 0.1,
+        refresh_every: float = 60.0,
+        seed: int = 0,
+    ) -> None:
+        self._paths = paths
+        self._ctx = context_len
+        self._horizon = horizon
+
+        min_len = context_len + horizon + 1
+        valid = np.maximum(lengths.astype(np.float64) - (min_len - 1), 0.0)
+        total = valid.sum()
+        self._pool_weights = valid / total if total > 0 else np.ones(len(paths)) / len(paths)
+
+        n_init = min(buffer_size, len(paths))
+        self._n_refresh = min(max(1, int(n_init * refresh_fraction)), n_init)
+        self._refresh_every = refresh_every
+
+        rng = np.random.default_rng(seed)
+        self._refresh_rng = np.random.default_rng(seed + 1)
+
+        init_idxs = rng.choice(len(paths), size=n_init, replace=False, p=self._pool_weights)
+        log.info("Loading initial buffer of %d games ...", n_init)
+        games = [self._load(i) for i in init_idxs]
+        # _state is replaced atomically; reads need no lock (CPython GIL)
+        self._state: tuple = (games, self._make_weights(games))
+        log.info("Buffer ready (%d games loaded).", n_init)
+
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
+        self._thread.start()
+
+    def _load(self, idx: int) -> np.ndarray:
+        return np.load(self._paths[idx])["tty_chars"]
+
+    def _make_weights(self, games: list) -> np.ndarray:
+        valid = np.maximum(
+            np.array([len(g) for g in games], dtype=np.float64) - (self._ctx + self._horizon),
+            0.0,
+        )
+        s = valid.sum()
+        return valid / s if s > 0 else np.ones(len(games)) / len(games)
+
+    def _refresh_loop(self) -> None:
+        while not self._stop.wait(self._refresh_every):
+            games, _ = self._state
+            new_games = list(games)
+
+            new_idxs = self._refresh_rng.choice(
+                len(self._paths), size=self._n_refresh, replace=False, p=self._pool_weights
+            )
+            slots = self._refresh_rng.choice(len(new_games), size=self._n_refresh, replace=False)
+
+            for slot, pool_idx in zip(slots, new_idxs):
+                new_games[slot] = self._load(pool_idx)
+
+            self._state = (new_games, self._make_weights(new_games))
+
+    def sample(self, rng: np.random.Generator) -> tuple:
+        games, weights = self._state
+        game_idx = int(rng.choice(len(games), p=weights))
+        game = games[game_idx]
+        lo = self._ctx - 1
+        hi = len(game) - self._horizon - 1
+        t = int(rng.integers(lo, max(lo, hi), endpoint=True))
+        return game, t
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+
+class NpzTrajectoryDataset(Dataset):
+    """Random-sampling trajectory dataset backed by per-game .npz files.
+
+    Maintains a hot buffer of buffer_size games in RAM; a background thread
+    replaces refresh_fraction of the buffer every refresh_every seconds.
+    __getitem__ samples a random (game, timestep) pair regardless of idx.
+
+    Requires num_workers=0 in DataLoader — IO is handled by the buffer thread.
+
+    Each item:
+        history:      (context_len, H, W) long  — frames [t-c+1 … t]
+        next_frame:   (H, W) long               — frame t+1
+        future_frame: (H, W) long               — frame t+horizon
+        sequence:     (horizon, H, W) long      — frames [t+1 … t+horizon] (if return_sequence)
+    """
+
+    def __init__(
+        self,
+        paths: np.ndarray,
+        lengths: np.ndarray,
+        context_len: int = 4,
+        horizon: int = 8,
+        buffer_size: int = 1_000,
+        refresh_fraction: float = 0.1,
+        refresh_every: float = 60.0,
+        steps_per_epoch: int = 10_000,
+        seed: int = 0,
+        obs_h: int = _SCREEN_H,
+        obs_w: int = _SCREEN_W,
+        return_sequence: bool = False,
+    ) -> None:
+        self.context_len = context_len
+        self.horizon = horizon
+        self.obs_h = obs_h
+        self.obs_w = obs_w
+        self.return_sequence = return_sequence
+        self._steps = steps_per_epoch
+
+        self._buffer = _GameBuffer(
+            paths, lengths, buffer_size, context_len, horizon,
+            refresh_fraction=refresh_fraction, refresh_every=refresh_every, seed=seed,
+        )
+        self._rng = np.random.default_rng(seed + 2)
+
+        log.info(
+            "NpzTrajectoryDataset: %d games in pool, buffer=%d, steps/epoch=%d",
+            len(paths), buffer_size, steps_per_epoch,
+        )
+
+    @classmethod
+    def from_index(cls, index_path: str, **kwargs) -> "NpzTrajectoryDataset":
+        """Construct from an index.npz file produced by scripts/convert_to_npz.py."""
+        idx = np.load(index_path, allow_pickle=True)
+        return cls(idx["paths"], idx["lengths"].astype(np.int32), **kwargs)
+
+    @classmethod
+    def split(
+        cls,
+        index_path: str,
+        val_fraction: float = 0.05,
+        seed: int = 42,
+        **kwargs,
+    ) -> Tuple["NpzTrajectoryDataset", "NpzTrajectoryDataset"]:
+        """Split index into train / val datasets by game."""
+        idx = np.load(index_path, allow_pickle=True)
+        paths = idx["paths"]
+        lengths = idx["lengths"].astype(np.int32)
+
+        rng = np.random.default_rng(seed)
+        n_val = max(1, int(len(paths) * val_fraction))
+        perm = rng.permutation(len(paths))
+
+        train_ds = cls(paths[perm[n_val:]], lengths[perm[n_val:]], seed=seed,     **kwargs)
+        val_ds   = cls(paths[perm[:n_val]], lengths[perm[:n_val]], seed=seed + 1, **kwargs)
+        return train_ds, val_ds
+
+    def __len__(self) -> int:
+        return self._steps
+
+    def __getitem__(self, idx: int):
+        game, t = self._buffer.sample(self._rng)
+
+        history      = torch.tensor(game[t - self.context_len + 1 : t + 1], dtype=torch.long)
+        next_frame   = torch.tensor(game[t + 1],            dtype=torch.long)
+        future_frame = torch.tensor(game[t + self.horizon], dtype=torch.long)
+
+        out = (history, next_frame, future_frame)
+        if self.return_sequence:
+            out = out + (torch.tensor(game[t + 1 : t + self.horizon + 1], dtype=torch.long),)
+        return out
+
+    def close(self) -> None:
+        self._buffer.stop()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def build_npz_dataloaders(
+    index_path: str,
+    context_len: int,
+    horizon: int,
+    batch_size: int,
+    buffer_size: int = 1_000,
+    val_fraction: float = 0.05,
+    steps_per_epoch: int = 10_000,
+    refresh_fraction: float = 0.1,
+    refresh_every: float = 60.0,
+    seed: int = 42,
+    return_sequence: bool = False,
+) -> Tuple[DataLoader, DataLoader]:
+    """Build train + val DataLoaders from a convert_to_npz index file.
+
+    num_workers must be 0: IO is handled by each dataset's background thread.
+    """
+    train_ds, val_ds = NpzTrajectoryDataset.split(
+        index_path,
+        val_fraction=val_fraction,
+        seed=seed,
+        context_len=context_len,
+        horizon=horizon,
+        buffer_size=buffer_size,
+        refresh_fraction=refresh_fraction,
+        refresh_every=refresh_every,
+        steps_per_epoch=steps_per_epoch,
+        return_sequence=return_sequence,
+    )
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
+    return train_loader, val_loader
 
 
 def build_dataloaders(

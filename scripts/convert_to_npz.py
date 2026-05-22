@@ -133,7 +133,7 @@ def _convert_one(task: tuple) -> dict:
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     np.savez_compressed(output_path, **{k: arrays[k] for k in save_keys})
-    return {"status": "ok", "frames": n_frames}
+    return {"status": "ok", "frames": n_frames, "path": output_path}
 
 
 # ── task discovery ────────────────────────────────────────────────────────────
@@ -198,14 +198,29 @@ def _run_one(dataset: str, nle_data_dir: str, output_dir: str, workers: int, min
     total = len(tasks)
     print(f"games found: {total:,}\n", flush=True)
 
+    # Load existing index so skipped files are still included.
+    index_path = os.path.join(output_dir, "index.npz")
+    if os.path.exists(index_path):
+        ex = np.load(index_path, allow_pickle=True)
+        ex_paths:   list[str] = list(ex["paths"])
+        ex_lengths: list[int] = list(ex["lengths"].astype(int))
+        existing_set: set[str] = set(ex_paths)
+    else:
+        ex_paths, ex_lengths, existing_set = [], [], set()
+
     counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
     errors: list[str] = []
+    new_entries: list[tuple[str, int]] = []
     log_every = max(1, total // 100)  # ~100 progress lines regardless of dataset size
 
     with mp.Pool(workers) as pool:
         for i, result in enumerate(pool.imap_unordered(_convert_one, tasks), 1):
             counts[result["status"]] += 1
-            if result["status"] == "error":
+            if result["status"] == "ok":
+                p = result["path"]
+                if p not in existing_set:
+                    new_entries.append((p, result["frames"]))
+            elif result["status"] == "error":
                 errors.append(result.get("msg", "unknown"))
             if i % log_every == 0 or i == total:
                 print(
@@ -217,11 +232,23 @@ def _run_one(dataset: str, nle_data_dir: str, output_dir: str, workers: int, min
                     flush=True,
                 )
 
+    # Write merged index (existing + newly converted).
+    all_paths   = ex_paths   + [p for p, _ in new_entries]
+    all_lengths = ex_lengths + [f for _, f in new_entries]
+    if all_paths:
+        np.savez(
+            index_path,
+            paths=np.array(all_paths, dtype=object),
+            lengths=np.array(all_lengths, dtype=np.int32),
+        )
+
     print(f"\n{'='*60}")
     print(f"converted : {counts['ok']:,}")
     print(f"skipped   : {counts['skip']:,}  (already existed)")
     print(f"filtered  : {counts['filter']:,}  (< {min_frames} frames)")
     print(f"errors    : {counts['error']:,}")
+    if all_paths:
+        print(f"index     : {index_path}  ({len(all_paths):,} games)")
     if errors:
         print("\nFirst 10 errors:")
         for msg in errors[:10]:
