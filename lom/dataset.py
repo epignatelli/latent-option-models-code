@@ -597,8 +597,16 @@ class NpzTrajectoryDataset(Dataset):
     @classmethod
     def from_index(cls, index_path: str, **kwargs) -> "NpzTrajectoryDataset":
         """Construct from an index.npz file produced by scripts/prepare_data.py."""
-        idx = np.load(index_path, allow_pickle=True)
-        return cls(idx["paths"], idx["lengths"].astype(np.int32), **kwargs)
+        idx = np.load(index_path)
+        if "player_paths" in idx:
+            # Rich nld-nao index: one entry per player file.
+            paths   = idx["player_paths"].astype(str)
+            lengths = idx["player_lengths"].astype(np.int32)
+        else:
+            # Simple nld-aa / nao-top10 index.
+            paths   = idx["paths"].astype(str)
+            lengths = idx["lengths"].astype(np.int32)
+        return cls(paths, lengths, **kwargs)
 
     @classmethod
     def split(
@@ -608,10 +616,14 @@ class NpzTrajectoryDataset(Dataset):
         seed: int = 42,
         **kwargs,
     ) -> Tuple["NpzTrajectoryDataset", "NpzTrajectoryDataset"]:
-        """Split index into train / val datasets by game."""
-        idx = np.load(index_path, allow_pickle=True)
-        paths = idx["paths"]
-        lengths = idx["lengths"].astype(np.int32)
+        """Split index into train / val datasets (by player for rich index)."""
+        idx = np.load(index_path)
+        if "player_paths" in idx:
+            paths   = idx["player_paths"].astype(str)
+            lengths = idx["player_lengths"].astype(np.int32)
+        else:
+            paths   = idx["paths"].astype(str)
+            lengths = idx["lengths"].astype(np.int32)
 
         rng = np.random.default_rng(seed)
         n_val = max(1, int(len(paths) * val_fraction))

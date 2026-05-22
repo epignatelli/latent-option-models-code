@@ -305,7 +305,7 @@ class TestH5EndToEndInt8Chars:
 
         index_path = str(tmp_path / "index.npz")
         np.savez(index_path,
-                 paths=np.array(paths, dtype=object),
+                 paths=np.array(paths, dtype="U512"),
                  lengths=np.array([T, T, T], dtype=np.int32))
 
         ds = NpzTrajectoryDataset.from_index(
