@@ -467,8 +467,7 @@ class _GameBuffer:
         self._ctx = context_len
         self._horizon = horizon
 
-        min_len = context_len + horizon + 1
-        valid = np.maximum(lengths.astype(np.float64) - (min_len - 1), 0.0)
+        valid = np.maximum(lengths.astype(np.float64) - (context_len + horizon - 1), 0.0)
         total = valid.sum()
         self._pool_weights = valid / total if total > 0 else np.ones(len(paths)) / len(paths)
 
@@ -492,8 +491,11 @@ class _GameBuffer:
 
     def _load(self, idx: int) -> np.ndarray:
         with np.load(self._paths[idx]) as f:
-            chars  = f["tty_chars"]                                                    # (T, H, W) uint8
-            colors = np.clip(f["tty_colors"].astype(np.int16), 0, COLOR_VOCAB - 1).astype(np.uint8)
+            chars = f["tty_chars"].astype(np.uint8)   # reinterpret bytes; safe for int8 or uint8 source
+            if "tty_colors" in f:
+                colors = np.clip(f["tty_colors"].astype(np.int16), 0, COLOR_VOCAB - 1).astype(np.uint8)
+            else:
+                colors = np.zeros_like(chars)
         return np.stack([chars, colors], axis=-1)      # (T, H, W, 2) uint8
 
     def _make_weights(self, games: list) -> np.ndarray:

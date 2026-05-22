@@ -93,23 +93,23 @@ for seed in "${SEEDS[@]}"; do
   CKPT_LAM="${CKPT_ROOT}/lam_seed${seed}"
   echo "  LAM  horizon=1  num_options=98"
   if ! _done "${CKPT_LAM}"; then
-    _launch python3 -m scripts.pretrain lam \
-      --config             "${CFG}" \
+    _launch bash -c "python3 -m scripts.pretrain lam \
+      --config             ${CFG} \
       --data.horizon       1 \
       --model.num_options  98 \
-      --train.seed         "${seed}" \
-      --train.ckpt_dir     "${CKPT_LAM}" \
-    && touch "${CKPT_LAM}/done"
+      --train.seed         ${seed} \
+      --train.ckpt_dir     ${CKPT_LAM} \
+      && touch ${CKPT_LAM}/done"
   fi
 
   CKPT_LOM="${CKPT_ROOT}/lom_seed${seed}"
   echo "  LOM  horizon=128  num_options=256"
   if ! _done "${CKPT_LOM}"; then
-    _launch python3 -m scripts.pretrain lom \
-      --config             "${CFG}" \
-      --train.seed         "${seed}" \
-      --train.ckpt_dir     "${CKPT_LOM}" \
-    && touch "${CKPT_LOM}/done"
+    _launch bash -c "python3 -m scripts.pretrain lom \
+      --config             ${CFG} \
+      --train.seed         ${seed} \
+      --train.ckpt_dir     ${CKPT_LOM} \
+      && touch ${CKPT_LOM}/done"
   fi
 done
 
