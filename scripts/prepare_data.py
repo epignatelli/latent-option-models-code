@@ -11,7 +11,7 @@ Pipeline stages (run in order; each is individually skippable):
 Datasets:
 
   nao-top10  NAO Top-10, DeepMind processed .npz, ~12 GB
-             stages: download → extract → index
+             stages: download → extract → convert → index
   nld-aa     NLD-AA (Autoascend AI), 16 zip archives, ~100 GB
              stages: download → extract → db → convert → index
   nld-nao    NLD-NAO (NetHack.alt.org), 41 zip archives, ~500 GB
@@ -20,8 +20,9 @@ Datasets:
 
 Output layout under --output-dir:
 
-  nao-top10/nao_top10/          extracted npz sessions
-  nao-top10/index.npz
+  nao-top10/nao_top10/          extracted source npz sessions (by player/session)
+  nao-top10-npz/                consolidated per-player .npz files
+  nao-top10-npz/index.npz       rich index (game lengths; no xlogfile metadata)
   nld-aa/                       extracted ttyrec files
   nld-aa.db                     NLE SQLite database
   nld-aa-npz/autoascend/        converted per-game .npz files
@@ -528,6 +529,91 @@ def _convert_player(task: tuple) -> dict:
 # --- Discovery -------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
+def _discover_nao_top10(extract_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
+    """Group DeepMind nao-top10 sessions by player username; return consolidation tasks."""
+    src_dir = os.path.join(extract_dir, "nao_top10")
+    if not os.path.isdir(src_dir):
+        raise FileNotFoundError(f"nao-top10 data not found at {src_dir}")
+    tasks: list[tuple] = []
+    for player in sorted(os.listdir(src_dir)):
+        player_dir = os.path.join(src_dir, player)
+        if not os.path.isdir(player_dir):
+            continue
+        session_files = [
+            os.path.join(player_dir, f)
+            for f in os.listdir(player_dir)
+            if f.endswith(".npz")
+        ]
+        if not session_files:
+            continue
+        tasks.append((session_files, os.path.join(output_dir, f"{player}.npz"), min_frames))
+    return tasks
+
+
+def _consolidate_nao_top10_player(task: tuple) -> dict:
+    """Merge all nao-top10 sessions for one player into a single per-player npz.
+
+    No xlogfile is available for this dataset; game_meta contains only frame counts.
+    """
+    session_files, output_path, min_frames = task
+
+    if os.path.exists(output_path):
+        try:
+            with np.load(output_path) as f:
+                offsets = f["offsets"]
+        except Exception as exc:
+            return {"status": "error", "msg": f"failed to read {output_path}: {exc}"}
+        n_games = len(offsets) - 1
+        game_meta = [
+            dict(_GAME_META_DEFAULT, length=int(offsets[i + 1]) - int(offsets[i]))
+            for i in range(n_games)
+        ]
+        return {"status": "skip", "path": output_path,
+                "frames": int(offsets[-1]), "games": n_games, "game_meta": game_meta}
+
+    chars_parts: list[np.ndarray] = []
+    colors_parts: list[np.ndarray] = []
+    offsets_list: list[int] = [0]
+    game_meta: list[dict] = []
+    total_frames = 0
+
+    for npz_path in sorted(session_files):
+        try:
+            with np.load(npz_path) as f:
+                chars = f["tty_chars"].astype(np.uint8)
+                colors = (np.clip(f["tty_colors"].astype(np.int16), 0, 31).astype(np.uint8)
+                          if "tty_colors" in f
+                          else np.zeros_like(chars, dtype=np.uint8))
+        except Exception:
+            continue
+        n_frames = len(chars)
+        if n_frames < min_frames:
+            continue
+        chars_parts.append(chars)
+        colors_parts.append(colors)
+        total_frames += n_frames
+        offsets_list.append(total_frames)
+        game_meta.append(dict(_GAME_META_DEFAULT, length=n_frames))
+
+    if not chars_parts:
+        return {"status": "filter"}
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    np.savez_compressed(
+        output_path,
+        tty_chars=np.concatenate(chars_parts),
+        tty_colors=np.concatenate(colors_parts),
+        offsets=np.array(offsets_list, dtype=np.int64),
+    )
+    return {
+        "status": "ok",
+        "path": output_path,
+        "frames": total_frames,
+        "games": len(offsets_list) - 1,
+        "game_meta": game_meta,
+    }
+
+
 def _discover_nld_aa(nle_data_dir: str, output_dir: str, subdir: str) -> list[tuple]:
     data_root = os.path.join(nle_data_dir, "nld-aa", subdir)
     if not os.path.isdir(data_root):
@@ -762,6 +848,7 @@ def _run_convert_rich(
     tasks: list[tuple],
     workers: int,
     npz_dir: str,
+    converter=_convert_player,
     write_index: bool = True,
     checkpoint_every: int = 500,
 ) -> None:
@@ -791,7 +878,7 @@ def _run_convert_rich(
 
     with mp.Pool(workers) as pool:
         with tqdm(total=len(pending), unit="player", desc="  convert", dynamic_ncols=True) as bar:
-            for result in pool.imap_unordered(_convert_player, pending):
+            for result in pool.imap_unordered(converter, pending):
                 status = result["status"]
                 counts[status] += 1
 
@@ -915,7 +1002,7 @@ def _build_index_from_scan(scan_dir: str, workers: int) -> tuple[list[str], list
 
 
 def _build_rich_index_from_scan(
-    scan_dir: str, workers: int, index_path: str, nle_data_dir: str
+    scan_dir: str, workers: int, index_path: str, nle_data_dir: str | None = None
 ) -> None:
     """Scan nld-nao-npz dir; rebuild rich index using source_timestamps + xlogfile."""
     global _xl_by_player
@@ -929,7 +1016,7 @@ def _build_rich_index_from_scan(
     total = len(npz_files)
     print(f"  scanning {total:,} player files in {scan_dir} ...", flush=True)
 
-    if not _xl_by_player:
+    if not _xl_by_player and nle_data_dir is not None:
         nld_nao_dir = os.path.join(nle_data_dir, "nld-nao")
         _xl_by_player = _load_xlogfiles(nld_nao_dir)
 
@@ -971,7 +1058,7 @@ def _run_nao_top10(args: BaseArgs) -> None:
     zip_dir     = os.path.join(root, "zips", "nao-top10")
     tar_path    = os.path.join(zip_dir, "nao_top10.tar")
     extract_dir = os.path.join(root, "nao-top10")
-    npz_dir     = os.path.join(extract_dir, "nao_top10")
+    npz_dir     = os.path.join(root, "nao-top10-npz")
     index_path  = os.path.join(npz_dir, "index.npz")
 
     print("\n─── nao-top10 ───────────────────────────────────────────────────")
@@ -997,16 +1084,25 @@ def _run_nao_top10(args: BaseArgs) -> None:
         print("[extract]  skipped")
 
     print("[db]       n/a for nao-top10")
-    print("[convert]  n/a for nao-top10")
 
-    if not args.skip_index:
+    if not args.skip_convert:
         os.makedirs(npz_dir, exist_ok=True)
-        print(f"[index]    → {index_path}")
-        paths, lengths, scores = _build_index_from_scan(npz_dir, args.workers)
-        if paths:
-            _write_index_simple(index_path, paths, lengths, scores)
+        print(f"[convert]  → {npz_dir}")
+        tasks = _discover_nao_top10(extract_dir, npz_dir, args.min_frames)
+        print(f"[index]    progressive → {index_path}")
+        _run_convert_rich(
+            tasks, args.workers, npz_dir,
+            converter=_consolidate_nao_top10_player,
+            write_index=not args.skip_index,
+        )
     else:
-        print("[index]    skipped")
+        print("[convert]  skipped")
+        if not args.skip_index:
+            os.makedirs(npz_dir, exist_ok=True)
+            print(f"[index]    → {index_path}")
+            _build_rich_index_from_scan(npz_dir, args.workers, index_path)
+        else:
+            print("[index]    skipped")
 
     print(f"\nDone. Set in your experiment config:")
     print(f"  data.index_path: {index_path}")
