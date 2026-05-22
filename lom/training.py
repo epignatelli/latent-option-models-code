@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import math
 import os
+import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict
@@ -44,6 +46,24 @@ def get_lr(step: int, lr: float, warmup_iters: int, max_iters: int, eta_min: flo
         return lr * step / warmup_iters
     frac = (step - warmup_iters) / (max_iters - warmup_iters)
     return eta_min + 0.5 * (lr - eta_min) * (1 + math.cos(math.pi * frac))
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+def _git_dirty() -> bool:
+    try:
+        return bool(subprocess.check_output(
+            ["git", "status", "--porcelain"], stderr=subprocess.DEVNULL
+        ).decode().strip())
+    except Exception:
+        return False
 
 
 class NullCtx:
@@ -137,12 +157,27 @@ class Trainer(ABC):
             import wandb
 
             os.makedirs(cfg.wandb.dir, exist_ok=True)
+
+            run_cfg = asdict(cfg)
+            run_cfg["_git_commit"] = _git_commit()
+            run_cfg["_git_dirty"]  = _git_dirty()
+            run_cfg["_argv"]       = " ".join(sys.argv)
+            run_cfg["_model_type"] = self.label()
+
+            run_name = (
+                f"{self.label()}"
+                f"_d{d.dataset}"
+                f"_h{d.horizon}"
+                f"_s{t.seed}"
+            )
+
             self.wandb_run = wandb.init(
                 project=cfg.wandb.project,
                 entity=cfg.wandb.entity,
                 group=cfg.wandb.group,
+                name=run_name,
                 dir=cfg.wandb.dir,
-                config=asdict(cfg),
+                config=run_cfg,
                 resume="allow" if t.resume else "never",
             )
         except Exception as exc:
