@@ -145,6 +145,8 @@ class BaseArgs:
     """Local directory for temporary memmap files during conversion."""
     use_memmap: bool = True
     """Use disk-backed memmaps during conversion. Disable on machines with sufficient RAM to avoid temp file I/O."""
+    max_groups: int = 0
+    """Maximum number of groups (players/game-dirs) to convert. 0 = no limit (process all)."""
 
 
 @dataclass
@@ -993,6 +995,7 @@ def _run_convert_rich(
     converter=_convert_player,
     write_index: bool = True,
     checkpoint_every: int = 500,
+    max_groups: int = 0,
 ) -> None:
     """Convert per-player tasks and progressively write a rich index.npz.
 
@@ -1022,6 +1025,8 @@ def _run_convert_rich(
         return f"{stem}_0.npz" in indexed_paths
 
     pending = [t for t in tasks if not _task_indexed(t[1])]
+    if max_groups > 0:
+        pending = pending[:max_groups]
     print(f"  pending: {len(pending):,} players to process", flush=True)
 
     counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
@@ -1211,6 +1216,7 @@ def _run_nao_top10(args: BaseArgs) -> None:
             tasks, args.workers, npz_dir,
             converter=_consolidate_nao_top10_player,
             write_index=not args.skip_index,
+            max_groups=args.max_groups,
         )
     else:
         print("[convert]  skipped")
@@ -1279,6 +1285,7 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
             tasks, args.workers, npz_dir,
             converter=converter,
             write_index=not args.skip_index,
+            max_groups=args.max_groups,
         )
     else:
         print("[convert]  skipped")
