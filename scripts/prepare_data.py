@@ -61,13 +61,14 @@ import multiprocessing as mp
 import os
 import re
 import tarfile
+import tempfile
 import urllib.request
 import zipfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Annotated, Union
+from typing import Annotated, Callable, Union
 
 os.environ.setdefault("NLE_DATA_PATH", os.path.abspath("nle_data"))
 
@@ -405,6 +406,34 @@ def _decode(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
     }, len(tty_chars)
 
 
+def write_frames_npz(
+    output_path: str,
+    total_frames: int,
+    H: int,
+    W: int,
+    fill_fn: Callable,
+    extra_arrays: dict | None = None,
+) -> None:
+    """Write tty_chars + tty_colors + extra_arrays to output_path via disk-backed memmaps.
+
+    fill_fn(mm_chars, mm_colors) fills the pre-allocated (total_frames, H, W) uint8
+    memmaps in-place.  Tmp files are placed on the same filesystem as output_path to
+    avoid cross-device rename errors; memmaps are deleted before TemporaryDirectory
+    exits to avoid OSError on cleanup.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    tmp_root = os.path.dirname(output_path) or "."
+    with tempfile.TemporaryDirectory(dir=tmp_root) as tmpdir:
+        mm_chars  = np.memmap(os.path.join(tmpdir, "c.bin"),   dtype=np.uint8, mode="w+", shape=(total_frames, H, W))
+        mm_colors = np.memmap(os.path.join(tmpdir, "col.bin"), dtype=np.uint8, mode="w+", shape=(total_frames, H, W))
+        fill_fn(mm_chars, mm_colors)
+        mm_chars.flush()
+        mm_colors.flush()
+        np.savez_compressed(output_path, tty_chars=mm_chars, tty_colors=mm_colors,
+                            **(extra_arrays or {}))
+        del mm_chars, mm_colors
+
+
 def _convert_player(task: tuple) -> dict:
     """Decode all games for one nld-nao player into a single per-player npz.
 
@@ -447,14 +476,10 @@ def _convert_player(task: tuple) -> dict:
             "game_meta": game_meta,
         }
 
-    # --- convert case: decode each bz2 file ---
-    chars_parts: list[np.ndarray] = []
-    colors_parts: list[np.ndarray] = []
-    offsets_list: list[int] = [0]
-    src_timestamps: list[int] = []
-    game_meta = []
-    total_frames = 0
-
+    # --- convert case: two-pass decode to avoid accumulating arrays in RAM ---
+    # Pass 1: collect frame counts and metadata; discard decoded arrays.
+    valid: list[tuple[str, int, int, dict]] = []  # (path, n_frames, file_ts, xlog_entry)
+    H = W = None
     for bz2_path in sorted(input_files):
         file_ts = _parse_filename_ts(bz2_path)
         try:
@@ -463,35 +488,50 @@ def _convert_player(task: tuple) -> dict:
             continue
         if not arrays or n_frames < min_frames:
             continue
-
-        chars_parts.append(arrays["tty_chars"].astype(np.uint8))
-        colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
-                  if "tty_colors" in arrays
-                  else np.zeros_like(arrays["tty_chars"], dtype=np.uint8))
-        colors_parts.append(colors)
-        total_frames += n_frames
-        offsets_list.append(total_frames)
-        src_timestamps.append(file_ts)
-
+        if H is None:
+            H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
-        game_meta.append(_game_meta_from_xlog(entry, n_frames, file_ts))
+        valid.append((bz2_path, n_frames, file_ts, entry))
 
-    if not chars_parts:
+    if not valid:
         return {"status": "filter"}
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    np.savez_compressed(
-        output_path,
-        tty_chars=np.concatenate(chars_parts),
-        tty_colors=np.concatenate(colors_parts),
-        offsets=np.array(offsets_list, dtype=np.int64),
-        source_timestamps=np.array(src_timestamps, dtype=np.int64),
+    total_frames = sum(n for _, n, _, _ in valid)
+    offsets_list = [0]
+    for _, n, _, _ in valid:
+        offsets_list.append(offsets_list[-1] + n)
+    src_timestamps = np.array([ts for _, _, ts, _ in valid], dtype=np.int64)
+    game_meta = [_game_meta_from_xlog(e, n, ts) for _, n, ts, e in valid]
+
+    # Pass 2: decode again, write directly into disk-backed memmaps.
+    def fill(mm_chars, mm_colors):
+        offset = 0
+        for bz2_path, n_frames, _, _ in valid:
+            try:
+                arrays, _ = _decode([bz2_path], ttyrec_version)
+            except Exception:
+                offset += n_frames
+                continue
+            mm_chars[offset:offset + n_frames] = arrays["tty_chars"].astype(np.uint8)
+            mm_colors[offset:offset + n_frames] = (
+                arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
+                if "tty_colors" in arrays
+                else np.zeros((n_frames, H, W), dtype=np.uint8)
+            )
+            offset += n_frames
+
+    write_frames_npz(
+        output_path, total_frames, H, W, fill,
+        extra_arrays={
+            "offsets": np.array(offsets_list, dtype=np.int64),
+            "source_timestamps": src_timestamps,
+        },
     )
     return {
         "status": "ok",
         "path": output_path,
         "frames": total_frames,
-        "games": len(offsets_list) - 1,
+        "games": len(valid),
         "game_meta": game_meta,
     }
 
@@ -609,29 +649,20 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
                              "games": n_games, "game_meta": gm})
         return results
 
-    # Pass 2: write each chunk via disk-backed memmaps (avoids loading the whole
-    # player into RAM; per-process RSS stays small regardless of player size).
-    import tempfile
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    _tmp_root = os.path.dirname(output_path)  # same filesystem as the output
-
+    # Pass 2: write each chunk via write_frames_npz (disk-backed memmaps).
     results = []
     for chunk_idx, game_indices in enumerate(chunks):
-        chunk_path = paths[chunk_idx]
-        chunk_valid = [valid[i] for i in game_indices]
-        chunk_meta  = [game_meta_all[i] for i in game_indices]
+        chunk_path   = paths[chunk_idx]
+        chunk_valid  = [valid[i] for i in game_indices]
+        chunk_meta   = [game_meta_all[i] for i in game_indices]
         chunk_frames = sum(nf for _, nf in chunk_valid)
         offsets_list: list[int] = [0]
         for _, nf in chunk_valid:
             offsets_list.append(offsets_list[-1] + nf)
 
-        with tempfile.TemporaryDirectory(dir=_tmp_root) as tmpdir:
-            mm_chars  = np.memmap(os.path.join(tmpdir, "c.bin"),   dtype=np.uint8,
-                                  mode="w+", shape=(chunk_frames, H, W))
-            mm_colors = np.memmap(os.path.join(tmpdir, "col.bin"), dtype=np.uint8,
-                                  mode="w+", shape=(chunk_frames, H, W))
+        def fill(mm_chars, mm_colors, _cv=chunk_valid):
             offset = 0
-            for npz_path, n_frames in chunk_valid:
+            for npz_path, n_frames in _cv:
                 try:
                     with np.load(npz_path) as f:
                         chars  = f["tty_chars"].astype(np.uint8)
@@ -645,17 +676,11 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
                 mm_chars[offset:offset + n_frames]  = chars
                 mm_colors[offset:offset + n_frames] = colors
                 offset += n_frames
-            mm_chars.flush()
-            mm_colors.flush()
 
-            np.savez_compressed(
-                chunk_path,
-                tty_chars=mm_chars,
-                tty_colors=mm_colors,
-                offsets=np.array(offsets_list, dtype=np.int64),
-            )
-            del mm_chars, mm_colors  # release mmap before TemporaryDirectory cleanup
-
+        write_frames_npz(
+            chunk_path, chunk_frames, H, W, fill,
+            extra_arrays={"offsets": np.array(offsets_list, dtype=np.int64)},
+        )
         results.append({
             "status": "ok",
             "path": chunk_path,
@@ -770,17 +795,15 @@ def _convert_aa_group(task: tuple) -> dict:
     game_meta = [_game_meta_from_xlog(e, n, int(e.get("starttime", 0) or 0))
                  for _, n, e in valid]
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-
     # Pass 2: decode again, write directly into disk-backed memmaps.
-    import tempfile
-    tmp_root = os.path.dirname(output_path)
-    with tempfile.TemporaryDirectory(dir=tmp_root) as tmpdir:
-        mm_chars  = np.memmap(os.path.join(tmpdir, "c.bin"),   dtype=np.uint8, mode="w+", shape=(total_frames, H, W))
-        mm_colors = np.memmap(os.path.join(tmpdir, "col.bin"), dtype=np.uint8, mode="w+", shape=(total_frames, H, W))
+    def fill(mm_chars, mm_colors):
         offset = 0
         for bz2_path, n_frames, _ in valid:
-            arrays, _ = _decode([bz2_path], ttyrec_version)
+            try:
+                arrays, _ = _decode([bz2_path], ttyrec_version)
+            except Exception:
+                offset += n_frames
+                continue
             mm_chars[offset:offset + n_frames] = arrays["tty_chars"].astype(np.uint8)
             mm_colors[offset:offset + n_frames] = (
                 arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
@@ -788,17 +811,14 @@ def _convert_aa_group(task: tuple) -> dict:
                 else np.zeros((n_frames, H, W), dtype=np.uint8)
             )
             offset += n_frames
-        mm_chars.flush()
-        mm_colors.flush()
-        np.savez_compressed(
-            output_path,
-            tty_chars=mm_chars,
-            tty_colors=mm_colors,
-            offsets=np.array(offsets_list, dtype=np.int64),
-            source_game_ids=np.array(source_game_ids, dtype="U64"),
-        )
-        del mm_chars, mm_colors
 
+    write_frames_npz(
+        output_path, total_frames, H, W, fill,
+        extra_arrays={
+            "offsets": np.array(offsets_list, dtype=np.int64),
+            "source_game_ids": np.array(source_game_ids, dtype="U64"),
+        },
+    )
     return {
         "status": "ok",
         "path": output_path,
