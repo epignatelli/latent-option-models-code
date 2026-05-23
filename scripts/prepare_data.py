@@ -984,6 +984,17 @@ def _run_convert_rich(
     import psutil
     total_ram_gb = psutil.virtual_memory().total / 1024 ** 3
 
+    def _read_commit_free_gb() -> float:
+        try:
+            vals: dict[str, int] = {}
+            with open("/proc/meminfo") as _f:
+                for _line in _f:
+                    k, v = _line.split(":", 1)
+                    vals[k.strip()] = int(v.split()[0])
+            return (vals["CommitLimit"] - vals["Committed_AS"]) / 1024 ** 2
+        except Exception:
+            return float("nan")
+
     def _drain_game_q(game_bar: tqdm) -> None:
         while True:
             try:
@@ -991,8 +1002,10 @@ def _run_convert_rich(
                 if val is None:
                     break
                 used_gb = psutil.virtual_memory().used / 1024 ** 3
+                cmt_free_gb = _read_commit_free_gb()
                 game_bar.set_postfix_str(
-                    f"ram={used_gb:.1f}/{total_ram_gb:.0f}GB", refresh=False
+                    f"ram={used_gb:.1f}/{total_ram_gb:.0f}GB cmt={cmt_free_gb:.0f}GB",
+                    refresh=False,
                 )
                 game_bar.update(1)
             except Exception:
