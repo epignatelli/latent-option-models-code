@@ -9,6 +9,7 @@ sweep:
 
 data:
   dataset: nld-nao
+  index_path: /scratch/uceeepi/lom/datasets/nle/nao/index.npz
   context_len: 4
   horizon: 128
 
