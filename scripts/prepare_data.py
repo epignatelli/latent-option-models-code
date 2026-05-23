@@ -956,6 +956,8 @@ def _run_convert_rich(
     _game_q = mp.Queue()
 
     worker_rss: dict[int, int] = {}  # pid → rss_kb
+    import psutil
+    total_ram_gb = psutil.virtual_memory().total / 1024 ** 3
 
     def _drain_game_q(game_bar: tqdm) -> None:
         while True:
@@ -965,9 +967,15 @@ def _run_convert_rich(
                     break
                 pid, rss_kb = val
                 worker_rss[pid] = rss_kb
-                total_mb = sum(worker_rss.values()) / 1024
-                per_w = " ".join(f"{v // 1024}MB" for v in worker_rss.values())
-                game_bar.set_postfix_str(f"ram={total_mb:.0f}MB [{per_w}]", refresh=False)
+                # Only count the most recent entry per active worker batch;
+                # keep at most `workers` pids (oldest evicted as new ones arrive).
+                if len(worker_rss) > min(workers, len(pending)):
+                    oldest = next(iter(worker_rss))
+                    del worker_rss[oldest]
+                used_gb = sum(worker_rss.values()) / 1024 / 1024
+                game_bar.set_postfix_str(
+                    f"ram={used_gb:.2f}/{total_ram_gb:.0f}GB", refresh=False
+                )
                 game_bar.update(1)
             except Exception:
                 pass
