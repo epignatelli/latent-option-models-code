@@ -738,17 +738,14 @@ def _convert_aa_group(task: tuple) -> dict:
         return {"status": "skip", "path": output_path,
                 "frames": int(offsets[-1]), "games": n_games, "game_meta": game_meta}
 
-    chars_parts: list[np.ndarray] = []
-    colors_parts: list[np.ndarray] = []
-    offsets_list: list[int] = [0]
-    source_game_ids: list[str] = []
-    game_meta: list[dict] = []
-    total_frames = 0
-
     bz2_sorted = sorted(
         bz2_files,
         key=lambda p: int(os.path.basename(p).split(".")[2]),
     )
+
+    # Pass 1: decode each game to collect frame counts and metadata; discard arrays.
+    valid: list[tuple[str, int, dict]] = []  # (bz2_path, n_frames, meta_entry)
+    H = W = None
     for bz2_path in bz2_sorted:
         basename = os.path.basename(bz2_path)
         entry = xl_by_name.get(basename, {})
@@ -758,33 +755,55 @@ def _convert_aa_group(task: tuple) -> dict:
             continue
         if not arrays or n_frames < min_frames:
             continue
-        chars_parts.append(arrays["tty_chars"].astype(np.uint8))
-        colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
-                  if "tty_colors" in arrays
-                  else np.zeros_like(arrays["tty_chars"], dtype=np.uint8))
-        colors_parts.append(colors)
-        total_frames += n_frames
-        offsets_list.append(total_frames)
-        source_game_ids.append(basename)
-        ts = int(entry.get("starttime", 0) or 0)
-        game_meta.append(_game_meta_from_xlog(entry, n_frames, ts))
+        if H is None:
+            H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
+        valid.append((bz2_path, n_frames, entry))
 
-    if not chars_parts:
+    if not valid:
         return {"status": "filter"}
 
+    total_frames = sum(n for _, n, _ in valid)
+    offsets_list = [0]
+    for _, n, _ in valid:
+        offsets_list.append(offsets_list[-1] + n)
+    source_game_ids = [os.path.basename(p) for p, _, _ in valid]
+    game_meta = [_game_meta_from_xlog(e, n, int(e.get("starttime", 0) or 0))
+                 for _, n, e in valid]
+
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    np.savez_compressed(
-        output_path,
-        tty_chars=np.concatenate(chars_parts),
-        tty_colors=np.concatenate(colors_parts),
-        offsets=np.array(offsets_list, dtype=np.int64),
-        source_game_ids=np.array(source_game_ids, dtype="U64"),
-    )
+
+    # Pass 2: decode again, write directly into disk-backed memmaps.
+    import tempfile
+    tmp_root = os.path.dirname(output_path)
+    with tempfile.TemporaryDirectory(dir=tmp_root) as tmpdir:
+        mm_chars  = np.memmap(os.path.join(tmpdir, "c.bin"),   dtype=np.uint8, mode="w+", shape=(total_frames, H, W))
+        mm_colors = np.memmap(os.path.join(tmpdir, "col.bin"), dtype=np.uint8, mode="w+", shape=(total_frames, H, W))
+        offset = 0
+        for bz2_path, n_frames, _ in valid:
+            arrays, _ = _decode([bz2_path], ttyrec_version)
+            mm_chars[offset:offset + n_frames] = arrays["tty_chars"].astype(np.uint8)
+            mm_colors[offset:offset + n_frames] = (
+                arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
+                if "tty_colors" in arrays
+                else np.zeros((n_frames, H, W), dtype=np.uint8)
+            )
+            offset += n_frames
+        mm_chars.flush()
+        mm_colors.flush()
+        np.savez_compressed(
+            output_path,
+            tty_chars=mm_chars,
+            tty_colors=mm_colors,
+            offsets=np.array(offsets_list, dtype=np.int64),
+            source_game_ids=np.array(source_game_ids, dtype="U64"),
+        )
+        del mm_chars, mm_colors
+
     return {
         "status": "ok",
         "path": output_path,
         "frames": total_frames,
-        "games": len(offsets_list) - 1,
+        "games": len(valid),
         "game_meta": game_meta,
     }
 
