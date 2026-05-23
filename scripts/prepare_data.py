@@ -60,7 +60,6 @@ import logging
 import multiprocessing as mp
 import os
 import re
-import resource
 import tarfile
 import threading
 
@@ -471,7 +470,7 @@ def _convert_player(task: tuple) -> dict:
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
         game_meta.append(_game_meta_from_xlog(entry, n_frames, file_ts))
         if _game_q is not None:
-            _game_q.put((os.getpid(), resource.getrusage(resource.RUSAGE_SELF).ru_maxrss))
+            _game_q.put(os.getpid())
 
     if not chars_parts:
         return {"status": "filter"}
@@ -751,7 +750,7 @@ def _convert_aa_group(task: tuple) -> dict:
         ts = int(entry.get("starttime", 0) or 0)
         game_meta.append(_game_meta_from_xlog(entry, n_frames, ts))
         if _game_q is not None:
-            _game_q.put((os.getpid(), resource.getrusage(resource.RUSAGE_SELF).ru_maxrss))
+            _game_q.put(os.getpid())
 
     if not chars_parts:
         return {"status": "filter"}
@@ -955,7 +954,6 @@ def _run_convert_rich(
     global _game_q
     _game_q = mp.Queue()
 
-    worker_rss: dict[int, int] = {}  # pid → rss_kb
     import psutil
     total_ram_gb = psutil.virtual_memory().total / 1024 ** 3
 
@@ -965,16 +963,9 @@ def _run_convert_rich(
                 val = _game_q.get(timeout=0.5)
                 if val is None:
                     break
-                pid, rss_kb = val
-                worker_rss[pid] = rss_kb
-                # Only count the most recent entry per active worker batch;
-                # keep at most `workers` pids (oldest evicted as new ones arrive).
-                if len(worker_rss) > min(workers, len(pending)):
-                    oldest = next(iter(worker_rss))
-                    del worker_rss[oldest]
-                used_gb = sum(worker_rss.values()) / 1024 / 1024
+                used_gb = psutil.virtual_memory().used / 1024 ** 3
                 game_bar.set_postfix_str(
-                    f"ram={used_gb:.2f}/{total_ram_gb:.0f}GB", refresh=False
+                    f"ram={used_gb:.1f}/{total_ram_gb:.0f}GB", refresh=False
                 )
                 game_bar.update(1)
             except Exception:
