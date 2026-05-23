@@ -476,13 +476,16 @@ def _convert_player(task: tuple) -> dict:
         return {"status": "filter"}
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    np.savez_compressed(
-        output_path,
-        tty_chars=np.concatenate(chars_parts),
-        tty_colors=np.concatenate(colors_parts),
-        offsets=np.array(offsets_list, dtype=np.int64),
-        source_timestamps=np.array(src_timestamps, dtype=np.int64),
-    )
+    try:
+        np.savez_compressed(
+            output_path,
+            tty_chars=np.concatenate(chars_parts),
+            tty_colors=np.concatenate(colors_parts),
+            offsets=np.array(offsets_list, dtype=np.int64),
+            source_timestamps=np.array(src_timestamps, dtype=np.int64),
+        )
+    except MemoryError as exc:
+        return {"status": "error", "error": f"OOM during concatenate ({total_frames} frames): {exc}"}
     return {"status": "ok", "path": output_path,
             "frames": total_frames, "games": len(offsets_list) - 1,
             "game_meta": game_meta}
@@ -756,13 +759,16 @@ def _convert_aa_group(task: tuple) -> dict:
         return {"status": "filter"}
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    np.savez_compressed(
-        output_path,
-        tty_chars=np.concatenate(chars_parts),
-        tty_colors=np.concatenate(colors_parts),
-        offsets=np.array(offsets_list, dtype=np.int64),
-        source_game_ids=np.array(source_game_ids, dtype="U64"),
-    )
+    try:
+        np.savez_compressed(
+            output_path,
+            tty_chars=np.concatenate(chars_parts),
+            tty_colors=np.concatenate(colors_parts),
+            offsets=np.array(offsets_list, dtype=np.int64),
+            source_game_ids=np.array(source_game_ids, dtype="U64"),
+        )
+    except MemoryError as exc:
+        return {"status": "error", "error": f"OOM during concatenate ({total_frames} frames): {exc}"}
     return {"status": "ok", "path": output_path,
             "frames": total_frames, "games": len(offsets_list) - 1,
             "game_meta": game_meta}
