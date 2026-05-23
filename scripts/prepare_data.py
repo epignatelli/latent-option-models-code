@@ -92,6 +92,9 @@ _xl_by_player: dict[str, list[dict]] = {}
 # output path directory (same as legacy behaviour).  Set before Pool creation so
 # workers inherit it via fork.
 _TMP_DIR: str = ""
+# Whether to use disk-backed memmaps during conversion.  Set before Pool
+# creation so workers inherit it via fork.
+_USE_MEMMAP: bool = True
 
 _XLOG_NAMES = [
     "xlogfile.full.txt",
@@ -140,6 +143,8 @@ class BaseArgs:
     """Skip building / updating index.npz."""
     tmp_dir: str = "/space"
     """Local directory for temporary memmap files during conversion."""
+    use_memmap: bool = True
+    """Use disk-backed memmaps during conversion. Disable on machines with sufficient RAM to avoid temp file I/O."""
 
 
 @dataclass
@@ -482,9 +487,14 @@ def _convert_player(task: tuple) -> dict:
             "game_meta": game_meta,
         }
 
-    # --- convert case: two-pass decode to avoid accumulating arrays in RAM ---
-    # Pass 1: collect frame counts and metadata; discard decoded arrays.
-    valid: list[tuple[str, int, int, dict]] = []  # (path, n_frames, file_ts, xlog_entry)
+    # --- convert case ---
+    # Pass 1: decode each game, cast and cache chars/colors; collect metadata.
+    # When _USE_MEMMAP is False the cached arrays are reused directly in the
+    # write step (no second disk pass).  When _USE_MEMMAP is True they are held
+    # in RAM just long enough to fill the memmaps in pass 2, but we still cache
+    # here to avoid decoding twice.
+    # Tuple layout: (path, n_frames, file_ts, xlog_entry, chars, colors)
+    valid: list[tuple[str, int, int, dict, np.ndarray, np.ndarray]] = []
     H = W = None
     for bz2_path in sorted(input_files):
         file_ts = _parse_filename_ts(bz2_path)
@@ -497,42 +507,46 @@ def _convert_player(task: tuple) -> dict:
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
-        valid.append((bz2_path, n_frames, file_ts, entry))
+        chars = arrays["tty_chars"].astype(np.uint8)
+        colors = (
+            arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
+            if "tty_colors" in arrays
+            else np.zeros((n_frames, H, W), dtype=np.uint8)
+        )
+        valid.append((bz2_path, n_frames, file_ts, entry, chars, colors))
 
     if not valid:
         return {"status": "filter"}
 
-    total_frames = sum(n for _, n, _, _ in valid)
+    total_frames = sum(n for _, n, _, _, _, _ in valid)
     offsets_list = [0]
-    for _, n, _, _ in valid:
+    for _, n, _, _, _, _ in valid:
         offsets_list.append(offsets_list[-1] + n)
-    src_timestamps = np.array([ts for _, _, ts, _ in valid], dtype=np.int64)
-    game_meta = [_game_meta_from_xlog(e, n, ts) for _, n, ts, e in valid]
+    src_timestamps = np.array([ts for _, _, ts, _, _, _ in valid], dtype=np.int64)
+    game_meta = [_game_meta_from_xlog(e, n, ts) for _, n, ts, e, _, _ in valid]
 
-    # Pass 2: decode again, write directly into disk-backed memmaps.
-    def fill(mm_chars, mm_colors):
-        offset = 0
-        for bz2_path, n_frames, _, _ in valid:
-            try:
-                arrays, _ = _decode([bz2_path], ttyrec_version)
-            except Exception:
+    extra = {
+        "offsets": np.array(offsets_list, dtype=np.int64),
+        "source_timestamps": src_timestamps,
+    }
+
+    if _USE_MEMMAP:
+        # Pass 2: copy from in-memory cache into disk-backed memmaps.
+        def fill(mm_chars, mm_colors):
+            offset = 0
+            for _, n_frames, _, _, chars, colors in valid:
+                mm_chars[offset:offset + n_frames]  = chars
+                mm_colors[offset:offset + n_frames] = colors
                 offset += n_frames
-                continue
-            mm_chars[offset:offset + n_frames] = arrays["tty_chars"].astype(np.uint8)
-            mm_colors[offset:offset + n_frames] = (
-                arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
-                if "tty_colors" in arrays
-                else np.zeros((n_frames, H, W), dtype=np.uint8)
-            )
-            offset += n_frames
 
-    write_frames_npz(
-        output_path, total_frames, H, W, fill,
-        extra_arrays={
-            "offsets": np.array(offsets_list, dtype=np.int64),
-            "source_timestamps": src_timestamps,
-        },
-    )
+        write_frames_npz(output_path, total_frames, H, W, fill, extra_arrays=extra)
+    else:
+        # Direct path: concatenate in RAM and savez — no temp dir needed.
+        all_chars  = np.concatenate([c for _, _, _, _, c, _ in valid], axis=0)
+        all_colors = np.concatenate([c for _, _, _, _, _, c in valid], axis=0)
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        np.savez_compressed(output_path, tty_chars=all_chars, tty_colors=all_colors, **extra)
+
     return {
         "status": "ok",
         "path": output_path,
@@ -808,21 +822,28 @@ def _convert_aa_group(task: tuple) -> dict:
     game_meta = [_game_meta_from_xlog(e, n, int(e.get("starttime", 0) or 0))
                  for _, n, e, _, _ in valid]
 
-    # Pass 2: copy from in-memory cache into disk-backed memmaps — no disk re-read.
-    def fill(mm_chars, mm_colors):
-        offset = 0
-        for _, n_frames, _, chars, colors in valid:
-            mm_chars[offset:offset + n_frames] = chars
-            mm_colors[offset:offset + n_frames] = colors
-            offset += n_frames
+    extra = {
+        "offsets": np.array(offsets_list, dtype=np.int64),
+        "source_game_ids": np.array(source_game_ids, dtype="U64"),
+    }
 
-    write_frames_npz(
-        output_path, total_frames, H, W, fill,
-        extra_arrays={
-            "offsets": np.array(offsets_list, dtype=np.int64),
-            "source_game_ids": np.array(source_game_ids, dtype="U64"),
-        },
-    )
+    if _USE_MEMMAP:
+        # Pass 2: copy from in-memory cache into disk-backed memmaps — no disk re-read.
+        def fill(mm_chars, mm_colors):
+            offset = 0
+            for _, n_frames, _, chars, colors in valid:
+                mm_chars[offset:offset + n_frames] = chars
+                mm_colors[offset:offset + n_frames] = colors
+                offset += n_frames
+
+        write_frames_npz(output_path, total_frames, H, W, fill, extra_arrays=extra)
+    else:
+        # Direct path: concatenate in RAM and savez — no temp dir needed.
+        all_chars  = np.concatenate([c for _, _, _, c, _ in valid], axis=0)
+        all_colors = np.concatenate([c for _, _, _, _, c in valid], axis=0)
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        np.savez_compressed(output_path, tty_chars=all_chars, tty_colors=all_colors, **extra)
+
     return {
         "status": "ok",
         "path": output_path,
@@ -1179,8 +1200,9 @@ def _run_nao_top10(args: BaseArgs) -> None:
     print("[db]       n/a for nao-top10")
 
     if not args.skip_convert:
-        global _TMP_DIR
+        global _TMP_DIR, _USE_MEMMAP
         _TMP_DIR = args.tmp_dir
+        _USE_MEMMAP = args.use_memmap
         os.makedirs(npz_dir, exist_ok=True)
         print(f"[convert]  → {npz_dir}")
         tasks = _discover_nao_top10(extract_dir, npz_dir, args.min_frames)
@@ -1242,8 +1264,9 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
         print("[db]       skipped")
 
     if not args.skip_convert:
-        global _TMP_DIR
+        global _TMP_DIR, _USE_MEMMAP
         _TMP_DIR = args.tmp_dir
+        _USE_MEMMAP = args.use_memmap
         os.makedirs(npz_dir, exist_ok=True)
         print(f"[convert]  → {npz_dir}")
         if dataset == "nld-aa":
