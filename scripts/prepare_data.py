@@ -21,16 +21,16 @@ Datasets:
 Output layout under --output-dir:
 
   nao-top10/nao_top10/          extracted source npz sessions (by player/session)
-  nao-top10-npz/                consolidated per-player .npz files
-  nao-top10-npz/index.npz       rich index (game lengths; no xlogfile metadata)
+  nle/nao-top10/                consolidated per-player .npz files
+  nle/nao-top10/index.npz       rich index (game lengths; no xlogfile metadata)
   nld-aa/                       extracted ttyrec files
   nld-aa.db                     NLE SQLite database
-  nld-aa-npz/                   converted per-game-dir .npz files (fake players)
-  nld-aa-npz/index.npz          rich index with per-game-dir and per-game metadata
+  nle/aa/                       converted per-game-dir .npz files (fake players)
+  nle/aa/index.npz              rich index with per-game-dir and per-game metadata
   nld-nao/                      extracted ttyrec files
   nld-nao.db
-  nld-nao-npz/                  converted per-player .npz files (one file per player)
-  nld-nao-npz/index.npz         rich index with per-player and per-game metadata
+  nle/nao/                      converted per-player .npz files (one file per player)
+  nle/nao/index.npz             rich index with per-player and per-game metadata
   zips/                         downloaded archives (removed unless --keep-archives)
 
 Usage:
@@ -99,6 +99,11 @@ _GAME_META_DEFAULT: dict = {
     "ascended": False, "role": "???", "race": "???", "align": "???",
     "death": "", "flags": 0, "timestamp": 0,
 }
+
+# Maximum frames per nao-top10 chunk npz.  Players with more frames are split
+# into multiple files (e.g. Luxidream_0.npz, Luxidream_1.npz …) so that no
+# single file exceeds the per-process cgroup memory limit during training.
+_NAO_TOP10_MAX_FRAMES = 2_000_000
 
 
 # --------------------------------------------------------------------------- #
@@ -516,68 +521,150 @@ def _discover_nao_top10(extract_dir: str, output_dir: str, min_frames: int) -> l
     return tasks
 
 
-def _consolidate_nao_top10_player(task: tuple) -> dict:
-    """Merge all nao-top10 sessions for one player into a single per-player npz.
+def _chunk_paths(output_path: str, n_chunks: int) -> list[str]:
+    """Return the list of chunk file paths for a player.
 
-    No xlogfile is available for this dataset; game_meta contains only frame counts.
+    Single-chunk players keep the original name (no suffix).
+    Multi-chunk players use stem_0.npz, stem_1.npz, …
+    """
+    if n_chunks == 1:
+        return [output_path]
+    stem, ext = os.path.splitext(output_path)
+    return [f"{stem}_{i}{ext}" for i in range(n_chunks)]
+
+
+def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
+    """Merge all nao-top10 sessions for one player into per-player npz chunk(s).
+
+    No xlogfile is available for this dataset; game_meta contains only frame
+    counts.  If the total frame count exceeds _NAO_TOP10_MAX_FRAMES the games
+    are split into multiple contiguous chunks, each written as a separate npz
+    (e.g. Luxidream_0.npz, Luxidream_1.npz …).  Single-chunk players keep the
+    original Luxidream.npz naming (no suffix).
+
+    Returns a list of result dicts — one per chunk written (or skipped).
     """
     session_files, output_path, min_frames = task
 
-    if os.path.exists(output_path):
-        try:
-            with np.load(output_path) as f:
-                offsets = f["offsets"]
-        except Exception as exc:
-            return {"status": "error", "msg": f"failed to read {output_path}: {exc}"}
-        n_games = len(offsets) - 1
-        game_meta = [
-            dict(_GAME_META_DEFAULT, length=int(offsets[i + 1]) - int(offsets[i]))
-            for i in range(n_games)
-        ]
-        return {"status": "skip", "path": output_path,
-                "frames": int(offsets[-1]), "games": n_games, "game_meta": game_meta}
-
-    chars_parts: list[np.ndarray] = []
-    colors_parts: list[np.ndarray] = []
-    offsets_list: list[int] = [0]
-    game_meta: list[dict] = []
-    total_frames = 0
+    # Pass 1: discover valid sessions and per-game frame counts.
+    # np.concatenate needs parts + output simultaneously; pre-allocating once and
+    # filling in-place halves peak RAM to just the output array + one session.
+    valid: list[tuple[str, int]] = []
+    game_meta_all: list[dict] = []
+    H = W = None
 
     for npz_path in sorted(session_files):
         try:
             with np.load(npz_path) as f:
-                chars = f["tty_chars"].astype(np.uint8)
-                colors = (np.clip(f["tty_colors"].astype(np.int16), 0, 31).astype(np.uint8)
-                          if "tty_colors" in f
-                          else np.zeros_like(chars, dtype=np.uint8))
+                shape = f["tty_chars"].shape
         except Exception:
             continue
-        n_frames = len(chars)
+        n_frames = shape[0]
+        if H is None:
+            H, W = shape[1], shape[2]
         if n_frames < min_frames:
             continue
-        chars_parts.append(chars)
-        colors_parts.append(colors)
-        total_frames += n_frames
-        offsets_list.append(total_frames)
-        game_meta.append(dict(_GAME_META_DEFAULT, length=n_frames))
+        valid.append((npz_path, n_frames))
+        game_meta_all.append(dict(_GAME_META_DEFAULT, length=n_frames))
 
-    if not chars_parts:
-        return {"status": "filter"}
+    if not valid:
+        return [{"status": "filter"}]
 
+    # Group valid games into chunks of at most _NAO_TOP10_MAX_FRAMES frames each.
+    chunks: list[list[int]] = []   # each inner list is indices into `valid`
+    current_chunk: list[int] = []
+    current_frames = 0
+    for idx, (_, n_frames) in enumerate(valid):
+        if current_chunk and current_frames + n_frames > _NAO_TOP10_MAX_FRAMES:
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_frames = 0
+        current_chunk.append(idx)
+        current_frames += n_frames
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    n_chunks = len(chunks)
+    paths = _chunk_paths(output_path, n_chunks)
+
+    # Skip check: all expected chunk files must exist; re-do the whole player if
+    # only some exist (partial previous run).
+    if all(os.path.exists(p) for p in paths):
+        results: list[dict] = []
+        for chunk_path in paths:
+            try:
+                with np.load(chunk_path) as f:
+                    offsets = f["offsets"]
+            except Exception as exc:
+                return [{"status": "error",
+                         "msg": f"failed to read {chunk_path}: {exc}"}]
+            n_games = len(offsets) - 1
+            gm = [
+                dict(_GAME_META_DEFAULT,
+                     length=int(offsets[i + 1]) - int(offsets[i]))
+                for i in range(n_games)
+            ]
+            results.append({"status": "skip", "path": chunk_path,
+                             "frames": int(offsets[-1]),
+                             "games": n_games, "game_meta": gm})
+        return results
+
+    # Pass 2: write each chunk via disk-backed memmaps (avoids loading the whole
+    # player into RAM; per-process RSS stays small regardless of player size).
+    import tempfile
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    np.savez_compressed(
-        output_path,
-        tty_chars=np.concatenate(chars_parts),
-        tty_colors=np.concatenate(colors_parts),
-        offsets=np.array(offsets_list, dtype=np.int64),
-    )
-    return {
-        "status": "ok",
-        "path": output_path,
-        "frames": total_frames,
-        "games": len(offsets_list) - 1,
-        "game_meta": game_meta,
-    }
+    _tmp_root = os.path.dirname(output_path)  # same filesystem as the output
+
+    results = []
+    for chunk_idx, game_indices in enumerate(chunks):
+        chunk_path = paths[chunk_idx]
+        chunk_valid = [valid[i] for i in game_indices]
+        chunk_meta  = [game_meta_all[i] for i in game_indices]
+        chunk_frames = sum(nf for _, nf in chunk_valid)
+        offsets_list: list[int] = [0]
+        for _, nf in chunk_valid:
+            offsets_list.append(offsets_list[-1] + nf)
+
+        with tempfile.TemporaryDirectory(dir=_tmp_root) as tmpdir:
+            mm_chars  = np.memmap(os.path.join(tmpdir, "c.bin"),   dtype=np.uint8,
+                                  mode="w+", shape=(chunk_frames, H, W))
+            mm_colors = np.memmap(os.path.join(tmpdir, "col.bin"), dtype=np.uint8,
+                                  mode="w+", shape=(chunk_frames, H, W))
+            offset = 0
+            for npz_path, n_frames in chunk_valid:
+                try:
+                    with np.load(npz_path) as f:
+                        chars  = f["tty_chars"].astype(np.uint8)
+                        colors = (np.clip(f["tty_colors"].astype(np.int16), 0, 31)
+                                  .astype(np.uint8)
+                                  if "tty_colors" in f
+                                  else np.zeros((n_frames, H, W), dtype=np.uint8))
+                except Exception:
+                    offset += n_frames
+                    continue
+                mm_chars[offset:offset + n_frames]  = chars
+                mm_colors[offset:offset + n_frames] = colors
+                offset += n_frames
+            mm_chars.flush()
+            mm_colors.flush()
+
+            np.savez_compressed(
+                chunk_path,
+                tty_chars=mm_chars,
+                tty_colors=mm_colors,
+                offsets=np.array(offsets_list, dtype=np.int64),
+            )
+            del mm_chars, mm_colors  # release mmap before TemporaryDirectory cleanup
+
+        results.append({
+            "status": "ok",
+            "path": chunk_path,
+            "frames": chunk_frames,
+            "games": len(chunk_valid),
+            "game_meta": chunk_meta,
+        })
+
+    return results
 
 
 def _read_aa_xlogfile(game_dir: str) -> dict[str, dict]:
@@ -860,7 +947,17 @@ def _run_convert_rich(
         accum, indexed_paths = _load_rich_accum(index_path)
 
     # Tasks whose output is already in the index are truly skipped.
-    pending = [t for t in tasks if t[1] not in indexed_paths]
+    # For chunked converters the task output_path (t[1]) may be the unsuffixed
+    # base name; a player is considered indexed if ANY of its chunk paths appear
+    # in indexed_paths (checked by prefix match on the stem).
+    def _task_indexed(task_output_path: str) -> bool:
+        if task_output_path in indexed_paths:
+            return True
+        # Chunked players: check whether stem_0.npz (first chunk) is indexed.
+        stem = os.path.splitext(task_output_path)[0]
+        return f"{stem}_0.npz" in indexed_paths
+
+    pending = [t for t in tasks if not _task_indexed(t[1])]
     print(f"  pending: {len(pending):,} players to process", flush=True)
 
     counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
@@ -869,15 +966,20 @@ def _run_convert_rich(
 
     with mp.Pool(workers) as pool:
         with tqdm(total=len(pending), unit="player", desc="  convert", dynamic_ncols=True) as bar:
-            for result in pool.imap_unordered(converter, pending):
-                status = result["status"]
-                counts[status] += 1
+            for raw_result in pool.imap_unordered(converter, pending):
+                # Converters may return a single dict or a list of dicts (chunked).
+                result_list: list[dict] = (
+                    raw_result if isinstance(raw_result, list) else [raw_result]
+                )
+                for result in result_list:
+                    status = result["status"]
+                    counts[status] += 1
 
-                if status in ("ok", "skip") and result.get("game_meta"):
-                    _accum_player_result(accum, result)
-                    since_ckpt += 1
-                elif status == "error":
-                    errors.append(result.get("msg", "unknown"))
+                    if status in ("ok", "skip") and result.get("game_meta"):
+                        _accum_player_result(accum, result)
+                        since_ckpt += 1
+                    elif status == "error":
+                        errors.append(result.get("msg", "unknown"))
 
                 bar.set_postfix(
                     ok=counts["ok"], skip=counts["skip"],
@@ -1006,7 +1108,7 @@ def _run_nao_top10(args: BaseArgs) -> None:
     zip_dir     = os.path.join(root, "zips", "nao-top10")
     tar_path    = os.path.join(zip_dir, "nao_top10.tar")
     extract_dir = os.path.join(root, "nao-top10")
-    npz_dir     = os.path.join(root, "nao-top10-npz")
+    npz_dir     = os.path.join(root, "nle", "nao-top10")
     index_path  = os.path.join(npz_dir, "index.npz")
 
     print("\n─── nao-top10 ───────────────────────────────────────────────────")
@@ -1062,7 +1164,8 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
     zip_dir     = os.path.join(root, "zips", dataset)
     extract_dir = os.path.join(root, dataset)
     db_path     = os.path.join(root, f"{dataset}.db")
-    npz_dir     = os.path.join(root, f"{dataset}-npz")
+    _npz_subdirs = {"nld-aa": "aa", "nld-nao": "nao"}
+    npz_dir     = os.path.join(root, "nle", _npz_subdirs[dataset])
     index_path  = os.path.join(npz_dir, "index.npz")
 
     filenames  = _nld_aa_zips() if dataset == "nld-aa" else _nld_nao_zips()

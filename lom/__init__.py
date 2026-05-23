@@ -4,7 +4,7 @@ from .config import (
 )
 from .models import LatentActionModel, DynamicsModel
 from .modules import PatchEmbedding, SpatioTemporalTransformer, VectorQuantizer
-from .dataset import TrajectoryDataset, load_nao_top10, load_nld_nao, load_nld_aa, build_dataloaders
+from .dataset import NpzTrajectoryDataset, build_npz_dataloaders
 from .training import Trainer, LAMTrainer, LOMTrainer
 
 __all__ = [
@@ -12,6 +12,6 @@ __all__ = [
     "LAMCfg", "LOMCfg",
     "LatentActionModel", "DynamicsModel",
     "PatchEmbedding", "SpatioTemporalTransformer", "VectorQuantizer",
-    "TrajectoryDataset", "load_nao_top10", "load_nld_nao", "load_nld_aa", "build_dataloaders",
+    "NpzTrajectoryDataset", "build_npz_dataloaders",
     "Trainer", "LAMTrainer", "LOMTrainer",
 ]

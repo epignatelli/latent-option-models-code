@@ -11,12 +11,11 @@ sweep:
   seeds: [0, 1, 2]
 
 data:
-  nle_data_dir: /scratch/uceeepi/lom/datasets
   dataset: nao-top10
-  index_path: /scratch/uceeepi/lom/datasets/nao-top10/nao_top10/index.npz
+  index_path: /scratch/uceeepi/lom/datasets/nle/nao-top10/index.npz
   context_len: 4
   horizon: 128
-  buffer_size: 200
+  buffer_size: 24
   steps_per_epoch: 10_000
 
 model:

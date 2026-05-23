@@ -135,8 +135,8 @@ sub_box(ax, 0.55, 21.55, 5.0, 1.25, "index.npz  (built once by scripts/convert_t
          "median game length ≈ 7 917 frames"],
         "#e8f4fb")
 
-# _GameBuffer
-sub_box(ax, 0.55, 18.75, 8.2, 2.65, "_GameBuffer  (background thread, atomic state swap)",
+# GameBuffer
+sub_box(ax, 0.55, 18.75, 8.2, 2.65, "GameBuffer  (background thread, atomic state swap)",
         ["hot pool: buffer_size=200 games in RAM  (~6 GB)",
          "refresh:  replace 10% of buffer every 60 s  (weights ∝ valid_starts)",
          "_load(i):  tty_chars (T,24,80) uint8",

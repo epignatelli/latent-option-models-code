@@ -8,11 +8,9 @@ sweep:
   seeds: [0, 1, 2]
 
 data:
-  nle_data_dir: /scratch/uceeepi/lom/datasets
   dataset: nld-nao
   context_len: 4
   horizon: 128
-  num_workers: 4
 
 model:
   latent_dim: 512

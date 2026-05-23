@@ -14,13 +14,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from .config import LAMCfg, LOMCfg
-from .dataset import (
-    build_dataloaders,
-    build_npz_dataloaders,
-    load_nao_top10,
-    load_nld_nao,
-    load_nld_aa,
-)
+from .dataset import build_npz_dataloaders
 from .models import DynamicsModel, LatentActionModel
 from .modules import tokenise
 
@@ -92,34 +86,23 @@ class Trainer(ABC):
         torch.manual_seed(t.seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        if d.index_path:
-            self.train_loader, self.val_loader = build_npz_dataloaders(
-                index_path=d.index_path,
-                context_len=d.context_len,
-                horizon=d.horizon,
-                batch_size=t.batch_size,
-                buffer_size=d.buffer_size,
-                val_fraction=d.val_fraction,
-                steps_per_epoch=d.steps_per_epoch,
-                seed=t.seed,
-                return_sequence=isinstance(cfg, LOMCfg),
+        if not d.index_path:
+            raise ValueError(
+                "data.index_path is required. "
+                "Run scripts/prepare_data.py to generate an index.npz, then set "
+                "data.index_path in your experiment config."
             )
-        else:
-            _loaders = {"nao-top10": load_nao_top10, "nld-nao": load_nld_nao, "nld-aa": load_nld_aa}
-            loader_fn = _loaders[d.dataset]
-            sequences, _ = loader_fn(
-                nle_data_dir=d.nle_data_dir, fallback_numpy_dir=d.fallback_numpy_dir
-            )
-            self.train_loader, self.val_loader = build_dataloaders(
-                sequences,
-                context_len=d.context_len,
-                horizon=d.horizon,
-                batch_size=t.batch_size,
-                val_fraction=d.val_fraction,
-                num_workers=d.num_workers,
-                seed=t.seed,
-                return_sequence=isinstance(cfg, LOMCfg),
-            )
+        self.train_loader, self.val_loader = build_npz_dataloaders(
+            index_path=d.index_path,
+            context_len=d.context_len,
+            horizon=d.horizon,
+            batch_size=t.batch_size,
+            buffer_size=d.buffer_size,
+            val_fraction=d.val_fraction,
+            steps_per_epoch=d.steps_per_epoch,
+            seed=t.seed,
+            return_sequence=isinstance(cfg, LOMCfg),
+        )
 
         self.models = self.build_models().to(self.device)
         if t.compile_model:

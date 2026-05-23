@@ -4,18 +4,18 @@ Each test states a hypothesis, exercises the code, and asserts the CORRECT
 behaviour.  A failing test means the hypothesis is confirmed — the bug is real.
 
 Hypotheses tested:
-  H1  _GameBuffer._load does not cast tty_chars to uint8.
+  H1  GameBuffer._load does not cast tty_chars to uint8.
       If an npz stores tty_chars as int8 (which NLE's pyconverter can produce),
       values 128-255 are stored as -128..-1.  The stacked (T,H,W,2) array
       ends up with wrong dtype (int16 after numpy's signed/unsigned promotion),
       and tokenise() produces token IDs in [-4096, -1] — invalid embedding
       indices.
 
-  H2  _GameBuffer._load has no fallback when tty_colors is absent.
+  H2  GameBuffer._load has no fallback when tty_colors is absent.
       Unlike _load_from_nao_top10_dir it unconditionally accesses
       f["tty_colors"] and raises KeyError on files that lack it.
 
-  H3  _GameBuffer._pool_weights is off by one vs _make_weights.
+  H3  GameBuffer._pool_weights is off by one vs _make_weights.
       A game with exactly T = ctx + horizon valid starting positions has
       weight 0 in _pool_weights (so it can never enter the buffer) but
       weight > 0 in _make_weights (which computes the correct count).
@@ -37,7 +37,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from lom.dataset import NpzTrajectoryDataset, _GameBuffer
+from lom.dataset import NpzTrajectoryDataset, GameBuffer
 from lom.modules import tokenise, COLOR_VOCAB, CHAR_VOCAB, TOKEN_VOCAB
 
 # ── tiny geometry used across all tests ──────────────────────────────────────
@@ -58,7 +58,7 @@ def _write_npz(path, chars_arr, colors_arr=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestH1CharsNotCastToUint8:
-    """_GameBuffer._load must emit a (T, H, W, 2) uint8 array regardless of
+    """GameBuffer._load must emit a (T, H, W, 2) uint8 array regardless of
     the dtype stored in the npz.  Currently it does NOT cast chars."""
 
     def _make_int8_npz(self, tmp_path):
@@ -76,7 +76,7 @@ class TestH1CharsNotCastToUint8:
         path, T = self._make_int8_npz(tmp_path)
         paths   = np.array([path], dtype=object)
         lengths = np.array([T],    dtype=np.int32)
-        buf = _GameBuffer(paths, lengths, buffer_size=1,
+        buf = GameBuffer(paths, lengths, buffer_size=1,
                           context_len=CTX, horizon=HORIZON, seed=0)
         game, _ = buf.sample(np.random.default_rng(0))
         buf.stop()
@@ -90,7 +90,7 @@ class TestH1CharsNotCastToUint8:
         path, T = self._make_int8_npz(tmp_path)
         paths   = np.array([path], dtype=object)
         lengths = np.array([T],    dtype=np.int32)
-        buf = _GameBuffer(paths, lengths, buffer_size=1,
+        buf = GameBuffer(paths, lengths, buffer_size=1,
                           context_len=CTX, horizon=HORIZON, seed=0)
         game, _ = buf.sample(np.random.default_rng(0))
         buf.stop()
@@ -105,7 +105,7 @@ class TestH1CharsNotCastToUint8:
         path, T = self._make_int8_npz(tmp_path)
         paths   = np.array([path], dtype=object)
         lengths = np.array([T],    dtype=np.int32)
-        buf = _GameBuffer(paths, lengths, buffer_size=1,
+        buf = GameBuffer(paths, lengths, buffer_size=1,
                           context_len=CTX, horizon=HORIZON, seed=0)
         game, t = buf.sample(np.random.default_rng(0))
         buf.stop()
@@ -122,7 +122,7 @@ class TestH1CharsNotCastToUint8:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestH2MissingTtyColors:
-    """_GameBuffer._load must not raise KeyError when tty_colors is absent;
+    """GameBuffer._load must not raise KeyError when tty_colors is absent;
     it should fall back to zeros like _load_from_nao_top10_dir does."""
 
     def test_no_key_error_when_colors_missing(self, tmp_path):
@@ -134,12 +134,12 @@ class TestH2MissingTtyColors:
         lengths = np.array([T], dtype=np.int32)
         # should not raise
         try:
-            buf = _GameBuffer(paths, lengths, buffer_size=1,
+            buf = GameBuffer(paths, lengths, buffer_size=1,
                               context_len=CTX, horizon=HORIZON, seed=0)
             buf.stop()
         except KeyError as e:
             pytest.fail(
-                f"_GameBuffer._load raised KeyError({e}) for a file without "
+                f"GameBuffer._load raised KeyError({e}) for a file without "
                 "tty_colors.  It should fall back to a zero color channel."
             )
 
@@ -150,7 +150,7 @@ class TestH2MissingTtyColors:
         np.savez(p, tty_chars=chars)
         paths   = np.array([p], dtype=object)
         lengths = np.array([T], dtype=np.int32)
-        buf = _GameBuffer(paths, lengths, buffer_size=1,
+        buf = GameBuffer(paths, lengths, buffer_size=1,
                           context_len=CTX, horizon=HORIZON, seed=0)
         game, _ = buf.sample(np.random.default_rng(0))
         buf.stop()
@@ -181,7 +181,7 @@ class TestH3PoolWeightsOffByOne:
         """_pool_weights gives weight 0 to the same borderline game — the bug."""
         T      = CTX + HORIZON
         lengths = np.array([T], dtype=np.float64)
-        # Replicates the _pool_weights formula in _GameBuffer.__init__
+        # Replicates the _pool_weights formula in GameBuffer.__init__
         min_len = CTX + HORIZON + 1
         valid   = max(float(lengths[0]) - (min_len - 1), 0.0)
         assert valid == 0.0, (
@@ -203,7 +203,7 @@ class TestH3PoolWeightsOffByOne:
         # _pool_weights > 0, then verify _make_weights still gives the right count.
         paths   = np.array([p], dtype=object)
         lengths = np.array([T + 1], dtype=np.int32)   # lie: say T+1 frames
-        buf = _GameBuffer(paths, lengths, buffer_size=1,
+        buf = GameBuffer(paths, lengths, buffer_size=1,
                           context_len=CTX, horizon=HORIZON, seed=0)
         games, weights = buf._state
         buf.stop()

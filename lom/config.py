@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal
 
 
 @dataclass
@@ -41,17 +41,11 @@ class LOMModelCfg(ModelCfg):
 @dataclass
 class DataCfg:
     dataset: Literal["nao-top10", "nld-nao", "nld-aa"] = "nao-top10"
-    nle_data_dir: str = "nle_data"
-    fallback_numpy_dir: Optional[str] = None
     index_path: str = ""
-    """Path to index.npz produced by convert_to_npz. When set, NpzTrajectoryDataset
-    is used instead of the in-memory loaders."""
     context_len: int = 4
     horizon: int = 8
     val_fraction: float = 0.05
-    num_workers: int = 4
     buffer_size: int = 1_000
-    """Number of games to keep in the NpzTrajectoryDataset buffer."""
     steps_per_epoch: int = 10_000
 
 
