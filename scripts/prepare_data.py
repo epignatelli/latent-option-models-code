@@ -429,7 +429,7 @@ def _convert_player(task: tuple) -> dict:
                 offsets = f["offsets"]
                 src_ts = f["source_timestamps"] if "source_timestamps" in f else None
         except Exception as exc:
-            return {"status": "error", "msg": f"failed to read {output_path}: {exc}"}
+            return {"status": "error", "path": output_path, "msg": f"failed to read {output_path}: {exc}"}
         n_games = len(offsets) - 1
         game_meta: list[dict] = []
         for i in range(n_games):
@@ -592,7 +592,7 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
                 with np.load(chunk_path) as f:
                     offsets = f["offsets"]
             except Exception as exc:
-                return [{"status": "error",
+                return [{"status": "error", "path": chunk_path,
                          "msg": f"failed to read {chunk_path}: {exc}"}]
             n_games = len(offsets) - 1
             gm = [
@@ -705,7 +705,7 @@ def _convert_aa_group(task: tuple) -> dict:
                 offsets = f["offsets"]
                 src_ids = f["source_game_ids"] if "source_game_ids" in f else None
         except Exception as exc:
-            return {"status": "error", "msg": f"failed to read {output_path}: {exc}"}
+            return {"status": "error", "path": output_path, "msg": f"failed to read {output_path}: {exc}"}
         n_games = len(offsets) - 1
         game_meta: list[dict] = []
         for i in range(n_games):
@@ -1032,7 +1032,7 @@ def _run_convert_rich(
                         since_ckpt += 1
                     elif status == "error":
                         errors.append(result.get("error", result.get("msg", "unknown")))
-                        if result.get("oom") and result.get("path"):
+                        if result.get("path"):
                             oom_paths.append(result["path"])
 
                 bar.set_postfix(
@@ -1054,11 +1054,11 @@ def _run_convert_rich(
         _write_index_rich(index_path, accum)
 
     if oom_paths:
-        retry_path = os.path.join(npz_dir, "oom_retry.txt")
+        retry_path = os.path.join(npz_dir, "errors.txt")
         with open(retry_path, "a") as _f:
             for p in oom_paths:
                 _f.write(p + "\n")
-        print(f"\n  {len(oom_paths)} OOM group(s) recorded in {retry_path}", flush=True)
+        print(f"\n  {len(oom_paths)} failed group(s) recorded in {retry_path}", flush=True)
 
     if errors:
         print(f"\n  first 10 errors:", flush=True)
