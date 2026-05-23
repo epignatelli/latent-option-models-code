@@ -88,6 +88,10 @@ _NAO_TOP10_URL = "https://storage.googleapis.com/dm_nethack/nao_top10.tar"
 
 # Populated before Pool creation; workers inherit via fork (Linux copy-on-write).
 _xl_by_player: dict[str, list[dict]] = {}
+# Local directory for temporary memmap files.  Empty string = fall back to the
+# output path directory (same as legacy behaviour).  Set before Pool creation so
+# workers inherit it via fork.
+_TMP_DIR: str = ""
 
 _XLOG_NAMES = [
     "xlogfile.full.txt",
@@ -134,6 +138,8 @@ class BaseArgs:
     """Skip ttyrec → npz conversion (nld-aa / nld-nao only); jump straight to index."""
     skip_index: bool = False
     """Skip building / updating index.npz."""
+    tmp_dir: str = "/space"
+    """Local directory for temporary memmap files during conversion."""
 
 
 @dataclass
@@ -422,7 +428,7 @@ def write_frames_npz(
     exits to avoid OSError on cleanup.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    tmp_root = os.path.dirname(output_path) or "."
+    tmp_root = _TMP_DIR if _TMP_DIR else (os.path.dirname(output_path) or ".")
     with tempfile.TemporaryDirectory(dir=tmp_root) as tmpdir:
         mm_chars  = np.memmap(os.path.join(tmpdir, "c.bin"),   dtype=np.uint8, mode="w+", shape=(total_frames, H, W))
         mm_colors = np.memmap(os.path.join(tmpdir, "col.bin"), dtype=np.uint8, mode="w+", shape=(total_frames, H, W))
@@ -1173,6 +1179,8 @@ def _run_nao_top10(args: BaseArgs) -> None:
     print("[db]       n/a for nao-top10")
 
     if not args.skip_convert:
+        global _TMP_DIR
+        _TMP_DIR = args.tmp_dir
         os.makedirs(npz_dir, exist_ok=True)
         print(f"[convert]  → {npz_dir}")
         tasks = _discover_nao_top10(extract_dir, npz_dir, args.min_frames)
@@ -1234,6 +1242,8 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
         print("[db]       skipped")
 
     if not args.skip_convert:
+        global _TMP_DIR
+        _TMP_DIR = args.tmp_dir
         os.makedirs(npz_dir, exist_ok=True)
         print(f"[convert]  → {npz_dir}")
         if dataset == "nld-aa":
