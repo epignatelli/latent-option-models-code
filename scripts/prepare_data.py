@@ -768,8 +768,9 @@ def _convert_aa_group(task: tuple) -> dict:
         key=lambda p: int(os.path.basename(p).split(".")[2]),
     )
 
-    # Pass 1: decode each game to collect frame counts and metadata; discard arrays.
-    valid: list[tuple[str, int, dict]] = []  # (bz2_path, n_frames, meta_entry)
+    # Pass 1: decode each game, cast and cache chars/colors; collect metadata.
+    # Tuple layout: (basename, n_frames, entry, chars, colors)
+    valid: list[tuple[str, int, dict, np.ndarray, np.ndarray]] = []
     H = W = None
     for bz2_path in bz2_sorted:
         basename = os.path.basename(bz2_path)
@@ -782,34 +783,31 @@ def _convert_aa_group(task: tuple) -> dict:
             continue
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
-        valid.append((bz2_path, n_frames, entry))
+        chars = arrays["tty_chars"].astype(np.uint8)
+        colors = (
+            arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
+            if "tty_colors" in arrays
+            else np.zeros((n_frames, H, W), dtype=np.uint8)
+        )
+        valid.append((basename, n_frames, entry, chars, colors))
 
     if not valid:
         return {"status": "filter"}
 
-    total_frames = sum(n for _, n, _ in valid)
+    total_frames = sum(n for _, n, _, _, _ in valid)
     offsets_list = [0]
-    for _, n, _ in valid:
+    for _, n, _, _, _ in valid:
         offsets_list.append(offsets_list[-1] + n)
-    source_game_ids = [os.path.basename(p) for p, _, _ in valid]
+    source_game_ids = [b for b, _, _, _, _ in valid]
     game_meta = [_game_meta_from_xlog(e, n, int(e.get("starttime", 0) or 0))
-                 for _, n, e in valid]
+                 for _, n, e, _, _ in valid]
 
-    # Pass 2: decode again, write directly into disk-backed memmaps.
+    # Pass 2: copy from in-memory cache into disk-backed memmaps — no disk re-read.
     def fill(mm_chars, mm_colors):
         offset = 0
-        for bz2_path, n_frames, _ in valid:
-            try:
-                arrays, _ = _decode([bz2_path], ttyrec_version)
-            except Exception:
-                offset += n_frames
-                continue
-            mm_chars[offset:offset + n_frames] = arrays["tty_chars"].astype(np.uint8)
-            mm_colors[offset:offset + n_frames] = (
-                arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
-                if "tty_colors" in arrays
-                else np.zeros((n_frames, H, W), dtype=np.uint8)
-            )
+        for _, n_frames, _, chars, colors in valid:
+            mm_chars[offset:offset + n_frames] = chars
+            mm_colors[offset:offset + n_frames] = colors
             offset += n_frames
 
     write_frames_npz(
