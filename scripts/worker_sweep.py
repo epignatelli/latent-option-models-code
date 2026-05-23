@@ -13,10 +13,14 @@ Usage::
 Output example::
 
     worker sweep -- nld-aa, N_GROUPS=20, --no-use-memmap
-    workers=1  ... OK  (142s, 0.14 groups/s)
-    workers=2  ... OK  (89s,  0.22 groups/s)
-    workers=4  ... OOM (23s)
-    max safe workers: 2
+    workers=128 ... OOM (15s)
+    workers=64  ... OK  (41s, 0.49 groups/s)
+    workers=32  ... OK  (38s, 0.53 groups/s)
+    workers=16  ... OK  (89s, 0.22 groups/s)
+    workers=8   ... OK  (142s, 0.14 groups/s)
+    ...
+    max safe workers:  64
+    fastest workers:   32  (0.53 groups/s)
 """
 
 from __future__ import annotations
@@ -26,13 +30,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 
 import tyro
 
 
-_WORKER_COUNTS = [1, 2, 4, 8, 16, 32, 64]
+_WORKER_COUNTS = [128, 64, 32, 16, 8, 4, 2, 1]
 
 # Exit code used by the subprocess to signal OOM (MemoryError or killed by OOM
 # killer).  The OS returns 137 (128+9) when a process is killed by SIGKILL,
@@ -51,6 +56,8 @@ class SweepArgs:
     """Number of nld-aa groups to convert in each trial."""
     worker_counts: list[int] = field(default_factory=lambda: list(_WORKER_COUNTS))
     """Worker counts to try, in order."""
+    tmp_dir: str = ""
+    """Directory for temporary memmap files; empty = same dir as output (scratch)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -82,6 +89,7 @@ def _run_trial(
     tmp_output_dir: str,
     workers: int,
     n_groups: int,
+    tmp_dir: str = "",
 ) -> tuple[bool, bool, float, str]:
     """Run one trial and return (success, oom, wall_time_s, stderr_tail).
 
@@ -98,7 +106,7 @@ def _run_trial(
         "--output-dir", tmp_output_dir,
         "--workers", str(workers),
         "--max-groups", str(n_groups),
-        "--no-use-memmap",
+        "--tmp-dir", tmp_dir,
         "--skip-download",
         "--skip-extract",
         "--skip-db",
@@ -114,22 +122,34 @@ def _run_trial(
 
     t0 = time.monotonic()
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
     except Exception as exc:
-        elapsed = time.monotonic() - t0
-        return False, False, elapsed, str(exc)
+        return False, False, time.monotonic() - t0, str(exc)
+
+    stderr_lines: list[str] = []
+
+    def _drain_stderr() -> None:
+        for line in proc.stderr:
+            stderr_lines.append(line)
+            print(f"    {line}", end="", flush=True)
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    for line in proc.stdout:
+        print(f"    {line}", end="", flush=True)
+
+    proc.wait()
+    stderr_thread.join()
 
     elapsed = time.monotonic() - t0
-    stderr_tail = result.stderr[-2048:] if result.stderr else ""
+    stderr = "".join(stderr_lines)
+    stderr_tail = stderr[-2048:]
 
-    if result.returncode == 0:
+    if proc.returncode == 0:
         return True, False, elapsed, stderr_tail
 
-    oom = _is_oom(result.returncode, result.stderr)
+    oom = _is_oom(proc.returncode, stderr)
     return False, oom, elapsed, stderr_tail
 
 
@@ -148,7 +168,7 @@ def main() -> None:
     os.makedirs(tmp_root, exist_ok=True)
 
     print(
-        f"\nworker sweep -- nld-aa, N_GROUPS={args.n_groups}, --no-use-memmap",
+        f"\nworker sweep -- nld-aa, N_GROUPS={args.n_groups}, tmp_dir={args.tmp_dir}",
         flush=True,
     )
     print(f"data_dir: {args.data_dir}", flush=True)
@@ -170,6 +190,7 @@ def main() -> None:
                 tmp_output_dir=tmp_output_dir,
                 workers=n_workers,
                 n_groups=args.n_groups,
+                tmp_dir=args.tmp_dir,
             )
         finally:
             # Always clean up, even if the trial crashed.
@@ -201,18 +222,16 @@ def main() -> None:
             "groups_per_s": groups_per_s,
         })
 
-        if oom:
-            print(
-                "\n  stopping sweep: OOM at workers={}, no point testing higher counts.".format(n_workers),
-                flush=True,
-            )
-            break
+        # In reverse order, OOM at N workers does NOT imply OOM at N/2 — keep going.
 
     print(flush=True)
-    if max_safe is not None:
-        print(f"max safe workers: {max_safe}", flush=True)
+    successful = [r for r in results if r["success"]]
+    if successful:
+        best = max(successful, key=lambda r: r["groups_per_s"])
+        print(f"max safe workers:  {max(r['workers'] for r in successful)}", flush=True)
+        print(f"fastest workers:   {best['workers']}  ({best['groups_per_s']:.2f} groups/s)", flush=True)
     else:
-        print("max safe workers: none (all trials failed or OOMed)", flush=True)
+        print("no successful trials", flush=True)
 
 
 if __name__ == "__main__":
