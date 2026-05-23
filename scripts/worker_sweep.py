@@ -56,8 +56,6 @@ class SweepArgs:
     """Number of nld-aa groups to convert in each trial."""
     worker_counts: list[int] = field(default_factory=lambda: list(_WORKER_COUNTS))
     """Worker counts to try, in order."""
-    tmp_dir: str = ""
-    """Directory for temporary memmap files; empty = same dir as output (scratch)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -89,7 +87,6 @@ def _run_trial(
     tmp_output_dir: str,
     workers: int,
     n_groups: int,
-    tmp_dir: str = "",
 ) -> tuple[bool, bool, float, str]:
     """Run one trial and return (success, oom, wall_time_s, stderr_tail).
 
@@ -106,7 +103,6 @@ def _run_trial(
         "--output-dir", tmp_output_dir,
         "--workers", str(workers),
         "--max-groups", str(n_groups),
-        "--tmp-dir", tmp_dir,
         "--skip-download",
         "--skip-extract",
         "--skip-db",
@@ -168,7 +164,7 @@ def main() -> None:
     os.makedirs(tmp_root, exist_ok=True)
 
     print(
-        f"\nworker sweep -- nld-aa, N_GROUPS={args.n_groups}, tmp_dir={args.tmp_dir}",
+        f"\nworker sweep -- nld-aa, N_GROUPS={args.n_groups}",
         flush=True,
     )
     print(f"data_dir: {args.data_dir}", flush=True)
@@ -190,7 +186,6 @@ def main() -> None:
                 tmp_output_dir=tmp_output_dir,
                 workers=n_workers,
                 n_groups=args.n_groups,
-                tmp_dir=args.tmp_dir,
             )
         finally:
             # Always clean up, even if the trial crashed.
