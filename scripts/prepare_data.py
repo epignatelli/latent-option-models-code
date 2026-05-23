@@ -485,7 +485,8 @@ def _convert_player(task: tuple) -> dict:
             source_timestamps=np.array(src_timestamps, dtype=np.int64),
         )
     except MemoryError as exc:
-        return {"status": "error", "error": f"OOM during concatenate ({total_frames} frames): {exc}"}
+        return {"status": "error", "oom": True, "path": output_path,
+                "error": f"OOM during concatenate ({total_frames} frames): {exc}"}
     return {"status": "ok", "path": output_path,
             "frames": total_frames, "games": len(offsets_list) - 1,
             "game_meta": game_meta}
@@ -768,7 +769,8 @@ def _convert_aa_group(task: tuple) -> dict:
             source_game_ids=np.array(source_game_ids, dtype="U64"),
         )
     except MemoryError as exc:
-        return {"status": "error", "error": f"OOM during concatenate ({total_frames} frames): {exc}"}
+        return {"status": "error", "oom": True, "path": output_path,
+                "error": f"OOM during concatenate ({total_frames} frames): {exc}"}
     return {"status": "ok", "path": output_path,
             "frames": total_frames, "games": len(offsets_list) - 1,
             "game_meta": game_meta}
@@ -948,8 +950,27 @@ def _run_convert_rich(
         pending = pending[:max_groups]
     print(f"  pending: {len(pending):,} players to process", flush=True)
 
+    # Print commit budget from /proc/meminfo so OOM risk is visible upfront.
+    try:
+        meminfo = {}
+        with open("/proc/meminfo") as _f:
+            for _line in _f:
+                k, v = _line.split(":", 1)
+                meminfo[k.strip()] = int(v.split()[0])  # kB
+        commit_limit_gb = meminfo.get("CommitLimit", 0) / 1024 ** 2
+        committed_gb    = meminfo.get("Committed_AS", 0) / 1024 ** 2
+        print(
+            f"  commit budget: {commit_limit_gb:.1f} GB limit, "
+            f"{committed_gb:.1f} GB used, "
+            f"{commit_limit_gb - committed_gb:.1f} GB free",
+            flush=True,
+        )
+    except Exception:
+        pass
+
     counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
     errors: list[str] = []
+    oom_paths: list[str] = []
     since_ckpt = 0
 
     if not pending:
@@ -997,7 +1018,9 @@ def _run_convert_rich(
                         _accum_player_result(accum, result)
                         since_ckpt += 1
                     elif status == "error":
-                        errors.append(result.get("msg", "unknown"))
+                        errors.append(result.get("error", result.get("msg", "unknown")))
+                        if result.get("oom") and result.get("path"):
+                            oom_paths.append(result["path"])
 
                 bar.set_postfix(
                     ok=counts["ok"], skip=counts["skip"],
@@ -1016,6 +1039,13 @@ def _run_convert_rich(
 
     if write_index and accum["pl_paths"]:
         _write_index_rich(index_path, accum)
+
+    if oom_paths:
+        retry_path = os.path.join(npz_dir, "oom_retry.txt")
+        with open(retry_path, "a") as _f:
+            for p in oom_paths:
+                _f.write(p + "\n")
+        print(f"\n  {len(oom_paths)} OOM group(s) recorded in {retry_path}", flush=True)
 
     if errors:
         print(f"\n  first 10 errors:", flush=True)
