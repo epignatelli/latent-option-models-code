@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 
 @dataclass
@@ -40,8 +39,7 @@ class LOMModelCfg(ModelCfg):
 
 @dataclass
 class DataCfg:
-    dataset: Literal["nao-top10", "nld-nao", "nld-aa"] = "nao-top10"
-    index_path: str = ""
+    dataset_dir: str = ""
     context_len: int = 4
     horizon: int = 8
     val_fraction: float = 0.05

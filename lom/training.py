@@ -86,14 +86,15 @@ class Trainer(ABC):
         torch.manual_seed(t.seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        if not d.index_path:
+        if not d.dataset_dir:
             raise ValueError(
-                "data.index_path is required. "
+                "data.dataset_dir is required. "
                 "Run scripts/prepare_data.py to generate an index.npz, then set "
-                "data.index_path in your experiment config."
+                "data.dataset_dir in your experiment config."
             )
+        index_path = os.path.join(d.dataset_dir, "index.npz")
         self.train_loader, self.val_loader = build_npz_dataloaders(
-            index_path=d.index_path,
+            index_path=index_path,
             context_len=d.context_len,
             horizon=d.horizon,
             batch_size=t.batch_size,
@@ -149,7 +150,7 @@ class Trainer(ABC):
 
             run_name = (
                 f"{self.label()}"
-                f"_d{d.dataset}"
+                f"_d{os.path.basename(d.dataset_dir)}"
                 f"_h{d.horizon}"
                 f"_s{t.seed}"
             )

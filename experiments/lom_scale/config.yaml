@@ -8,8 +8,7 @@ sweep:
   seeds: [0, 1, 2]
 
 data:
-  dataset: nld-nao
-  index_path: /scratch/uceeepi/lom/datasets/nle/nao/index.npz
+  dataset_dir: /scratch/uceeepi/lom/datasets/nle/nao
   context_len: 4
   horizon: 128
 
