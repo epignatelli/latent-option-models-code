@@ -57,7 +57,7 @@ fi
 (while true; do
     echo "=== $(date) ==="
     free -h
-    top -b -n 1 -u uceeepi | head -20
+    top -b -n 1 -u uceeepi | grep -E "top|PID|python"
     awk 'NR>2 {printf "%-10s rx:%s tx:%s\n",$1,$2,$10}' /proc/net/dev
     echo ""
     sleep 60
