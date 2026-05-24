@@ -50,7 +50,7 @@ module load python/3.9.6-gnu-10.2.0
 module load cmake/3.21.1  # required to build nle
 
 # One-time dependency install (safe to re-run; pip skips already-installed).
-pip install --user --quiet \
+python -m pip install --user --quiet \
     nle numpy tqdm psutil tyro wandb
 
 mkdir -p "$OUTPUT_DIR/nle/nao" logs
@@ -134,7 +134,11 @@ fi
 # --------------------------------------------------------------------------- #
 # Step 4: rsync the final index
 # --------------------------------------------------------------------------- #
-echo "[$(date)] Sending final index..."
-rsync -avz "$OUTPUT_DIR/nle/nao/index.npz" "$DEST/index.npz"
+if [ -f "$OUTPUT_DIR/nle/nao/index.npz" ]; then
+    echo "[$(date)] Sending final index..."
+    rsync -avz "$OUTPUT_DIR/nle/nao/index.npz" "$DEST/index.npz"
+else
+    echo "[$(date)] No index.npz found — skipping final rsync."
+fi
 
 echo "[$(date)] All done."
