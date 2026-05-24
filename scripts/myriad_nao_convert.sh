@@ -8,6 +8,7 @@
 #
 # Prerequisites (run once on a Myriad login node before submitting):
 #   git clone https://github.com/epignatelli/latent-option-models-code ~/repos/latent-option-models-code
+#   bash ~/repos/latent-option-models-code/scripts/setup_myriad.sh
 #   mkdir -p ~/repos/latent-option-models-code/logs
 #
 # How it works:
@@ -45,12 +46,8 @@ CODE_DIR="$HOME/repos/latent-option-models-code"
 # --------------------------------------------------------------------------- #
 # Environment
 # --------------------------------------------------------------------------- #
-module unload gcc-libs
-module load python/3.9.6-gnu-10.2.0
-module load cmake/3.21.1  # required to build nle
-
-# One-time dependency install — only what prepare_data.py needs (no torch).
-python -m pip install --user --quiet nle numpy tqdm psutil tyro
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate lom
 
 mkdir -p "$OUTPUT_DIR/nle/nao" logs
 
