@@ -30,7 +30,7 @@
 #$ -l tmpfs=50G
 #$ -N nle_convert
 #$ -o logs/nle_convert.out
-#$ -e logs/nle_convert.err
+#$ -j y
 #$ -cwd
 
 # --------------------------------------------------------------------------- #
