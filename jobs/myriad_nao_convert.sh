@@ -65,6 +65,18 @@ else
     echo "WARNING: cannot write to $RAW_DIR — falling back to $OUTPUT_DIR (NFS)"
 fi
 
+# Background monitor — logs CPU/RAM/net every 60s to logs/monitor.log
+(while true; do
+    echo "=== $(date) ==="
+    free -h
+    top -b -n 1 -u uceeepi | head -20
+    awk 'NR>2 {printf "%-10s rx:%s tx:%s\n",$1,$2,$10}' /proc/net/dev
+    echo ""
+    sleep 60
+done) >> logs/monitor.log 2>&1 &
+MONITOR_PID=$!
+trap "kill $MONITOR_PID 2>/dev/null" EXIT
+
 # --------------------------------------------------------------------------- #
 # run_dataset <dataset> <npz_subdir> <dest> [--skip-db]
 #
