@@ -94,22 +94,11 @@ run_dataset() {
     local npz_dir="$OUTPUT_DIR/$npz_subdir"
     mkdir -p "$npz_dir"
 
-    # Step 1: download + extract (+ db if applicable)
-    echo "[$(date)] [$dataset] Downloading and extracting..."
+    # Step 1: download, extract, and convert in one shot
+    echo "[$(date)] [$dataset] Starting..."
     python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
         --output-dir "$OUTPUT_DIR" \
         --workers "$WORKERS" \
-        --skip-convert \
-        --skip-index \
-        $skip_db_flag
-
-    # Step 2: convert everything in one shot
-    echo "[$(date)] [$dataset] Converting..."
-    python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
-        --output-dir "$OUTPUT_DIR" \
-        --workers "$WORKERS" \
-        --skip-download \
-        --skip-extract \
         $skip_db_flag
 
     # Step 3: retry OOM failures at 10 workers
