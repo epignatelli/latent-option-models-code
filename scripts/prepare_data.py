@@ -115,7 +115,9 @@ _NAO_TOP10_MAX_FRAMES = 2_000_000
 @dataclass
 class BaseArgs:
     output_dir: str = "nle_data"
-    """Root directory for all datasets and outputs."""
+    """Root directory for npz outputs and index."""
+    raw_dir: str = ""
+    """Directory for downloads and extraction. Defaults to output_dir if empty. Set to a fast local path (e.g. /dev/shm) to avoid NFS writes."""
     workers: int = 4
     """Parallel workers for download and conversion."""
     keep_archives: bool = False
@@ -229,22 +231,25 @@ def _remove_archives(filenames: list[str], archive_dir: str) -> None:
 # --- Extract helpers -------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
-def _extract_zips(filenames: list[str], zip_dir: str, dest_dir: str) -> None:
+def _extract_one_zip(args: tuple) -> None:
+    zip_path, dest_dir = args
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(dest_dir)
+
+
+def _extract_zips(filenames: list[str], zip_dir: str, dest_dir: str, workers: int = 1) -> None:
     if _is_done(dest_dir):
         print(f"  already extracted to {dest_dir} — skipping.")
         return
-    print(f"  extracting {len(filenames)} archives to {dest_dir} ...")
-    bar = tqdm(filenames, unit="zip")
-    for name in bar:
-        bar.set_postfix_str(name)
-        zip_path = os.path.join(zip_dir, name)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            members = zf.infolist()
-            total = sum(m.file_size for m in members)
-            with tqdm(total=total, unit="B", unit_scale=True, desc=name, leave=False) as inner:
-                for member in members:
-                    zf.extract(member, dest_dir)
-                    inner.update(member.file_size)
+    print(f"  extracting {len(filenames)} archives to {dest_dir} ({workers} workers)...")
+    tasks = [(os.path.join(zip_dir, name), dest_dir) for name in filenames]
+    with tqdm(total=len(filenames), unit="zip") as bar:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_extract_one_zip, t): t[0] for t in tasks}
+            for fut in as_completed(futures):
+                bar.set_postfix_str(os.path.basename(futures[fut]))
+                fut.result()
+                bar.update(1)
     _mark_done(dest_dir)
 
 
@@ -1189,11 +1194,11 @@ def _nld_nao_zips() -> list[str]:
 
 
 def _run_nao_top10(args: BaseArgs) -> None:
-    root        = args.output_dir
-    zip_dir     = os.path.join(root, "zips", "nao-top10")
+    raw         = args.raw_dir or args.output_dir
+    zip_dir     = os.path.join(raw, "zips", "nao-top10")
     tar_path    = os.path.join(zip_dir, "nao_top10.tar")
-    extract_dir = os.path.join(root, "nao-top10")
-    npz_dir     = os.path.join(root, "nle", "nao-top10")
+    extract_dir = os.path.join(raw, "nao-top10")
+    npz_dir     = os.path.join(args.output_dir, "nle", "nao-top10")
     index_path  = os.path.join(npz_dir, "index.npz")
 
     print("\n─── nao-top10 ───────────────────────────────────────────────────")
@@ -1246,12 +1251,12 @@ def _run_nao_top10(args: BaseArgs) -> None:
 
 def _run_nld(dataset: str, args: BaseArgs) -> None:
     assert dataset in ("nld-aa", "nld-nao")
-    root        = args.output_dir
-    zip_dir     = os.path.join(root, "zips", dataset)
-    extract_dir = os.path.join(root, dataset)
-    db_path     = os.path.join(root, f"{dataset}.db")
+    raw         = args.raw_dir or args.output_dir
+    zip_dir     = os.path.join(raw, "zips", dataset)
+    extract_dir = os.path.join(raw, dataset)
+    db_path     = os.path.join(raw, f"{dataset}.db")
     _npz_subdirs = {"nld-aa": "aa", "nld-nao": "nao"}
-    npz_dir     = os.path.join(root, "nle", _npz_subdirs[dataset])
+    npz_dir     = os.path.join(args.output_dir, "nle", _npz_subdirs[dataset])
     index_path  = os.path.join(npz_dir, "index.npz")
 
     filenames  = _nld_aa_zips() if dataset == "nld-aa" else _nld_nao_zips()
@@ -1270,7 +1275,7 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
     if not args.skip_extract:
         os.makedirs(extract_dir, exist_ok=True)
         print(f"[extract]  → {extract_dir}")
-        _extract_zips(filenames, zip_dir, extract_dir)
+        _extract_zips(filenames, zip_dir, extract_dir, workers=args.workers)
         if not args.keep_archives:
             _remove_archives(filenames, zip_dir)
     else:
@@ -1286,9 +1291,9 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
         os.makedirs(npz_dir, exist_ok=True)
         print(f"[convert]  → {npz_dir}")
         if dataset == "nld-aa":
-            tasks = _discover_nld_aa_grouped(root, npz_dir, args.min_frames)
+            tasks = _discover_nld_aa_grouped(raw, npz_dir, args.min_frames)
         else:
-            tasks = _discover_nld_nao(root, npz_dir, args.min_frames)
+            tasks = _discover_nld_nao(raw, npz_dir, args.min_frames)
         converter = _convert_aa_group if dataset == "nld-aa" else _convert_player
         print(f"[index]    progressive → {index_path}")
         _run_convert_rich(
@@ -1302,13 +1307,13 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
         if not args.skip_index:
             os.makedirs(npz_dir, exist_ok=True)
             print(f"[index]    → {index_path}")
-            nle_data_dir = root if dataset == "nld-nao" else None
+            nle_data_dir = raw if dataset == "nld-nao" else None
             _build_rich_index_from_scan(npz_dir, args.workers, index_path, nle_data_dir)
         else:
             print("[index]    skipped")
 
     print(f"\nDone. Set in your experiment config:")
-    print(f"  data.nle_data_dir: {root}")
+    print(f"  data.nle_data_dir: {raw}")
     print(f"  data.index_path:   {index_path}")
 
 
@@ -1331,6 +1336,8 @@ def main() -> None:
     )
 
     os.makedirs(cfg.output_dir, exist_ok=True)
+    if cfg.raw_dir:
+        os.makedirs(cfg.raw_dir, exist_ok=True)
 
     if isinstance(cfg, NaoTop10Args):
         _run_nao_top10(cfg)

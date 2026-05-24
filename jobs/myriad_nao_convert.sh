@@ -40,6 +40,7 @@ DEST_BASE="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/datasets"
 WORKERS=36
 BATCH_SIZE=5000
 OUTPUT_DIR="$HOME/lom/datasets"
+RAW_DIR="/dev/shm/lom_$$"
 CODE_DIR="$HOME/repos/latent-option-models-code"
 
 # --------------------------------------------------------------------------- #
@@ -56,7 +57,7 @@ if ! conda env list | grep -q "^lom-convert "; then
 fi
 conda activate lom-convert
 
-mkdir -p "$OUTPUT_DIR" logs
+mkdir -p "$OUTPUT_DIR" "$RAW_DIR" logs
 
 # --------------------------------------------------------------------------- #
 # run_dataset <dataset> <npz_subdir> <dest> [--skip-db]
@@ -79,6 +80,7 @@ run_dataset() {
     echo "[$(date)] [$dataset] Downloading and extracting..."
     python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
         --output-dir "$OUTPUT_DIR" \
+        --raw-dir "$RAW_DIR" \
         --workers "$WORKERS" \
         --skip-convert \
         --skip-index
@@ -91,6 +93,7 @@ run_dataset() {
 
         python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
             --output-dir "$OUTPUT_DIR" \
+            --raw-dir "$RAW_DIR" \
             --workers "$WORKERS" \
             --max-groups "$BATCH_SIZE" \
             --skip-download \
@@ -118,6 +121,7 @@ run_dataset() {
         echo "[$(date)] [$dataset] Retrying $n_before failures at 10 workers..."
         python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
             --output-dir "$OUTPUT_DIR" \
+            --raw-dir "$RAW_DIR" \
             --workers 10 \
             --skip-download \
             --skip-extract \
@@ -146,6 +150,10 @@ run_dataset() {
     else
         echo "[$(date)] [$dataset] No index.npz found — skipping."
     fi
+
+    # Step 5: free /dev/shm before next dataset
+    echo "[$(date)] [$dataset] Cleaning up RAW_DIR..."
+    rm -rf "${RAW_DIR:?}/${dataset}" "${RAW_DIR:?}/zips/${dataset}" "${RAW_DIR:?}/${dataset}.db"
 
     echo "[$(date)] [$dataset] Done."
 }
