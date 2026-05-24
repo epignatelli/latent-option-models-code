@@ -26,7 +26,7 @@
 #$ -S /bin/bash
 #$ -l h_rt=72:0:0
 #$ -l mem=16G
-#$ -pe smp 48
+#$ -pe smp 32
 #$ -l tmpfs=50G
 #$ -N nao_convert
 #$ -o logs/nao_convert.out
@@ -37,7 +37,7 @@
 # CONFIGURATION — edit before submitting
 # --------------------------------------------------------------------------- #
 DEST="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/datasets/nle/nao"
-WORKERS=48
+WORKERS=32
 BATCH_SIZE=5000        # players per batch; tune to keep output < 200 GB/batch
 OUTPUT_DIR="$HOME/lom/datasets"
 CODE_DIR="$HOME/repos/latent-option-models-code"
