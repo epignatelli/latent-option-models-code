@@ -8,7 +8,7 @@
 #
 # Prerequisites (run once on a Myriad login node before submitting):
 #   git clone https://github.com/epignatelli/latent-option-models-code ~/repos/latent-option-models-code
-#   mkdir -p ~/logs
+#   mkdir -p ~/repos/latent-option-models-code/logs
 #
 # How it works:
 #   1. Download + extract raw nld-nao data once (~500 GB).
