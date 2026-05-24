@@ -106,22 +106,26 @@ done
 # --------------------------------------------------------------------------- #
 ERRORS_FILE="$OUTPUT_DIR/nle/nao/errors.txt"
 if [ -s "$ERRORS_FILE" ]; then
-    N_ERRORS=$(wc -l < "$ERRORS_FILE")
-    echo "[$(date)] Retrying $N_ERRORS failed players at 4 workers..."
+    N_ERRORS_BEFORE=$(wc -l < "$ERRORS_FILE")
+    echo "[$(date)] Retrying $N_ERRORS_BEFORE failed players at 10 workers..."
     python "$CODE_DIR/scripts/prepare_data.py" nld-nao \
         --output-dir "$OUTPUT_DIR" \
-        --workers 4 \
+        --workers 10 \
         --skip-download \
         --skip-extract \
         --skip-db
 
     NPZ_DIR="$OUTPUT_DIR/nle/nao"
     N_NEW=$(find "$NPZ_DIR" -maxdepth 1 -name "*.npz" ! -name "index.npz" | wc -l)
-    if [ "$N_NEW" -gt 0 ]; then
+    N_ERRORS_AFTER=$([ -s "$ERRORS_FILE" ] && wc -l < "$ERRORS_FILE" || echo 0)
+
+    if [ "$N_NEW" -eq 0 ] || [ "$N_ERRORS_AFTER" -eq "$N_ERRORS_BEFORE" ]; then
+        echo "[$(date)] Retry made no progress ($N_ERRORS_AFTER errors remain) — skipping."
+    else
         rsync -avz --progress --exclude="index.npz" "$NPZ_DIR/" "$DEST/"
         find "$NPZ_DIR" -maxdepth 1 -name "*.npz" ! -name "index.npz" -delete
+        echo "[$(date)] Retry done. $N_ERRORS_AFTER players still failed."
     fi
-    echo "[$(date)] Retry done."
 else
     echo "[$(date)] No errors to retry."
 fi
