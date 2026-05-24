@@ -1,25 +1,23 @@
 #!/bin/bash -l
-# SGE job: download + batch-convert nld-nao on Myriad, rsync each batch to
-# a remote destination, then delete local npz files to stay within quota.
+# SGE job: download + batch-convert all NLE datasets on Myriad, rsync each
+# batch to a remote destination, then delete local npz files to stay within
+# quota.
 #
 # Usage: qsub scripts/myriad_nao_convert.sh
 #
-# Configure the variables in the CONFIGURATION section before submitting.
-#
 # Prerequisites (run once on a Myriad login node before submitting):
 #   git clone https://github.com/epignatelli/latent-option-models-code ~/repos/latent-option-models-code
-#   bash ~/repos/latent-option-models-code/scripts/setup_myriad.sh
 #   mkdir -p ~/repos/latent-option-models-code/logs
 #
 # How it works:
-#   1. Download + extract raw nld-nao data once (~500 GB).
-#   2. Loop: convert BATCH_SIZE players, rsync their npz files to DEST,
-#      delete the local npz files (but keep the index).
-#   3. Because prepare_data.py skips players already in the index, each
-#      batch processes only new players — no duplicate work across iterations.
-#   4. Repeat until all players are done.
+#   For each dataset (nao-top10, nld-aa, nld-nao):
+#   1. Download + extract raw data once (skipped on restart).
+#   2. Loop: convert BATCH_SIZE groups, rsync npz files to DEST_BASE,
+#      delete local npz files (keep index).
+#   3. Retry any OOM failures at 10 workers.
+#   4. Rsync the final index.
 #
-# Peak disk usage: raw data (~500 GB) + one batch of npz (~10-20 GB) < 1 TB.
+# Peak disk usage: largest raw dataset (~500 GB nld-nao) + one batch (~20 GB).
 
 # --------------------------------------------------------------------------- #
 # SGE directives
@@ -30,17 +28,17 @@
 #$ -pe smp 36
 #$ -ac allow=B
 #$ -l tmpfs=50G
-#$ -N nao_convert
-#$ -o logs/nao_convert.out
-#$ -e logs/nao_convert.err
+#$ -N nle_convert
+#$ -o logs/nle_convert.out
+#$ -e logs/nle_convert.err
 #$ -cwd
 
 # --------------------------------------------------------------------------- #
 # CONFIGURATION — edit before submitting
 # --------------------------------------------------------------------------- #
-DEST="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/datasets/nle/nao"
+DEST_BASE="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/datasets"
 WORKERS=36
-BATCH_SIZE=5000        # players per batch; tune to keep output < 200 GB/batch
+BATCH_SIZE=5000
 OUTPUT_DIR="$HOME/lom/datasets"
 CODE_DIR="$HOME/repos/latent-option-models-code"
 
@@ -56,92 +54,104 @@ else
 fi
 conda activate lom-convert
 
-mkdir -p "$OUTPUT_DIR/nle/nao" logs
+mkdir -p "$OUTPUT_DIR" logs
 
 # --------------------------------------------------------------------------- #
-# Step 1: download + extract raw nld-nao (run once; skipped on restart)
+# run_dataset <dataset> <npz_subdir> <dest> [--skip-db]
+#
+#   dataset     — name passed to prepare_data.py (nld-nao, nld-aa, nao-top10)
+#   npz_subdir  — relative path under OUTPUT_DIR where npz files are written
+#   dest        — rsync destination (host:path)
+#   --skip-db   — pass for datasets that have a db stage (nld-nao, nld-aa)
 # --------------------------------------------------------------------------- #
-echo "[$(date)] Downloading nld-nao raw data..."
-python "$CODE_DIR/scripts/prepare_data.py" nld-nao \
-    --output-dir "$OUTPUT_DIR" \
-    --skip-convert \
-    --skip-index
+run_dataset() {
+    local dataset=$1
+    local npz_subdir=$2
+    local dest=$3
+    local skip_db_flag=${4:-}
 
-# --------------------------------------------------------------------------- #
-# Step 2: batch convert → rsync → delete, until no players remain
-# --------------------------------------------------------------------------- #
-ITERATION=0
-while true; do
-    ITERATION=$((ITERATION + 1))
-    echo "[$(date)] === Batch $ITERATION (max $BATCH_SIZE players) ==="
+    local npz_dir="$OUTPUT_DIR/$npz_subdir"
+    mkdir -p "$npz_dir"
 
-    # Convert a batch; index is updated in-place by prepare_data.py.
-    python "$CODE_DIR/scripts/prepare_data.py" nld-nao \
+    # Step 1: download + extract (+ db if applicable)
+    echo "[$(date)] [$dataset] Downloading and extracting..."
+    python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
         --output-dir "$OUTPUT_DIR" \
-        --workers "$WORKERS" \
-        --max-groups "$BATCH_SIZE" \
-        --skip-download \
-        --skip-extract \
-        --skip-db
+        --skip-convert \
+        --skip-index
 
-    NPZ_DIR="$OUTPUT_DIR/nle/nao"
+    # Step 2: batch convert → rsync → delete
+    local iteration=0
+    while true; do
+        iteration=$((iteration + 1))
+        echo "[$(date)] [$dataset] Batch $iteration (max $BATCH_SIZE groups)..."
 
-    # Count newly written npz files (anything that is NOT the index).
-    N_NEW=$(find "$NPZ_DIR" -maxdepth 1 -name "*.npz" ! -name "index.npz" | wc -l)
-    if [ "$N_NEW" -eq 0 ]; then
-        echo "[$(date)] No new files — all players converted. Done."
-        break
-    fi
-    echo "[$(date)] Converted $N_NEW player files. Rsyncing to $DEST..."
+        python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
+            --output-dir "$OUTPUT_DIR" \
+            --workers "$WORKERS" \
+            --max-groups "$BATCH_SIZE" \
+            --skip-download \
+            --skip-extract \
+            $skip_db_flag
 
-    rsync -avz --progress \
-        --exclude="index.npz" \
-        "$NPZ_DIR/" \
-        "$DEST/"
+        local n_new
+        n_new=$(find "$npz_dir" -maxdepth 1 -name "*.npz" ! -name "index.npz" | wc -l)
+        if [ "$n_new" -eq 0 ]; then
+            echo "[$(date)] [$dataset] No new files — all groups converted."
+            break
+        fi
 
-    echo "[$(date)] Rsync done. Deleting local npz files to free quota..."
-    find "$NPZ_DIR" -maxdepth 1 -name "*.npz" ! -name "index.npz" -delete
+        echo "[$(date)] [$dataset] $n_new files converted. Rsyncing..."
+        rsync -avz --progress --exclude="index.npz" "$npz_dir/" "$dest/"
+        find "$npz_dir" -maxdepth 1 -name "*.npz" ! -name "index.npz" -delete
+        echo "[$(date)] [$dataset] Rsynced and deleted. Disk used: $(du -sh "$OUTPUT_DIR" | cut -f1)"
+    done
 
-    echo "[$(date)] Freed $(du -sh "$OUTPUT_DIR" | cut -f1) total used after cleanup."
-done
+    # Step 3: retry OOM failures at 10 workers
+    local errors_file="$npz_dir/errors.txt"
+    if [ -s "$errors_file" ]; then
+        local n_before
+        n_before=$(wc -l < "$errors_file")
+        echo "[$(date)] [$dataset] Retrying $n_before failures at 10 workers..."
+        python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
+            --output-dir "$OUTPUT_DIR" \
+            --workers 10 \
+            --skip-download \
+            --skip-extract \
+            $skip_db_flag
 
-# --------------------------------------------------------------------------- #
-# Step 3: retry pass at 10 workers for any OOM-failed players
-# --------------------------------------------------------------------------- #
-ERRORS_FILE="$OUTPUT_DIR/nle/nao/errors.txt"
-if [ -s "$ERRORS_FILE" ]; then
-    N_ERRORS_BEFORE=$(wc -l < "$ERRORS_FILE")
-    echo "[$(date)] Retrying $N_ERRORS_BEFORE failed players at 10 workers..."
-    python "$CODE_DIR/scripts/prepare_data.py" nld-nao \
-        --output-dir "$OUTPUT_DIR" \
-        --workers 10 \
-        --skip-download \
-        --skip-extract \
-        --skip-db
+        local n_new
+        n_new=$(find "$npz_dir" -maxdepth 1 -name "*.npz" ! -name "index.npz" | wc -l)
+        local n_after
+        n_after=$([ -s "$errors_file" ] && wc -l < "$errors_file" || echo 0)
 
-    NPZ_DIR="$OUTPUT_DIR/nle/nao"
-    N_NEW=$(find "$NPZ_DIR" -maxdepth 1 -name "*.npz" ! -name "index.npz" | wc -l)
-    N_ERRORS_AFTER=$([ -s "$ERRORS_FILE" ] && wc -l < "$ERRORS_FILE" || echo 0)
-
-    if [ "$N_NEW" -eq 0 ]; then
-        echo "[$(date)] Retry made no progress ($N_ERRORS_AFTER errors remain) — skipping."
+        if [ "$n_new" -eq 0 ]; then
+            echo "[$(date)] [$dataset] Retry made no progress ($n_after errors remain)."
+        else
+            rsync -avz --progress --exclude="index.npz" "$npz_dir/" "$dest/"
+            find "$npz_dir" -maxdepth 1 -name "*.npz" ! -name "index.npz" -delete
+            echo "[$(date)] [$dataset] Retry done. $n_after error entries in log."
+        fi
     else
-        rsync -avz --progress --exclude="index.npz" "$NPZ_DIR/" "$DEST/"
-        find "$NPZ_DIR" -maxdepth 1 -name "*.npz" ! -name "index.npz" -delete
-        echo "[$(date)] Retry done. $N_ERRORS_AFTER error entries in log."
+        echo "[$(date)] [$dataset] No errors to retry."
     fi
-else
-    echo "[$(date)] No errors to retry."
-fi
+
+    # Step 4: rsync final index
+    if [ -f "$npz_dir/index.npz" ]; then
+        echo "[$(date)] [$dataset] Sending final index..."
+        rsync -avz "$npz_dir/index.npz" "$dest/index.npz"
+    else
+        echo "[$(date)] [$dataset] No index.npz found — skipping."
+    fi
+
+    echo "[$(date)] [$dataset] Done."
+}
 
 # --------------------------------------------------------------------------- #
-# Step 4: rsync the final index
+# Run all datasets
 # --------------------------------------------------------------------------- #
-if [ -f "$OUTPUT_DIR/nle/nao/index.npz" ]; then
-    echo "[$(date)] Sending final index..."
-    rsync -avz "$OUTPUT_DIR/nle/nao/index.npz" "$DEST/index.npz"
-else
-    echo "[$(date)] No index.npz found — skipping final rsync."
-fi
+run_dataset "nao-top10" "nle/nao-top10" "$DEST_BASE/nle/nao-top10"
+run_dataset "nld-aa"    "nle/aa"        "$DEST_BASE/nle/aa"        "--skip-db"
+run_dataset "nld-nao"   "nle/nao"       "$DEST_BASE/nle/nao"       "--skip-db"
 
-echo "[$(date)] All done."
+echo "[$(date)] All datasets done."
