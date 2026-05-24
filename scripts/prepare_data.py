@@ -234,9 +234,17 @@ def _extract_zips(filenames: list[str], zip_dir: str, dest_dir: str) -> None:
         print(f"  already extracted to {dest_dir} — skipping.")
         return
     print(f"  extracting {len(filenames)} archives to {dest_dir} ...")
-    for name in tqdm(filenames, unit="file"):
-        with zipfile.ZipFile(os.path.join(zip_dir, name), "r") as zf:
-            zf.extractall(dest_dir)
+    bar = tqdm(filenames, unit="zip")
+    for name in bar:
+        bar.set_postfix_str(name)
+        zip_path = os.path.join(zip_dir, name)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            members = zf.infolist()
+            total = sum(m.file_size for m in members)
+            with tqdm(total=total, unit="B", unit_scale=True, desc=name, leave=False) as inner:
+                for member in members:
+                    zf.extract(member, dest_dir)
+                    inner.update(member.file_size)
     _mark_done(dest_dir)
 
 
@@ -246,7 +254,12 @@ def _extract_tar(tar_path: str, dest_dir: str) -> None:
         return
     print(f"  extracting {tar_path} to {dest_dir} ...")
     with tarfile.open(tar_path, "r:*") as tf:
-        tf.extractall(dest_dir)
+        members = tf.getmembers()
+        total = sum(m.size for m in members)
+        with tqdm(total=total, unit="B", unit_scale=True, desc=os.path.basename(tar_path)) as bar:
+            for member in members:
+                tf.extract(member, dest_dir)
+                bar.update(member.size)
     _mark_done(dest_dir)
 
 
