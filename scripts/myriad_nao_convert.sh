@@ -33,7 +33,6 @@
 # CONFIGURATION — edit before submitting
 # --------------------------------------------------------------------------- #
 DEST="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/datasets/nle/nao"
-TRANSFER_NODE="transfer.rc.ucl.ac.uk"   # UCL RC transfer node as ProxyJump
 WORKERS=48
 BATCH_SIZE=5000        # players per batch; tune to keep output < 200 GB/batch
 OUTPUT_DIR="$HOME/lom/datasets"
@@ -84,11 +83,7 @@ while true; do
     fi
     echo "[$(date)] Converted $N_NEW player files. Rsyncing to $DEST..."
 
-    # Rsync npz files to bologna via UCL transfer node as ProxyJump.
-    # Requires Myriad's SSH key to be authorised on the transfer node,
-    # and the transfer node's key to be authorised on bologna.
     rsync -avz --progress \
-        -e "ssh -J $TRANSFER_NODE" \
         --exclude="index.npz" \
         "$NPZ_DIR/" \
         "$DEST/"
@@ -103,7 +98,6 @@ done
 # Step 3: rsync the final index
 # --------------------------------------------------------------------------- #
 echo "[$(date)] Sending final index..."
-rsync -avz -e "ssh -J $TRANSFER_NODE" \
-    "$OUTPUT_DIR/nle/nao/index.npz" "$DEST/index.npz"
+rsync -avz "$OUTPUT_DIR/nle/nao/index.npz" "$DEST/index.npz"
 
 echo "[$(date)] All done."
