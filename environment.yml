@@ -18,6 +18,7 @@ dependencies:
   - bzip2
   - zlib
   - pip
+  - numpy>=1.26
 
   # All pip packages (including PyTorch) — see requirements.txt
   - pip:

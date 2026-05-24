@@ -9,7 +9,7 @@ torch
 torchvision
 
 # Core
-numpy>=1.26
+numpy>=1.26,<2
 tyro>=0.8
 wandb>=0.17
 tqdm>=4.66
