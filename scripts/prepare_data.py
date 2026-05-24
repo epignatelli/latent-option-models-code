@@ -996,8 +996,9 @@ def _run_convert_rich(
     errors: list[str] = []
     oom_paths: list[str] = []
     since_ckpt = 0
-    _log_every = max(1, len(pending) // 20)  # log ~20 times over the full run
+    _log_interval = 5 * 60  # seconds between progress prints
     _t0 = time.time()
+    _last_log = _t0
 
     if not pending:
         return
@@ -1068,16 +1069,17 @@ def _run_convert_rich(
                 )
                 bar.update(1)
 
-                done = counts["ok"] + counts["skip"] + counts["error"]
-                if done % _log_every == 0:
-                    elapsed = time.time() - _t0
+                now = time.time()
+                if now - _last_log >= _log_interval:
+                    _last_log = now
+                    done = counts["ok"] + counts["skip"] + counts["error"]
                     ram_gb = psutil.virtual_memory().used / 1024 ** 3
                     ram_tot = psutil.virtual_memory().total / 1024 ** 3
                     print(
                         f"  [{time.strftime('%H:%M:%S')}] {done}/{len(pending)} groups"
                         f"  ok={counts['ok']} skip={counts['skip']} err={counts['error']}"
                         f"  ram={ram_gb:.0f}/{ram_tot:.0f}GB"
-                        f"  elapsed={elapsed/60:.1f}min",
+                        f"  elapsed={(now - _t0)/60:.1f}min",
                         flush=True,
                     )
 
