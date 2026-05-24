@@ -57,13 +57,13 @@ if ! conda env list | grep -q "^lom-convert "; then
 fi
 conda activate lom-convert
 
-mkdir -p "$OUTPUT_DIR" logs
+mkdir -p logs
 if mkdir -p "$RAW_DIR" && touch "$RAW_DIR/.write_test" 2>/dev/null; then
     rm -f "$RAW_DIR/.write_test"
-    echo "RAW_DIR=$RAW_DIR (local /dev/shm)"
+    OUTPUT_DIR="$RAW_DIR"
+    echo "OUTPUT_DIR=$OUTPUT_DIR (local /dev/shm)"
 else
-    echo "WARNING: cannot write to $RAW_DIR — falling back to OUTPUT_DIR"
-    RAW_DIR="$OUTPUT_DIR"
+    echo "WARNING: cannot write to $RAW_DIR — falling back to $OUTPUT_DIR (NFS)"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -87,7 +87,6 @@ run_dataset() {
     echo "[$(date)] [$dataset] Downloading and extracting..."
     python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
         --output-dir "$OUTPUT_DIR" \
-        --raw-dir "$RAW_DIR" \
         --workers "$WORKERS" \
         --skip-convert \
         --skip-index
@@ -100,7 +99,6 @@ run_dataset() {
 
         python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
             --output-dir "$OUTPUT_DIR" \
-            --raw-dir "$RAW_DIR" \
             --workers "$WORKERS" \
             --max-groups "$BATCH_SIZE" \
             --skip-download \
@@ -128,7 +126,6 @@ run_dataset() {
         echo "[$(date)] [$dataset] Retrying $n_before failures at 10 workers..."
         python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
             --output-dir "$OUTPUT_DIR" \
-            --raw-dir "$RAW_DIR" \
             --workers 10 \
             --skip-download \
             --skip-extract \
