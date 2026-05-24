@@ -103,7 +103,7 @@ while true; do
 done
 
 # --------------------------------------------------------------------------- #
-# Step 3: retry pass at 4 workers for any OOM-failed players
+# Step 3: retry pass at 10 workers for any OOM-failed players
 # --------------------------------------------------------------------------- #
 ERRORS_FILE="$OUTPUT_DIR/nle/nao/errors.txt"
 if [ -s "$ERRORS_FILE" ]; then
@@ -120,12 +120,12 @@ if [ -s "$ERRORS_FILE" ]; then
     N_NEW=$(find "$NPZ_DIR" -maxdepth 1 -name "*.npz" ! -name "index.npz" | wc -l)
     N_ERRORS_AFTER=$([ -s "$ERRORS_FILE" ] && wc -l < "$ERRORS_FILE" || echo 0)
 
-    if [ "$N_NEW" -eq 0 ] || [ "$N_ERRORS_AFTER" -eq "$N_ERRORS_BEFORE" ]; then
+    if [ "$N_NEW" -eq 0 ]; then
         echo "[$(date)] Retry made no progress ($N_ERRORS_AFTER errors remain) — skipping."
     else
         rsync -avz --progress --exclude="index.npz" "$NPZ_DIR/" "$DEST/"
         find "$NPZ_DIR" -maxdepth 1 -name "*.npz" ! -name "index.npz" -delete
-        echo "[$(date)] Retry done. $N_ERRORS_AFTER players still failed."
+        echo "[$(date)] Retry done. $N_ERRORS_AFTER error entries in log."
     fi
 else
     echo "[$(date)] No errors to retry."
