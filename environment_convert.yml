@@ -1,13 +1,12 @@
-name: lom
+name: lom-convert
 channels:
   - conda-forge
   - defaults
 
 dependencies:
-  # Python
   - python=3.11
 
-  # Build tools required by NLE (NetHack binary compilation)
+  # Build tools required by NLE
   - cmake>=3.28
   - make
   - autoconf
@@ -17,8 +16,13 @@ dependencies:
   - bison
   - bzip2
   - zlib
+
+  # Runtime dependencies of prepare_data.py
+  - numpy>=1.26,<2
+  - tqdm>=4.66
+  - psutil>=5.9
   - pip
 
-  # All pip packages (including PyTorch) — see requirements.txt
   - pip:
-    - -r requirements.txt
+    - tyro>=0.8
+    - nle>=0.9

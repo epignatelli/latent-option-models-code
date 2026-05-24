@@ -48,12 +48,12 @@ CODE_DIR="$HOME/repos/latent-option-models-code"
 # --------------------------------------------------------------------------- #
 module load python/miniconda3/24.3.0-0
 source "$UCL_CONDA_PATH/etc/profile.d/conda.sh"
-if ! conda env list | grep -q "^lom "; then
-    conda env create -f "$CODE_DIR/environment.yml"
+if ! conda env list | grep -q "^lom-convert "; then
+    conda env create -f "$CODE_DIR/environment_convert.yml"
 else
-    conda env update -n lom -f "$CODE_DIR/environment.yml"
+    conda env update -n lom-convert -f "$CODE_DIR/environment_convert.yml"
 fi
-conda activate lom
+conda activate lom-convert
 
 mkdir -p "$OUTPUT_DIR/nle/nao" logs
 
