@@ -45,6 +45,7 @@ CODE_DIR="$HOME/repos/latent-option-models-code"
 # --------------------------------------------------------------------------- #
 # Environment
 # --------------------------------------------------------------------------- #
+module unload gcc-libs
 module load python/3.9.6-gnu-10.2.0
 module load cmake/3.21.1  # required to build nle
 
@@ -52,7 +53,10 @@ module load cmake/3.21.1  # required to build nle
 pip install --user --quiet \
     nle numpy tqdm psutil tyro wandb
 
-mkdir -p "$OUTPUT_DIR" logs
+mkdir -p "$OUTPUT_DIR/nle/nao" logs
+
+# Ensure destination directory exists on the remote host.
+ssh uceeepi@bologna.ee.ucl.ac.uk "mkdir -p /scratch/uceeepi/lom/datasets/nle/nao"
 
 # --------------------------------------------------------------------------- #
 # Step 1: download + extract raw nld-nao (run once; skipped on restart)
