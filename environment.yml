@@ -17,6 +17,7 @@ dependencies:
   - bison
   - bzip2
   - zlib
+  - go
   - pip
   - numpy>=1.26
 
