@@ -100,7 +100,8 @@ run_dataset() {
         --output-dir "$OUTPUT_DIR" \
         --workers "$WORKERS" \
         --skip-convert \
-        --skip-index
+        --skip-index \
+        $skip_db_flag
 
     # Step 2: convert everything in one shot
     echo "[$(date)] [$dataset] Converting..."
