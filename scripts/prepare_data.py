@@ -446,6 +446,7 @@ def _convert_player(task: tuple) -> dict:
     src_timestamps: list[int] = []
     game_meta = []
     total_frames = 0
+    filtered_games = 0
     H = W = None
 
     for bz2_path in sorted(input_files):
@@ -455,6 +456,7 @@ def _convert_player(task: tuple) -> dict:
         except Exception:
             continue
         if not arrays or n_frames < min_frames:
+            filtered_games += 1
             continue
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
@@ -729,6 +731,7 @@ def _convert_aa_group(task: tuple) -> dict:
     source_game_ids: list[str] = []
     game_meta = []
     total_frames = 0
+    filtered_games = 0
     H = W = None
 
     for bz2_path in bz2_sorted:
@@ -739,6 +742,7 @@ def _convert_aa_group(task: tuple) -> dict:
         except Exception:
             continue
         if not arrays or n_frames < min_frames:
+            filtered_games += 1
             continue
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
@@ -773,7 +777,7 @@ def _convert_aa_group(task: tuple) -> dict:
                 "error": f"OOM during concatenate ({total_frames} frames): {exc}"}
     return {"status": "ok", "path": output_path,
             "frames": total_frames, "games": len(offsets_list) - 1,
-            "game_meta": game_meta}
+            "filtered_games": filtered_games, "game_meta": game_meta}
 
 
 def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
@@ -969,6 +973,7 @@ def _run_convert_rich(
         pass
 
     counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
+    filtered_games_total = 0
     errors: list[str] = []
     oom_paths: list[str] = []
     since_ckpt = 0
@@ -1034,10 +1039,11 @@ def _run_convert_rich(
                         errors.append(result.get("error", result.get("msg", "unknown")))
                         if result.get("path"):
                             oom_paths.append(result["path"])
+                    filtered_games_total += result.get("filtered_games", 0)
 
                 bar.set_postfix(
                     ok=counts["ok"], skip=counts["skip"],
-                    filt=counts["filter"], err=counts["error"],
+                    filt_g=filtered_games_total, err=counts["error"],
                 )
                 bar.update(1)
 
@@ -1067,7 +1073,7 @@ def _run_convert_rich(
 
     print(
         f"\n  convert summary: ok={counts['ok']} skip={counts['skip']} "
-        f"filter={counts['filter']} error={counts['error']}",
+        f"filt_games={filtered_games_total} error={counts['error']}",
         flush=True,
     )
 
