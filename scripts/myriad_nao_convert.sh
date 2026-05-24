@@ -48,9 +48,11 @@ CODE_DIR="$HOME/repos/latent-option-models-code"
 module load python/miniconda3/24.3.0-0
 source "$UCL_CONDA_PATH/etc/profile.d/conda.sh"
 if ! conda env list | grep -q "^lom-convert "; then
-    conda env create -f "$CODE_DIR/environment_convert.yml"
-else
-    conda env update -n lom-convert -f "$CODE_DIR/environment_convert.yml"
+    conda create -n lom-convert -c conda-forge -y \
+        python=3.11 \
+        cmake make autoconf libtool pkg-config flex bison bzip2 zlib \
+        "numpy>=1.26,<2" "tqdm>=4.66" "psutil>=5.9" pip
+    conda run -n lom-convert pip install "tyro>=0.8" "nle>=0.9"
 fi
 conda activate lom-convert
 
