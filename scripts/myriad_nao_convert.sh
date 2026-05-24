@@ -27,7 +27,6 @@
 #$ -l h_rt=48:0:0
 #$ -l mem=16G
 #$ -pe smp 32
-#$ -ac allow=T
 #$ -l tmpfs=50G
 #$ -N nao_convert
 #$ -o logs/nao_convert.out
