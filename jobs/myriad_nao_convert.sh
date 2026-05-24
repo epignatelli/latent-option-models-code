@@ -57,7 +57,7 @@ if ! conda env list | grep -q "^lom-convert "; then
 fi
 conda activate lom-convert
 
-mkdir -p logs
+mkdir -p "$OUTPUT_DIR" logs
 if mkdir -p "$RAW_DIR" && touch "$RAW_DIR/.write_test" 2>/dev/null; then
     rm -f "$RAW_DIR/.write_test"
     OUTPUT_DIR="$RAW_DIR"
