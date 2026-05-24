@@ -165,8 +165,8 @@ run_dataset() {
 # --------------------------------------------------------------------------- #
 # Run all datasets
 # --------------------------------------------------------------------------- #
-run_dataset "nao-top10" "nle/nao-top10" "$DEST_BASE/nle/nao-top10"
-run_dataset "nld-aa"    "nle/aa"        "$DEST_BASE/nle/aa"        "--skip-db"
+# run_dataset "nao-top10" "nle/nao-top10" "$DEST_BASE/nle/nao-top10"
+# run_dataset "nld-aa"    "nle/aa"        "$DEST_BASE/nle/aa"        "--skip-db"
 run_dataset "nld-nao"   "nle/nao"       "$DEST_BASE/nle/nao"       "--skip-db"
 
 echo "[$(date)] All datasets done."
