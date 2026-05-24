@@ -55,9 +55,6 @@ pip install --user --quiet \
 
 mkdir -p "$OUTPUT_DIR/nle/nao" logs
 
-# Ensure destination directory exists on the remote host.
-ssh "${DEST%%:*}" "mkdir -p '${DEST#*:}'"
-
 # --------------------------------------------------------------------------- #
 # Step 1: download + extract raw nld-nao (run once; skipped on restart)
 # --------------------------------------------------------------------------- #
