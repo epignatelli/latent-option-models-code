@@ -79,6 +79,7 @@ run_dataset() {
     echo "[$(date)] [$dataset] Downloading and extracting..."
     python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
         --output-dir "$OUTPUT_DIR" \
+        --workers "$WORKERS" \
         --skip-convert \
         --skip-index
 
