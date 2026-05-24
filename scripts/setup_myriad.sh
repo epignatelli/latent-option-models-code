@@ -46,6 +46,7 @@ fi
 
 echo "==> [4/5] Creating lom conda environment"
 module load python/miniconda3/24.3.0-0
+source "$UCL_CONDA_PATH/etc/profile.d/conda.sh"
 if conda env list | grep -q "^lom "; then
     echo "    lom env already exists, skipping"
 else
@@ -60,6 +61,7 @@ export HF_HOME="$HOME/.cache/huggingface"
 export WANDB_CACHE_DIR="$HOME/.cache/wandb"
 
 module load python/miniconda3/24.3.0-0
+source "$UCL_CONDA_PATH/etc/profile.d/conda.sh"
 
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME="robbyrussell"
