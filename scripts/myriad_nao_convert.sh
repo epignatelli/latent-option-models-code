@@ -49,8 +49,8 @@ module unload gcc-libs
 module load python/3.9.6-gnu-10.2.0
 module load cmake/3.21.1  # required to build nle
 
-# One-time dependency install from repo requirements (safe to re-run).
-python -m pip install --user --quiet -r "$CODE_DIR/requirements.txt"
+# One-time dependency install — only what prepare_data.py needs (no torch).
+python -m pip install --user --quiet nle numpy tqdm psutil tyro
 
 mkdir -p "$OUTPUT_DIR/nle/nao" logs
 
