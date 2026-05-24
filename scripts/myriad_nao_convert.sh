@@ -50,6 +50,8 @@ module load python/miniconda3/24.3.0-0
 source "$UCL_CONDA_PATH/etc/profile.d/conda.sh"
 if ! conda env list | grep -q "^lom "; then
     conda env create -f "$CODE_DIR/environment.yml"
+else
+    conda env update -n lom -f "$CODE_DIR/environment.yml"
 fi
 conda activate lom
 
