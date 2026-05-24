@@ -971,6 +971,7 @@ def _run_convert_rich(
     pending = [t for t in tasks if not _task_indexed(t[1])]
     if max_groups > 0:
         pending = pending[:max_groups]
+    pending.sort(key=lambda t: len(t[0]), reverse=True)  # largest first → LPT scheduling
     print(f"  pending: {len(pending):,} players to process", flush=True)
 
     # Print commit budget from /proc/meminfo so OOM risk is visible upfront.
