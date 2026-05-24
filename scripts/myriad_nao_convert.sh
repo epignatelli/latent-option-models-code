@@ -48,6 +48,9 @@ CODE_DIR="$HOME/repos/latent-option-models-code"
 # --------------------------------------------------------------------------- #
 module load python/miniconda3/24.3.0-0
 source "$UCL_CONDA_PATH/etc/profile.d/conda.sh"
+if ! conda env list | grep -q "^lom "; then
+    conda env create -f "$CODE_DIR/environment.yml"
+fi
 conda activate lom
 
 mkdir -p "$OUTPUT_DIR/nle/nao" logs
