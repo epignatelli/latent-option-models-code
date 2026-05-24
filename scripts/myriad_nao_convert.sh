@@ -6,6 +6,10 @@
 #
 # Configure the variables in the CONFIGURATION section before submitting.
 #
+# Prerequisites (run once on a Myriad login node before submitting):
+#   git clone https://github.com/epignatelli/latent-option-models-code ~/repos/latent-option-models-code
+#   mkdir -p ~/logs
+#
 # How it works:
 #   1. Download + extract raw nld-nao data once (~500 GB).
 #   2. Loop: convert BATCH_SIZE players, rsync their npz files to DEST,
@@ -41,9 +45,12 @@ CODE_DIR="$HOME/repos/latent-option-models-code"
 # --------------------------------------------------------------------------- #
 # Environment
 # --------------------------------------------------------------------------- #
-module load python3
-source "$HOME/miniforge3/etc/profile.d/conda.sh"
-conda activate lom
+module load python/3.9.6-gnu-10.2.0
+module load cmake/3.21.1  # required to build nle
+
+# One-time dependency install (safe to re-run; pip skips already-installed).
+pip install --user --quiet \
+    nle numpy tqdm psutil tyro wandb
 
 mkdir -p "$OUTPUT_DIR" logs
 
