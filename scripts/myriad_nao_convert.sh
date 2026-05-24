@@ -102,7 +102,32 @@ while true; do
 done
 
 # --------------------------------------------------------------------------- #
-# Step 3: rsync the final index
+# Step 3: retry pass at 4 workers for any OOM-failed players
+# --------------------------------------------------------------------------- #
+ERRORS_FILE="$OUTPUT_DIR/nle/nao/errors.txt"
+if [ -s "$ERRORS_FILE" ]; then
+    N_ERRORS=$(wc -l < "$ERRORS_FILE")
+    echo "[$(date)] Retrying $N_ERRORS failed players at 4 workers..."
+    python "$CODE_DIR/scripts/prepare_data.py" nld-nao \
+        --output-dir "$OUTPUT_DIR" \
+        --workers 4 \
+        --skip-download \
+        --skip-extract \
+        --skip-db
+
+    NPZ_DIR="$OUTPUT_DIR/nle/nao"
+    N_NEW=$(find "$NPZ_DIR" -maxdepth 1 -name "*.npz" ! -name "index.npz" | wc -l)
+    if [ "$N_NEW" -gt 0 ]; then
+        rsync -avz --progress --exclude="index.npz" "$NPZ_DIR/" "$DEST/"
+        find "$NPZ_DIR" -maxdepth 1 -name "*.npz" ! -name "index.npz" -delete
+    fi
+    echo "[$(date)] Retry done."
+else
+    echo "[$(date)] No errors to retry."
+fi
+
+# --------------------------------------------------------------------------- #
+# Step 4: rsync the final index
 # --------------------------------------------------------------------------- #
 echo "[$(date)] Sending final index..."
 rsync -avz "$OUTPUT_DIR/nle/nao/index.npz" "$DEST/index.npz"
