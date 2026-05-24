@@ -38,7 +38,6 @@
 # --------------------------------------------------------------------------- #
 DEST_BASE="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/datasets"
 WORKERS=36
-BATCH_SIZE=5000
 OUTPUT_DIR="$HOME/lom/datasets"
 RAW_DIR="/dev/shm/lom_$$"
 CODE_DIR="$HOME/repos/latent-option-models-code"
@@ -91,72 +90,35 @@ run_dataset() {
         --skip-convert \
         --skip-index
 
-    # Step 2: batch convert → rsync → delete
-    local iteration=0
-    while true; do
-        iteration=$((iteration + 1))
-        echo "[$(date)] [$dataset] Batch $iteration (max $BATCH_SIZE groups)..."
-
-        python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
-            --output-dir "$OUTPUT_DIR" \
-            --workers "$WORKERS" \
-            --max-groups "$BATCH_SIZE" \
-            --skip-download \
-            --skip-extract \
-            $skip_db_flag
-
-        local n_new
-        n_new=$(find "$npz_dir" -maxdepth 1 -name "*.npz" ! -name "index.npz" | wc -l)
-        if [ "$n_new" -eq 0 ]; then
-            echo "[$(date)] [$dataset] No new files — all groups converted."
-            break
-        fi
-
-        echo "[$(date)] [$dataset] $n_new files converted. Rsyncing..."
-        rsync -avz --progress --exclude="index.npz" "$npz_dir/" "$dest/"
-        find "$npz_dir" -maxdepth 1 -name "*.npz" ! -name "index.npz" -delete
-        echo "[$(date)] [$dataset] Rsynced and deleted. Disk used: $(du -sh "$OUTPUT_DIR" | cut -f1)"
-    done
+    # Step 2: convert everything in one shot
+    echo "[$(date)] [$dataset] Converting..."
+    python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
+        --output-dir "$OUTPUT_DIR" \
+        --workers "$WORKERS" \
+        --skip-download \
+        --skip-extract \
+        $skip_db_flag
 
     # Step 3: retry OOM failures at 10 workers
     local errors_file="$npz_dir/errors.txt"
     if [ -s "$errors_file" ]; then
-        local n_before
-        n_before=$(wc -l < "$errors_file")
-        echo "[$(date)] [$dataset] Retrying $n_before failures at 10 workers..."
+        echo "[$(date)] [$dataset] Retrying $(wc -l < "$errors_file") failures at 10 workers..."
         python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
             --output-dir "$OUTPUT_DIR" \
             --workers 10 \
             --skip-download \
             --skip-extract \
             $skip_db_flag
-
-        local n_new
-        n_new=$(find "$npz_dir" -maxdepth 1 -name "*.npz" ! -name "index.npz" | wc -l)
-        local n_after
-        n_after=$([ -s "$errors_file" ] && wc -l < "$errors_file" || echo 0)
-
-        if [ "$n_new" -eq 0 ]; then
-            echo "[$(date)] [$dataset] Retry made no progress ($n_after errors remain)."
-        else
-            rsync -avz --progress --exclude="index.npz" "$npz_dir/" "$dest/"
-            find "$npz_dir" -maxdepth 1 -name "*.npz" ! -name "index.npz" -delete
-            echo "[$(date)] [$dataset] Retry done. $n_after error entries in log."
-        fi
     else
         echo "[$(date)] [$dataset] No errors to retry."
     fi
 
-    # Step 4: rsync final index
-    if [ -f "$npz_dir/index.npz" ]; then
-        echo "[$(date)] [$dataset] Sending final index..."
-        rsync -avz "$npz_dir/index.npz" "$dest/index.npz"
-    else
-        echo "[$(date)] [$dataset] No index.npz found — skipping."
-    fi
+    # Step 4: rsync everything to bologna
+    echo "[$(date)] [$dataset] Rsyncing to $dest..."
+    rsync -avz --progress "$npz_dir/" "$dest/"
 
     # Step 5: free /dev/shm before next dataset
-    echo "[$(date)] [$dataset] Cleaning up RAW_DIR..."
+    echo "[$(date)] [$dataset] Cleaning up..."
     rm -rf "${RAW_DIR:?}/${dataset}" "${RAW_DIR:?}/zips/${dataset}" "${RAW_DIR:?}/${dataset}.db"
 
     echo "[$(date)] [$dataset] Done."
