@@ -62,6 +62,7 @@ import os
 import re
 import tarfile
 import threading
+import time
 
 import urllib.request
 import zipfile
@@ -995,6 +996,8 @@ def _run_convert_rich(
     errors: list[str] = []
     oom_paths: list[str] = []
     since_ckpt = 0
+    _log_every = max(1, len(pending) // 20)  # log ~20 times over the full run
+    _t0 = time.time()
 
     if not pending:
         return
@@ -1064,6 +1067,19 @@ def _run_convert_rich(
                     filt_g=filtered_games_total, err=counts["error"],
                 )
                 bar.update(1)
+
+                done = counts["ok"] + counts["skip"] + counts["error"]
+                if done % _log_every == 0:
+                    elapsed = time.time() - _t0
+                    ram_gb = psutil.virtual_memory().used / 1024 ** 3
+                    ram_tot = psutil.virtual_memory().total / 1024 ** 3
+                    print(
+                        f"  [{time.strftime('%H:%M:%S')}] {done}/{len(pending)} groups"
+                        f"  ok={counts['ok']} skip={counts['skip']} err={counts['error']}"
+                        f"  ram={ram_gb:.0f}/{ram_tot:.0f}GB"
+                        f"  elapsed={elapsed/60:.1f}min",
+                        flush=True,
+                    )
 
                 if write_index and since_ckpt >= checkpoint_every and accum["pl_paths"]:
                     _write_index_rich(index_path, accum)
