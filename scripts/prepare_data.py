@@ -1039,8 +1039,8 @@ def _run_convert_rich(
                 pass
 
     with mp.Pool(min(workers, len(pending)), maxtasksperchild=1) as pool:
-        with tqdm(total=len(pending), unit="group", desc="  groups", dynamic_ncols=True, position=0) as bar, \
-             tqdm(total=total_games,  unit="game",  desc="  games ", dynamic_ncols=True, position=1) as game_bar:
+        with tqdm(total=len(pending), unit="group", desc="  groups", dynamic_ncols=True, position=0, smoothing=0.1) as bar, \
+             tqdm(total=total_games,  unit="game",  desc="  games ", dynamic_ncols=True, position=1, smoothing=0.1) as game_bar:
 
             drain_thread = threading.Thread(target=_drain_game_q, args=(game_bar,), daemon=True)
             drain_thread.start()
