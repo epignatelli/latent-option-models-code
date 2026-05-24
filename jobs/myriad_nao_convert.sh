@@ -57,7 +57,14 @@ if ! conda env list | grep -q "^lom-convert "; then
 fi
 conda activate lom-convert
 
-mkdir -p "$OUTPUT_DIR" "$RAW_DIR" logs
+mkdir -p "$OUTPUT_DIR" logs
+if mkdir -p "$RAW_DIR" && touch "$RAW_DIR/.write_test" 2>/dev/null; then
+    rm -f "$RAW_DIR/.write_test"
+    echo "RAW_DIR=$RAW_DIR (local /dev/shm)"
+else
+    echo "WARNING: cannot write to $RAW_DIR — falling back to OUTPUT_DIR"
+    RAW_DIR="$OUTPUT_DIR"
+fi
 
 # --------------------------------------------------------------------------- #
 # run_dataset <dataset> <npz_subdir> <dest> [--skip-db]
