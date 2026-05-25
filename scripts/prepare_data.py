@@ -478,13 +478,22 @@ class _ChunkWriter:
         if not self._chars:
             return
         cpath = f"{self._stem}_{self._chunk_idx}{self._ext}"
-        np.savez_compressed(
-            cpath,
-            tty_chars=np.concatenate(self._chars),
-            tty_colors=np.concatenate(self._colors),
-            offsets=np.array(self._offsets, dtype=np.int64),
-            **{self._id_key: np.array(self._ids, dtype=self._id_dtype)},
-        )
+        try:
+            np.savez_compressed(
+                cpath,
+                tty_chars=np.concatenate(self._chars),
+                tty_colors=np.concatenate(self._colors),
+                offsets=np.array(self._offsets, dtype=np.int64),
+                **{self._id_key: np.array(self._ids, dtype=self._id_dtype)},
+            )
+        except Exception as exc:
+            self._results.append({"status": "error", "path": cpath,
+                                   "error": f"flush failed ({self._offsets[-1]} frames): {exc}"})
+            self._paths.append(cpath)
+            self._chunk_idx += 1
+            self._chars = []; self._colors = []; self._offsets = [0]
+            self._ids = []; self._meta = []; self._chunk_frames = 0
+            return
         self._results.append({"status": "ok", "path": cpath,
                                "frames": self._offsets[-1],
                                "games": len(self._offsets) - 1,
