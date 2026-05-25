@@ -122,10 +122,11 @@ def _run_trial(
     except Exception as exc:
         return False, False, time.monotonic() - t0, str(exc)
 
+    assert proc.stdout is not None and proc.stderr is not None
     stderr_lines: list[str] = []
 
     def _drain_stderr() -> None:
-        for line in proc.stderr:
+        for line in proc.stderr:  # type: ignore[union-attr]
             stderr_lines.append(line)
             print(f"    {line}", end="", flush=True)
 

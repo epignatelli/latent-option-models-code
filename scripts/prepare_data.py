@@ -404,7 +404,7 @@ def _game_meta_from_xlog(entry: dict, n_frames: int, file_ts: int) -> dict:
 # --------------------------------------------------------------------------- #
 
 def _decode(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
-    from nle import _pyconverter as nle_converter
+    from nle import _pyconverter as nle_converter  # type: ignore[reportAttributeAccessIssue]
 
     chunk = 200_000 if len(ttyrec_files) == 1 else 30_000
     tmp_chars  = np.zeros((chunk, ROWS, COLS), dtype=np.uint8)
@@ -498,6 +498,8 @@ class _ChunkWriter:
             return
         cpath = f"{self._stem}_{self._chunk_idx}{self._ext}"
         pid = os.getpid()
+        proc: psutil.Process | None = None
+        rss0 = rss1 = rss2 = t0 = t1 = t2 = 0.0
         if _PROFILE:
             proc = psutil.Process(pid)
             rss0 = proc.memory_info().rss / 1024**3
@@ -505,7 +507,7 @@ class _ChunkWriter:
         try:
             chars  = np.concatenate(self._chars)
             colors = np.concatenate(self._colors)
-            if _PROFILE:
+            if _PROFILE and proc is not None:
                 rss1 = proc.memory_info().rss / 1024**3
                 t1 = time.perf_counter()
             np.savez_compressed(
@@ -513,7 +515,7 @@ class _ChunkWriter:
                 offsets=np.array(self._offsets, dtype=np.int64),
                 **{self._id_key: np.array(self._ids, dtype=self._id_dtype)},
             )
-            if _PROFILE:
+            if _PROFILE and proc is not None:
                 rss2 = proc.memory_info().rss / 1024**3
                 t2 = time.perf_counter()
                 fsize = os.path.getsize(cpath) / 1024**3
@@ -604,9 +606,11 @@ def _convert_player(task: tuple) -> list[dict]:
     print(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {player_name}  {n_files} files", flush=True)
     _last_wprint = time.time()
 
+    _prof_proc: psutil.Process | None = None
+    rss_start = t_decode_total = _td0 = 0.0
     if _PROFILE:
-        proc = psutil.Process(pid)
-        rss_start = proc.memory_info().rss / 1024**3
+        _prof_proc = psutil.Process(pid)
+        rss_start = _prof_proc.memory_info().rss / 1024**3
         t_decode_total = 0.0
 
     for i, bz2_path in enumerate(sorted_files):
@@ -629,14 +633,15 @@ def _convert_player(task: tuple) -> list[dict]:
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
         chars = arrays["tty_chars"].astype(np.uint8)
+        assert H is not None and W is not None
         colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
                   if "tty_colors" in arrays
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
         writer.add(chars, colors, file_ts, _game_meta_from_xlog(entry, n_frames, file_ts))
 
-    if _PROFILE:
-        rss_end = proc.memory_info().rss / 1024**3
+    if _PROFILE and _prof_proc is not None:
+        rss_end = _prof_proc.memory_info().rss / 1024**3
         total_fr = writer._offsets[-1]
         dec_per_file = t_decode_total / max(n_files, 1)
         print(
@@ -773,6 +778,7 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
         offsets_list: list[int] = [0]
         chars_parts: list[np.ndarray] = []
         colors_parts: list[np.ndarray] = []
+        assert H is not None and W is not None
         for npz_path, n_frames in chunk_valid:
             try:
                 with np.load(npz_path) as f:
@@ -909,6 +915,7 @@ def _convert_aa_group(task: tuple) -> list[dict]:
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
         chars = arrays["tty_chars"].astype(np.uint8)
+        assert H is not None and W is not None
         colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
                   if "tty_colors" in arrays
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
@@ -1125,7 +1132,7 @@ def _run_convert_rich(
 
     n_workers = min(workers, len(pending))
     files_done = 0
-    with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=1) as executor:
+    with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=1) as executor:  # type: ignore[call-arg]
         with tqdm(total=total_files, unit="file", desc="  files", dynamic_ncols=True, smoothing=0.1) as bar:
 
             _submit_time = time.time()
@@ -1464,8 +1471,8 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
 # --------------------------------------------------------------------------- #
 
 def main() -> None:
-    sys.stdout.reconfigure(line_buffering=True)
-    sys.stderr.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+    sys.stderr.reconfigure(line_buffering=True)  # type: ignore[union-attr]
 
     cfg = tyro.cli(
         Union[
