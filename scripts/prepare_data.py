@@ -211,9 +211,9 @@ def _download(url: str, dest: str) -> None:
 def _parallel_download(base_url: str, filenames: list[str], dest_dir: str, workers: int) -> None:
     pending = [n for n in filenames if not os.path.exists(os.path.join(dest_dir, n))]
     if not pending:
-        print(f"  all {len(filenames)} archives already present — skipping download.")
+        print(f"  all {len(filenames)} archives already present — skipping download.", flush=True)
         return
-    print(f"  downloading {len(pending)}/{len(filenames)} archives ({workers} workers) ...")
+    print(f"  downloading {len(pending)}/{len(filenames)} archives ({workers} workers) ...", flush=True)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(_download, base_url + name, os.path.join(dest_dir, name)): name
@@ -253,9 +253,9 @@ def _extract_one_zip(args: tuple) -> None:
 
 def _extract_zips(filenames: list[str], zip_dir: str, dest_dir: str, workers: int = 1) -> None:
     if _is_done(dest_dir):
-        print(f"  already extracted to {dest_dir} — skipping.")
+        print(f"  already extracted to {dest_dir} — skipping.", flush=True)
         return
-    print(f"  extracting {len(filenames)} archives to {dest_dir} ({workers} workers)...")
+    print(f"  extracting {len(filenames)} archives to {dest_dir} ({workers} workers)...", flush=True)
     tasks = [(os.path.join(zip_dir, name), dest_dir) for name in filenames]
     with tqdm(total=len(filenames), unit="zip", file=sys.stdout) as bar:
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -269,9 +269,9 @@ def _extract_zips(filenames: list[str], zip_dir: str, dest_dir: str, workers: in
 
 def _extract_tar(tar_path: str, dest_dir: str) -> None:
     if _is_done(dest_dir):
-        print(f"  already extracted to {dest_dir} — skipping.")
+        print(f"  already extracted to {dest_dir} — skipping.", flush=True)
         return
-    print(f"  extracting {tar_path} to {dest_dir} ...")
+    print(f"  extracting {tar_path} to {dest_dir} ...", flush=True)
     with tarfile.open(tar_path, "r:*") as tf:
         members = tf.getmembers()
         total = sum(m.size for m in members)
@@ -1348,18 +1348,18 @@ def _run_nao_top10(args: BaseArgs) -> None:
     npz_dir     = os.path.join(args.output_dir, "nle", "nao-top10")
     index_path  = os.path.join(npz_dir, "index.npz")
 
-    print("\n─── nao-top10 ───────────────────────────────────────────────────")
+    print("\n─── nao-top10 ───────────────────────────────────────────────────", flush=True)
 
     if not args.skip_download:
         os.makedirs(zip_dir, exist_ok=True)
-        print(f"[download] nao_top10.tar (~11.8 GB) → {tar_path}")
+        print(f"[download] nao_top10.tar (~11.8 GB) → {tar_path}", flush=True)
         _download(_NAO_TOP10_URL, tar_path)
     else:
-        print("[download] skipped")
+        print("[download] skipped", flush=True)
 
     if not args.skip_extract:
         os.makedirs(extract_dir, exist_ok=True)
-        print(f"[extract]  → {extract_dir}")
+        print(f"[extract]  → {extract_dir}", flush=True)
         _extract_tar(tar_path, extract_dir)
         if not args.keep_archives and os.path.exists(tar_path):
             os.remove(tar_path)
@@ -1368,15 +1368,15 @@ def _run_nao_top10(args: BaseArgs) -> None:
             except OSError:
                 pass
     else:
-        print("[extract]  skipped")
+        print("[extract]  skipped", flush=True)
 
-    print("[db]       n/a for nao-top10")
+    print("[db]       n/a for nao-top10", flush=True)
 
     if not args.skip_convert:
         os.makedirs(npz_dir, exist_ok=True)
-        print(f"[convert]  → {npz_dir}")
+        print(f"[convert]  → {npz_dir}", flush=True)
         tasks = _discover_nao_top10(extract_dir, npz_dir, args.min_frames)
-        print(f"[index]    progressive → {index_path}")
+        print(f"[index]    progressive → {index_path}", flush=True)
         _run_convert_rich(
             tasks, args.workers, npz_dir,
             converter=_consolidate_nao_top10_player,
@@ -1384,16 +1384,16 @@ def _run_nao_top10(args: BaseArgs) -> None:
             max_groups=args.max_groups,
         )
     else:
-        print("[convert]  skipped")
+        print("[convert]  skipped", flush=True)
         if not args.skip_index:
             os.makedirs(npz_dir, exist_ok=True)
-            print(f"[index]    → {index_path}")
+            print(f"[index]    → {index_path}", flush=True)
             _build_rich_index_from_scan(npz_dir, args.workers, index_path)
         else:
-            print("[index]    skipped")
+            print("[index]    skipped", flush=True)
 
-    print("\nDone. Set in your experiment config:")
-    print(f"  data.index_path: {index_path}")
+    print("\nDone. Set in your experiment config:", flush=True)
+    print(f"  data.index_path: {index_path}", flush=True)
 
 
 def _run_nld(dataset: str, args: BaseArgs) -> None:
@@ -1412,39 +1412,39 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
     base_url   = _NLD_AA_BASE   if dataset == "nld-aa" else _NLD_NAO_BASE
     use_altorg = dataset == "nld-nao"
 
-    print(f"\n─── {dataset} ───────────────────────────────────────────────────")
+    print(f"\n─── {dataset} ───────────────────────────────────────────────────", flush=True)
 
     if not args.skip_download:
         os.makedirs(zip_dir, exist_ok=True)
-        print(f"[download] {len(filenames)} archives → {zip_dir}")
+        print(f"[download] {len(filenames)} archives → {zip_dir}", flush=True)
         _parallel_download(base_url, filenames, zip_dir, args.workers)
     else:
-        print("[download] skipped")
+        print("[download] skipped", flush=True)
 
     if not args.skip_extract:
         os.makedirs(extract_dir, exist_ok=True)
-        print(f"[extract]  → {extract_dir}")
+        print(f"[extract]  → {extract_dir}", flush=True)
         _extract_zips(filenames, zip_dir, extract_dir, workers=args.workers)
         if not args.keep_archives:
             _remove_archives(filenames, zip_dir)
     else:
-        print("[extract]  skipped")
+        print("[extract]  skipped", flush=True)
 
     if not args.skip_db:
-        print(f"[db]       → {db_path}")
+        print(f"[db]       → {db_path}", flush=True)
         _build_nle_db(extract_dir, db_path, dataset, use_altorg)
     else:
-        print("[db]       skipped")
+        print("[db]       skipped", flush=True)
 
     if not args.skip_convert:
         os.makedirs(npz_dir, exist_ok=True)
-        print(f"[convert]  → {npz_dir}")
+        print(f"[convert]  → {npz_dir}", flush=True)
         if dataset == "nld-aa":
             tasks = _discover_nld_aa_grouped(raw, npz_dir, args.min_frames)
         else:
             tasks = _discover_nld_nao(raw, npz_dir, args.min_frames)
         converter = _convert_aa_group if dataset == "nld-aa" else _convert_player
-        print(f"[index]    progressive → {index_path}")
+        print(f"[index]    progressive → {index_path}", flush=True)
         _run_convert_rich(
             tasks, args.workers, npz_dir,
             converter=converter,
@@ -1452,18 +1452,18 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
             max_groups=args.max_groups,
         )
     else:
-        print("[convert]  skipped")
+        print("[convert]  skipped", flush=True)
         if not args.skip_index:
             os.makedirs(npz_dir, exist_ok=True)
-            print(f"[index]    → {index_path}")
+            print(f"[index]    → {index_path}", flush=True)
             nle_data_dir = raw if dataset == "nld-nao" else None
             _build_rich_index_from_scan(npz_dir, args.workers, index_path, nle_data_dir)
         else:
-            print("[index]    skipped")
+            print("[index]    skipped", flush=True)
 
-    print("\nDone. Set in your experiment config:")
-    print(f"  data.nle_data_dir: {raw}")
-    print(f"  data.index_path:   {index_path}")
+    print("\nDone. Set in your experiment config:", flush=True)
+    print(f"  data.nle_data_dir: {raw}", flush=True)
+    print(f"  data.index_path:   {index_path}", flush=True)
 
 
 # --------------------------------------------------------------------------- #

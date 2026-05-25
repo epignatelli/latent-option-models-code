@@ -73,7 +73,7 @@ run_dataset() {
     local npz_dir="$OUTPUT_DIR/$npz_subdir"
 
     echo "[$(date)] [$dataset] Starting..."
-    python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
+    python -u "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
         --output-dir "$OUTPUT_DIR" \
         --workers "$WORKERS" \
         $skip_db_flag
@@ -81,7 +81,7 @@ run_dataset() {
     local errors_file="$npz_dir/errors.txt"
     if [ -s "$errors_file" ]; then
         echo "[$(date)] [$dataset] Retrying $(wc -l < "$errors_file") failures at 10 workers..."
-        python "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
+        python -u "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
             --output-dir "$OUTPUT_DIR" \
             --workers 10 \
             --skip-download \

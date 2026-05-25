@@ -75,7 +75,7 @@ trap "kill $MONITOR_PID 2>/dev/null" EXIT
 NPZ_DIR="$RAW_DIR_ACTIVE/nle/aa"
 
 echo "[$(date)] [nld-aa] Starting..."
-python "$CODE_DIR/scripts/prepare_data.py" nld-aa \
+python -u "$CODE_DIR/scripts/prepare_data.py" nld-aa \
     --output-dir "$RAW_DIR_ACTIVE" \
     --workers    "$WORKERS" \
     --skip-db \
@@ -83,7 +83,7 @@ python "$CODE_DIR/scripts/prepare_data.py" nld-aa \
 
 if [ -s "$NPZ_DIR/errors.txt" ]; then
     echo "[$(date)] [nld-aa] Retrying $(wc -l < "$NPZ_DIR/errors.txt") failures at 10 workers..."
-    python "$CODE_DIR/scripts/prepare_data.py" nld-aa \
+    python -u "$CODE_DIR/scripts/prepare_data.py" nld-aa \
         --output-dir "$RAW_DIR_ACTIVE" \
         --workers    10 \
         --skip-download --skip-extract --skip-db \
