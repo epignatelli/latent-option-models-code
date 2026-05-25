@@ -61,6 +61,7 @@ import os
 import re
 import sys
 import tarfile
+import threading
 import time
 
 import psutil
@@ -90,6 +91,29 @@ _NAO_TOP10_URL = "https://storage.googleapis.com/dm_nethack/nao_top10.tar"
 
 _xl_by_player: dict[str, list[dict]] = {}
 _PROFILE: bool = False
+_PROGRESS_QUEUE: "mp.Queue | None" = None
+_WORKER_LOG_PATH: str = ""
+
+
+def _worker_log(msg: str) -> None:
+    """Write verbose worker output to the per-run log file (or stdout if unset)."""
+    if _WORKER_LOG_PATH:
+        try:
+            with open(_WORKER_LOG_PATH, "a") as _f:
+                _f.write(msg + "\n")
+        except OSError:
+            pass
+    else:
+        print(msg, flush=True)
+
+
+def _worker_progress(name: str, done: int, total: int, frames: int) -> None:
+    """Send a lightweight progress update to the main process bar manager."""
+    if _PROGRESS_QUEUE is not None:
+        try:
+            _PROGRESS_QUEUE.put_nowait((name, done, total, frames))
+        except Exception:
+            pass
 
 
 _XLOG_NAMES = [
@@ -519,12 +543,11 @@ class _ChunkWriter:
                 rss2 = proc.memory_info().rss / 1024**3
                 t2 = time.perf_counter()
                 fsize = os.path.getsize(cpath) / 1024**3
-                print(
+                _worker_log(
                     f"  [{time.strftime('%H:%M:%S')}] [{pid}] FLUSH {os.path.basename(cpath)}"
                     f"  frames={self._offsets[-1]:,}"
                     f"  concat={t1-t0:.1f}s rss {rss0:.1f}→{rss1:.1f}GB"
-                    f"  savez={t2-t1:.1f}s rss→{rss2:.1f}GB  npz={fsize:.2f}GB",
-                    flush=True,
+                    f"  savez={t2-t1:.1f}s rss→{rss2:.1f}GB  npz={fsize:.2f}GB"
                 )
         except Exception as exc:
             self._results.append({"status": "error", "path": cpath,
@@ -538,8 +561,10 @@ class _ChunkWriter:
             self._meta = []
             self._chunk_frames = 0
             return
-        print(f"  [{time.strftime('%H:%M:%S')}] [{os.getpid()}] CHUNK  {os.path.basename(cpath)}"
-              f"  {self._offsets[-1]:,} fr  {len(self._offsets)-1} g", flush=True)
+        _worker_log(
+            f"  [{time.strftime('%H:%M:%S')}] [{os.getpid()}] CHUNK  {os.path.basename(cpath)}"
+            f"  {self._offsets[-1]:,} fr  {len(self._offsets)-1} g"
+        )
         self._results.append({"status": "ok", "path": cpath,
                                "frames": self._offsets[-1],
                                "games": len(self._offsets) - 1,
@@ -603,7 +628,8 @@ def _convert_player(task: tuple) -> list[dict]:
     sorted_files = sorted(input_files)
     n_files = len(sorted_files)
     pid = os.getpid()
-    print(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {player_name}  {n_files} files", flush=True)
+    _worker_log(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {player_name}  {n_files} files")
+    _worker_progress(player_name, 0, n_files, 0)
     _last_wprint = time.time()
 
     _prof_proc: psutil.Process | None = None
@@ -617,7 +643,11 @@ def _convert_player(task: tuple) -> list[dict]:
         now = time.time()
         if now - _last_wprint >= 30:
             _last_wprint = now
-            print(f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {player_name}  {i+1}/{n_files}  {os.path.basename(bz2_path)}  {writer._offsets[-1]:,} fr so far", flush=True)
+            _worker_log(
+                f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {player_name}"
+                f"  {i+1}/{n_files}  {os.path.basename(bz2_path)}"
+                f"  {writer._offsets[-1]:,} fr so far"
+            )
         file_ts = _parse_filename_ts(bz2_path)
         if _PROFILE:
             _td0 = time.perf_counter()
@@ -639,17 +669,17 @@ def _convert_player(task: tuple) -> list[dict]:
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
         writer.add(chars, colors, file_ts, _game_meta_from_xlog(entry, n_frames, file_ts))
+        _worker_progress(player_name, i + 1, n_files, writer._offsets[-1])
 
     if _PROFILE and _prof_proc is not None:
         rss_end = _prof_proc.memory_info().rss / 1024**3
         total_fr = writer._offsets[-1]
         dec_per_file = t_decode_total / max(n_files, 1)
-        print(
+        _worker_log(
             f"  [{time.strftime('%H:%M:%S')}] [{pid}] PROF  {player_name}"
             f"  files={n_files}  frames={total_fr:,}"
             f"  decode={t_decode_total:.1f}s ({dec_per_file:.2f}s/file)"
-            f"  rss {rss_start:.1f}→{rss_end:.1f}GB",
-            flush=True,
+            f"  rss {rss_start:.1f}→{rss_end:.1f}GB"
         )
 
     return writer.finish(filtered_games)
@@ -895,14 +925,19 @@ def _convert_aa_group(task: tuple) -> list[dict]:
     group_name = os.path.basename(game_dir)
     n_files = len(bz2_sorted)
     pid = os.getpid()
-    print(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {group_name}  {n_files} files", flush=True)
+    _worker_log(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {group_name}  {n_files} files")
+    _worker_progress(group_name, 0, n_files, 0)
     _last_wprint = time.time()
 
     for i, bz2_path in enumerate(bz2_sorted):
         now = time.time()
         if now - _last_wprint >= 30:
             _last_wprint = now
-            print(f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {group_name}  {i+1}/{n_files}  {os.path.basename(bz2_path)}  {writer._offsets[-1]:,} fr so far", flush=True)
+            _worker_log(
+                f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {group_name}"
+                f"  {i+1}/{n_files}  {os.path.basename(bz2_path)}"
+                f"  {writer._offsets[-1]:,} fr so far"
+            )
         basename = os.path.basename(bz2_path)
         entry = xl_by_name.get(basename, {})
         try:
@@ -921,6 +956,7 @@ def _convert_aa_group(task: tuple) -> list[dict]:
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
         ts = int(entry.get("starttime", 0) or 0)
         writer.add(chars, colors, basename, _game_meta_from_xlog(entry, n_frames, ts))
+        _worker_progress(group_name, i + 1, n_files, writer._offsets[-1])
 
     return writer.finish(filtered_games)
 
@@ -1132,8 +1168,48 @@ def _run_convert_rich(
 
     n_workers = min(workers, len(pending))
     files_done = 0
+
+    # --- Per-worker tqdm bars driven by a background thread reading _PROGRESS_QUEUE ---
+    # Position 0 = overall bar (bottom, persistent).
+    # Positions 1..n_workers = one slot per worker (leave=False, reused as workers finish).
+    _wbars:      dict[str, tqdm] = {}          # name → bar
+    _wbar_slots: list[int] = list(range(1, n_workers + 1))
+    _wbar_lock   = threading.Lock()
+    _bar_thread: threading.Thread | None = None
+
+    def _bar_manager() -> None:
+        while True:
+            try:
+                msg = _PROGRESS_QUEUE.get(timeout=0.5)  # type: ignore[union-attr]
+            except Exception:
+                continue
+            if msg is None:
+                break
+            name, done, total, frames = msg
+            with _wbar_lock:
+                if name not in _wbars:
+                    if not _wbar_slots:
+                        continue
+                    slot = _wbar_slots.pop(0)
+                    _wbars[name] = tqdm(
+                        total=total, initial=done,
+                        desc=f"  {name[:26]}", position=slot,
+                        leave=False, unit="f", file=sys.stdout,
+                        dynamic_ncols=True, smoothing=0.3,
+                    )
+                b = _wbars[name]
+                delta = done - b.n
+                if delta > 0:
+                    b.update(delta)
+                b.set_postfix(fr=f"{frames:,}", refresh=True)
+
+    if _PROGRESS_QUEUE is not None:
+        _bar_thread = threading.Thread(target=_bar_manager, daemon=True)
+        _bar_thread.start()
+
     with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=1) as executor:  # type: ignore[call-arg]
-        with tqdm(total=total_files, unit="file", desc="  files", dynamic_ncols=True, smoothing=0.1) as bar:
+        with tqdm(total=total_files, unit="file", desc="  total", dynamic_ncols=True,
+                  smoothing=0.1, position=0, file=sys.stdout) as bar:
 
             _submit_time = time.time()
             futures: dict = {executor.submit(converter, t): (t, _submit_time) for t in pending}
@@ -1144,13 +1220,23 @@ def _run_convert_rich(
                 name = os.path.splitext(os.path.basename(task[1]))[0]
                 n_task_files = len(task[0])
 
+                # Close the per-worker bar and return its slot.
+                with _wbar_lock:
+                    if name in _wbars:
+                        _wbars[name].close()
+                        slot = _wbars[name]._pos  # type: ignore[attr-defined]
+                        _wbar_slots.append(slot)
+                        del _wbars[name]
+
                 try:
                     raw_result = fut.result()
                 except Exception as e:
                     counts["error"] += 1
                     errors.append(str(e))
-                    print(f"  [{time.strftime('%H:%M:%S')}] ERR  {name}  {elapsed:.0f}s  {e}",
-                          flush=True)
+                    tqdm.write(
+                        f"  [{time.strftime('%H:%M:%S')}] ERR  {name}  {elapsed:.0f}s  {e}",
+                        file=sys.stdout,
+                    )
                     files_done += n_task_files
                     bar.update(n_task_files)
                     continue
@@ -1172,16 +1258,17 @@ def _run_convert_rich(
                             oom_paths.append(result["path"])
                     filtered_games_total += result.get("filtered_games", 0)
 
-                # Per-task completion line.
+                # Per-task completion line — use tqdm.write so it doesn't scramble bars.
                 total_fr = sum(r.get("frames", 0) for r in result_list)
                 total_g  = sum(r.get("games",  0) for r in result_list)
                 n_chunks = len(result_list)
                 top_status = result_list[0]["status"].upper()
                 chunk_tag  = f"×{n_chunks}" if n_chunks > 1 else "   "
-                print(
+                tqdm.write(
                     f"  [{time.strftime('%H:%M:%S')}] {top_status}{chunk_tag}"
-                    f"  {name:<32s}  {n_task_files:>5} files  {total_fr:>10,} fr  {total_g:>6,} g  {elapsed:>6.0f}s",
-                    flush=True,
+                    f"  {name:<32s}  {n_task_files:>5} files"
+                    f"  {total_fr:>10,} fr  {total_g:>6,} g  {elapsed:>6.0f}s",
+                    file=sys.stdout,
                 )
 
                 files_done += n_task_files
@@ -1197,29 +1284,28 @@ def _run_convert_rich(
                     groups_done = counts["ok"] + counts["skip"] + counts["error"]
                     ram_gb = psutil.virtual_memory().used / 1024 ** 3
                     ram_tot = psutil.virtual_memory().total / 1024 ** 3
-                    npz_on_disk = sum(1 for e in os.scandir(npz_dir) if e.name.endswith(".npz") and e.name != "index.npz")
-                    in_flight = [
-                        (t, ts) for f, (t, ts) in futures.items() if f.running()
-                    ]
-                    print(
+                    npz_on_disk = sum(
+                        1 for e in os.scandir(npz_dir)
+                        if e.name.endswith(".npz") and e.name != "index.npz"
+                    )
+                    tqdm.write(
                         f"\n  [{time.strftime('%H:%M:%S')}] === {files_done:,}/{total_files:,} files"
                         f"  ({groups_done}/{len(pending)} groups)"
                         f"  npz_on_disk={npz_on_disk:,}"
                         f"  ok={counts['ok']} skip={counts['skip']} err={counts['error']}"
                         f"  ram={ram_gb:.0f}/{ram_tot:.0f}GB"
-                        f"  elapsed={(now - _t0)/60:.1f}min ===",
-                        flush=True,
+                        f"  elapsed={(now - _t0)/60:.1f}min ===\n",
+                        file=sys.stdout,
                     )
-                    if in_flight:
-                        for t, ts in sorted(in_flight, key=lambda x: x[1]):
-                            n = os.path.splitext(os.path.basename(t[1]))[0]
-                            nf = len(t[0])
-                            print(f"    running  {n}  {nf} files  {now - ts:.0f}s", flush=True)
-                    print("", flush=True)
 
                 if write_index and since_ckpt >= checkpoint_every and accum["pl_paths"]:
                     _write_index_rich(index_path, accum)
                     since_ckpt = 0
+
+    # Stop bar manager thread.
+    if _PROGRESS_QUEUE is not None and _bar_thread is not None:
+        _PROGRESS_QUEUE.put(None)
+        _bar_thread.join(timeout=2.0)
 
     if write_index and accum["pl_paths"]:
         _write_index_rich(index_path, accum)
@@ -1397,7 +1483,7 @@ def _run_nao_top10(args: BaseArgs) -> None:
 
 
 def _run_nld(dataset: str, args: BaseArgs) -> None:
-    global _PROFILE
+    global _PROFILE, _PROGRESS_QUEUE, _WORKER_LOG_PATH
     assert dataset in ("nld-aa", "nld-nao")
     _PROFILE = args.profile
     raw         = args.raw_dir or args.output_dir
@@ -1407,6 +1493,10 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
     _npz_subdirs = {"nld-aa": "aa", "nld-nao": "nao"}
     npz_dir     = os.path.join(args.output_dir, "nle", _npz_subdirs[dataset])
     index_path  = os.path.join(npz_dir, "index.npz")
+
+    os.makedirs(npz_dir, exist_ok=True)
+    _PROGRESS_QUEUE = mp.Queue()
+    _WORKER_LOG_PATH = os.path.join(npz_dir, "workers.log")
 
     filenames  = _nld_aa_zips() if dataset == "nld-aa" else _nld_nao_zips()
     base_url   = _NLD_AA_BASE   if dataset == "nld-aa" else _NLD_NAO_BASE
