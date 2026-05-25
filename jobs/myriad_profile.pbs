@@ -32,7 +32,7 @@
 # --------------------------------------------------------------------------- #
 DEST_LOGS="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/profile"
 WORKERS=36
-N_GROUPS=200
+N_GROUPS=50
 RAW_DIR="$HOME/lom/datasets"         # nld-aa already extracted here
 OUTPUT_DIR="/dev/shm/lom_profile_$$"
 CODE_DIR="$HOME/repos/latent-option-models-code"
