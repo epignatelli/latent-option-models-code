@@ -60,9 +60,11 @@ import logging
 import multiprocessing as mp
 import os
 import re
+import sys
 import tarfile
 import time
 
+import psutil
 import urllib.request
 import zipfile
 from collections import defaultdict
@@ -187,8 +189,19 @@ def _download(url: str, dest: str) -> None:
     if os.path.exists(dest):
         return
     tmp = dest + ".tmp"
+    name = os.path.basename(dest)
     try:
-        urllib.request.urlretrieve(url, tmp)
+        with urllib.request.urlopen(url) as resp:
+            total = int(resp.headers.get("Content-Length", 0))
+            with tqdm(total=total or None, unit="B", unit_scale=True,
+                      desc=f"  {name}", file=sys.stdout, dynamic_ncols=True) as bar:
+                with open(tmp, "wb") as fh:
+                    while True:
+                        chunk = resp.read(1 << 20)  # 1 MB
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        bar.update(len(chunk))
         os.rename(tmp, dest)
     except Exception:
         if os.path.exists(tmp):
@@ -207,7 +220,7 @@ def _parallel_download(base_url: str, filenames: list[str], dest_dir: str, worke
             pool.submit(_download, base_url + name, os.path.join(dest_dir, name)): name
             for name in pending
         }
-        with tqdm(total=len(futures), unit="file") as bar:
+        with tqdm(total=len(futures), unit="file", file=sys.stdout) as bar:
             for future in as_completed(futures):
                 name = futures[future]
                 try:
@@ -245,7 +258,7 @@ def _extract_zips(filenames: list[str], zip_dir: str, dest_dir: str, workers: in
         return
     print(f"  extracting {len(filenames)} archives to {dest_dir} ({workers} workers)...")
     tasks = [(os.path.join(zip_dir, name), dest_dir) for name in filenames]
-    with tqdm(total=len(filenames), unit="zip") as bar:
+    with tqdm(total=len(filenames), unit="zip", file=sys.stdout) as bar:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_extract_one_zip, t): t[0] for t in tasks}
             for fut in as_completed(futures):
@@ -263,7 +276,7 @@ def _extract_tar(tar_path: str, dest_dir: str) -> None:
     with tarfile.open(tar_path, "r:*") as tf:
         members = tf.getmembers()
         total = sum(m.size for m in members)
-        with tqdm(total=total, unit="B", unit_scale=True, desc=os.path.basename(tar_path)) as bar:
+        with tqdm(total=total, unit="B", unit_scale=True, desc=os.path.basename(tar_path), file=sys.stdout) as bar:
             for member in members:
                 tf.extract(member, dest_dir)
                 bar.update(member.size)
@@ -276,9 +289,10 @@ def _extract_tar(tar_path: str, dest_dir: str) -> None:
 
 def _build_nle_db(unzipped_dir: str, db_path: str, dataset_name: str, use_altorg: bool) -> None:
     if os.path.exists(db_path):
-        print(f"  NLE database already exists at {db_path} — skipping.")
+        print(f"  NLE database already exists at {db_path} — skipping.", flush=True)
         return
-    print(f"  building NLE database at {db_path} ...")
+    print(f"  building NLE database at {db_path} ...", flush=True)
+    print(f"  scanning {unzipped_dir} (this can take several minutes) ...", flush=True)
     try:
         import nle.dataset as nld
         import nle.dataset.db as nld_db
@@ -287,11 +301,14 @@ def _build_nle_db(unzipped_dir: str, db_path: str, dataset_name: str, use_altorg
             "NLE is required for DB build.\n"
             "  pip install git+https://github.com/NetHack-LE/nle.git@main"
         )
+    t0 = time.time()
     nld_db.create(filename=db_path)
+    print(f"  [{time.strftime('%H:%M:%S')}] DB created, populating rows ...", flush=True)
     if use_altorg:
         nld.add_altorg_directory(unzipped_dir, dataset_name, filename=db_path)
     else:
         nld.add_nledata_directory(unzipped_dir, dataset_name, filename=db_path)
+    print(f"  [{time.strftime('%H:%M:%S')}] DB done in {(time.time()-t0)/60:.1f} min → {db_path}", flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1280,7 +1297,7 @@ def _build_rich_index_from_scan(
     errors = 0
 
     with mp.Pool(workers) as pool:
-        with tqdm(total=total, unit="player", desc="  index", dynamic_ncols=True) as bar:
+        with tqdm(total=total, unit="player", desc="  index", dynamic_ncols=True, file=sys.stdout) as bar:
             for result in pool.imap_unordered(_index_worker_rich, npz_files):
                 if "error" in result:
                     errors += 1
@@ -1440,7 +1457,6 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
 # --------------------------------------------------------------------------- #
 
 def main() -> None:
-    import sys
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
 
