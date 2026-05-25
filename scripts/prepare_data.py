@@ -88,6 +88,7 @@ _NLD_NAO_BASE  = "https://dl.fbaipublicfiles.com/nld/nld-nao/"
 _NAO_TOP10_URL = "https://storage.googleapis.com/dm_nethack/nao_top10.tar"
 
 _xl_by_player: dict[str, list[dict]] = {}
+_PROFILE: bool = False
 
 
 _XLOG_NAMES = [
@@ -138,6 +139,8 @@ class BaseArgs:
     """Skip building / updating index.npz."""
     max_groups: int = 0
     """Maximum number of groups (players/game-dirs) to convert. 0 = no limit (process all)."""
+    profile: bool = False
+    """Emit per-step RSS and timing from inside each worker subprocess."""
 
 
 @dataclass
@@ -478,14 +481,33 @@ class _ChunkWriter:
         if not self._chars:
             return
         cpath = f"{self._stem}_{self._chunk_idx}{self._ext}"
+        pid = os.getpid()
+        if _PROFILE:
+            proc = psutil.Process(pid)
+            rss0 = proc.memory_info().rss / 1024**3
+            t0 = time.perf_counter()
         try:
+            chars  = np.concatenate(self._chars)
+            colors = np.concatenate(self._colors)
+            if _PROFILE:
+                rss1 = proc.memory_info().rss / 1024**3
+                t1 = time.perf_counter()
             np.savez_compressed(
-                cpath,
-                tty_chars=np.concatenate(self._chars),
-                tty_colors=np.concatenate(self._colors),
+                cpath, tty_chars=chars, tty_colors=colors,
                 offsets=np.array(self._offsets, dtype=np.int64),
                 **{self._id_key: np.array(self._ids, dtype=self._id_dtype)},
             )
+            if _PROFILE:
+                rss2 = proc.memory_info().rss / 1024**3
+                t2 = time.perf_counter()
+                fsize = os.path.getsize(cpath) / 1024**3
+                print(
+                    f"  [{time.strftime('%H:%M:%S')}] [{pid}] FLUSH {os.path.basename(cpath)}"
+                    f"  frames={self._offsets[-1]:,}"
+                    f"  concat={t1-t0:.1f}s rss {rss0:.1f}→{rss1:.1f}GB"
+                    f"  savez={t2-t1:.1f}s rss→{rss2:.1f}GB  npz={fsize:.2f}GB",
+                    flush=True,
+                )
         except Exception as exc:
             self._results.append({"status": "error", "path": cpath,
                                    "error": f"flush failed ({self._offsets[-1]} frames): {exc}"})
@@ -558,16 +580,25 @@ def _convert_player(task: tuple) -> list[dict]:
     print(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {player_name}  {n_files} files", flush=True)
     _last_wprint = time.time()
 
+    if _PROFILE:
+        proc = psutil.Process(pid)
+        rss_start = proc.memory_info().rss / 1024**3
+        t_decode_total = 0.0
+
     for i, bz2_path in enumerate(sorted_files):
         now = time.time()
         if now - _last_wprint >= 30:
             _last_wprint = now
             print(f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {player_name}  {i+1}/{n_files}  {os.path.basename(bz2_path)}  {writer._offsets[-1]:,} fr so far", flush=True)
         file_ts = _parse_filename_ts(bz2_path)
+        if _PROFILE:
+            _td0 = time.perf_counter()
         try:
             arrays, n_frames = _decode([bz2_path], ttyrec_version)
         except Exception:
             continue
+        if _PROFILE:
+            t_decode_total += time.perf_counter() - _td0
         if not arrays or n_frames < min_frames:
             filtered_games += 1
             continue
@@ -579,6 +610,18 @@ def _convert_player(task: tuple) -> list[dict]:
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
         writer.add(chars, colors, file_ts, _game_meta_from_xlog(entry, n_frames, file_ts))
+
+    if _PROFILE:
+        rss_end = proc.memory_info().rss / 1024**3
+        total_fr = writer._offsets[-1]
+        dec_per_file = t_decode_total / max(n_files, 1)
+        print(
+            f"  [{time.strftime('%H:%M:%S')}] [{pid}] PROF  {player_name}"
+            f"  files={n_files}  frames={total_fr:,}"
+            f"  decode={t_decode_total:.1f}s ({dec_per_file:.2f}s/file)"
+            f"  rss {rss_start:.1f}→{rss_end:.1f}GB",
+            flush=True,
+        )
 
     return writer.finish(filtered_games)
 
@@ -1314,7 +1357,9 @@ def _run_nao_top10(args: BaseArgs) -> None:
 
 
 def _run_nld(dataset: str, args: BaseArgs) -> None:
+    global _PROFILE
     assert dataset in ("nld-aa", "nld-nao")
+    _PROFILE = args.profile
     raw         = args.raw_dir or args.output_dir
     zip_dir     = os.path.join(raw, "zips", dataset)
     extract_dir = os.path.join(raw, dataset)
