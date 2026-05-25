@@ -13,7 +13,7 @@ numpy>=1.26,<2
 tyro>=0.8
 wandb>=0.17
 tqdm>=4.66
-psutil>=5.9
+psutil>=6.0
 
 # NetHack Learning Environment
 # Additional system deps needed before pip install (Ubuntu):
