@@ -1,24 +1,22 @@
 #!/bin/bash -l
-# SGE job: profile the nld-aa conversion pipeline on Myriad.
+# SGE job: full nld-aa conversion with profiling on Myriad.
 #
-# Runs --max-groups 20 with --profile so each worker emits per-step RSS
-# and timing.  Output lands in logs/profile.out.
+# Runs the complete nld-aa dataset with --profile so each worker emits
+# per-step RSS and timing.  Results are rsynced to bologna.
+# Output lands in logs/profile.out.
 #
 # Usage: qsub jobs/myriad_profile.pbs
-#
-# To skip download/extract if data is already present, add to run line:
-#   --skip-download --skip-extract
 
 # --------------------------------------------------------------------------- #
 # SGE directives
 # --------------------------------------------------------------------------- #
 #$ -S /bin/bash
-#$ -l h_rt=2:0:0
-#$ -l mem=20G
-#$ -pe smp 4
+#$ -l h_rt=48:0:0
+#$ -l mem=40G
+#$ -pe smp 36
 #$ -ac allow=B
-#$ -l tmpfs=10G
-#$ -N lom_profile
+#$ -l tmpfs=50G
+#$ -N lom_aa_profile
 #$ -o logs/profile.out
 #$ -j y
 #$ -cwd
@@ -26,9 +24,10 @@
 # --------------------------------------------------------------------------- #
 # CONFIGURATION
 # --------------------------------------------------------------------------- #
-WORKERS=4
-N_GROUPS=20
-OUTPUT_DIR="/dev/shm/lom_profile_$$"
+DEST="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/datasets/nle/aa"
+WORKERS=36
+OUTPUT_DIR="$HOME/lom/datasets"
+RAW_DIR="/dev/shm/lom_aa_$$"
 CODE_DIR="$HOME/repos/latent-option-models-code"
 
 # --------------------------------------------------------------------------- #
@@ -46,23 +45,60 @@ fi
 conda activate lom-convert
 
 mkdir -p "$OUTPUT_DIR" logs
+if mkdir -p "$RAW_DIR" && touch "$RAW_DIR/.write_test" 2>/dev/null; then
+    rm -f "$RAW_DIR/.write_test"
+    RAW_DIR_ACTIVE="$RAW_DIR"
+    echo "RAW_DIR=$RAW_DIR_ACTIVE (local /dev/shm)"
+else
+    RAW_DIR_ACTIVE="$OUTPUT_DIR"
+    echo "WARNING: cannot write to $RAW_DIR — falling back to $OUTPUT_DIR (NFS)"
+fi
 
-echo "[$(date)] host=$(hostname)  workers=$WORKERS  groups=$N_GROUPS"
-echo "[$(date)] output=$OUTPUT_DIR"
+echo "[$(date)] host=$(hostname)  workers=$WORKERS"
 echo ""
 
+# Background monitor — logs CPU/RAM/net every 60s to logs/monitor_aa.log
+(while true; do
+    echo "=== $(date) ==="
+    free -h
+    top -b -n 1 -u uceeepi | grep -E "top|PID|python"
+    awk 'NR>2 {printf "%-10s rx:%s tx:%s\n",$1,$2,$10}' /proc/net/dev
+    echo ""
+    sleep 60
+done) >> logs/monitor_aa.log 2>&1 &
+MONITOR_PID=$!
+trap "kill $MONITOR_PID 2>/dev/null" EXIT
+
 # --------------------------------------------------------------------------- #
-# Profile run — nld-aa, 20 groups, 4 workers
+# Convert
 # --------------------------------------------------------------------------- #
+NPZ_DIR="$RAW_DIR_ACTIVE/nle/aa"
+
+echo "[$(date)] [nld-aa] Starting..."
 python "$CODE_DIR/scripts/prepare_data.py" nld-aa \
-    --output-dir "$OUTPUT_DIR" \
+    --output-dir "$RAW_DIR_ACTIVE" \
     --workers    "$WORKERS" \
-    --max-groups "$N_GROUPS" \
     --skip-db \
     --profile
 
-echo ""
-echo "[$(date)] Profile run complete."
-echo "[$(date)] Cleaning up $OUTPUT_DIR ..."
-rm -rf "$OUTPUT_DIR"
+if [ -s "$NPZ_DIR/errors.txt" ]; then
+    echo "[$(date)] [nld-aa] Retrying $(wc -l < "$NPZ_DIR/errors.txt") failures at 10 workers..."
+    python "$CODE_DIR/scripts/prepare_data.py" nld-aa \
+        --output-dir "$RAW_DIR_ACTIVE" \
+        --workers    10 \
+        --skip-download --skip-extract --skip-db \
+        --profile
+fi
+
+# --------------------------------------------------------------------------- #
+# Rsync
+# --------------------------------------------------------------------------- #
+echo "[$(date)] [nld-aa] Rsyncing to $DEST ..."
+rsync -avz --progress "$NPZ_DIR/" "$DEST/"
+
+# --------------------------------------------------------------------------- #
+# Cleanup
+# --------------------------------------------------------------------------- #
+echo "[$(date)] [nld-aa] Cleaning up $RAW_DIR ..."
+rm -rf "${RAW_DIR:?}"
 echo "[$(date)] Done."
