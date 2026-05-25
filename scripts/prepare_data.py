@@ -55,7 +55,6 @@ Usage:
 from __future__ import annotations
 
 import bisect
-import glob
 import logging
 import multiprocessing as mp
 import os
@@ -530,8 +529,12 @@ class _ChunkWriter:
                                    "error": f"flush failed ({self._offsets[-1]} frames): {exc}"})
             self._paths.append(cpath)
             self._chunk_idx += 1
-            self._chars = []; self._colors = []; self._offsets = [0]
-            self._ids = []; self._meta = []; self._chunk_frames = 0
+            self._chars = []
+            self._colors = []
+            self._offsets = [0]
+            self._ids = []
+            self._meta = []
+            self._chunk_frames = 0
             return
         print(f"  [{time.strftime('%H:%M:%S')}] [{os.getpid()}] CHUNK  {os.path.basename(cpath)}"
               f"  {self._offsets[-1]:,} fr  {len(self._offsets)-1} g", flush=True)
@@ -541,8 +544,12 @@ class _ChunkWriter:
                                "game_meta": self._meta, "filtered_games": 0})
         self._paths.append(cpath)
         self._chunk_idx += 1
-        self._chars = []; self._colors = []; self._offsets = [0]
-        self._ids = []; self._meta = []; self._chunk_frames = 0
+        self._chars = []
+        self._colors = []
+        self._offsets = [0]
+        self._ids = []
+        self._meta = []
+        self._chunk_frames = 0
 
     def finish(self, filtered_games: int = 0) -> list[dict]:
         self._flush()
@@ -1218,7 +1225,7 @@ def _run_convert_rich(
         print(f"\n  {len(oom_paths)} failed group(s) recorded in {retry_path}", flush=True)
 
     if errors:
-        print(f"\n  first 10 errors:", flush=True)
+        print("\n  first 10 errors:", flush=True)
         for msg in errors[:10]:
             print(f"    {msg}", flush=True)
 
@@ -1378,7 +1385,7 @@ def _run_nao_top10(args: BaseArgs) -> None:
         else:
             print("[index]    skipped")
 
-    print(f"\nDone. Set in your experiment config:")
+    print("\nDone. Set in your experiment config:")
     print(f"  data.index_path: {index_path}")
 
 
@@ -1447,7 +1454,7 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
         else:
             print("[index]    skipped")
 
-    print(f"\nDone. Set in your experiment config:")
+    print("\nDone. Set in your experiment config:")
     print(f"  data.nle_data_dir: {raw}")
     print(f"  data.index_path:   {index_path}")
 

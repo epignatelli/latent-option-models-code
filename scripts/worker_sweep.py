@@ -170,7 +170,6 @@ def main() -> None:
     print(f"data_dir: {args.data_dir}", flush=True)
     print(f"worker counts: {args.worker_counts}\n", flush=True)
 
-    max_safe: int | None = None
     results: list[dict] = []
 
     for n_workers in args.worker_counts:
@@ -198,7 +197,6 @@ def main() -> None:
 
         if success:
             status_str = f"OK  ({elapsed:.0f}s, {groups_per_s:.2f} groups/s)"
-            max_safe = n_workers
         elif oom:
             status_str = f"OOM ({elapsed:.0f}s)"
         else:
