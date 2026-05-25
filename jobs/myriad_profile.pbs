@@ -1,0 +1,68 @@
+#!/bin/bash -l
+# SGE job: profile the nld-aa conversion pipeline on Myriad.
+#
+# Runs --max-groups 20 with --profile so each worker emits per-step RSS
+# and timing.  Output lands in logs/profile.out.
+#
+# Usage: qsub jobs/myriad_profile.pbs
+#
+# To skip download/extract if data is already present, add to run line:
+#   --skip-download --skip-extract
+
+# --------------------------------------------------------------------------- #
+# SGE directives
+# --------------------------------------------------------------------------- #
+#$ -S /bin/bash
+#$ -l h_rt=2:0:0
+#$ -l mem=20G
+#$ -pe smp 4
+#$ -ac allow=B
+#$ -l tmpfs=10G
+#$ -N lom_profile
+#$ -o logs/profile.out
+#$ -j y
+#$ -cwd
+
+# --------------------------------------------------------------------------- #
+# CONFIGURATION
+# --------------------------------------------------------------------------- #
+WORKERS=4
+N_GROUPS=20
+OUTPUT_DIR="/dev/shm/lom_profile_$$"
+CODE_DIR="$HOME/repos/latent-option-models-code"
+
+# --------------------------------------------------------------------------- #
+# Environment
+# --------------------------------------------------------------------------- #
+module load python/miniconda3/24.3.0-0
+source "$UCL_CONDA_PATH/etc/profile.d/conda.sh"
+if ! conda env list | grep -q "^lom-convert "; then
+    conda create -n lom-convert -c conda-forge -y \
+        python=3.11 \
+        cmake make autoconf libtool pkg-config flex bison bzip2 zlib \
+        "numpy>=1.26,<2" "tqdm>=4.66" "psutil>=6.0" pip
+    conda run -n lom-convert pip install "tyro>=0.8" "nle>=0.9"
+fi
+conda activate lom-convert
+
+mkdir -p "$OUTPUT_DIR" logs
+
+echo "[$(date)] host=$(hostname)  workers=$WORKERS  groups=$N_GROUPS"
+echo "[$(date)] output=$OUTPUT_DIR"
+echo ""
+
+# --------------------------------------------------------------------------- #
+# Profile run — nld-aa, 20 groups, 4 workers
+# --------------------------------------------------------------------------- #
+python "$CODE_DIR/scripts/prepare_data.py" nld-aa \
+    --output-dir "$OUTPUT_DIR" \
+    --workers    "$WORKERS" \
+    --max-groups "$N_GROUPS" \
+    --skip-db \
+    --profile
+
+echo ""
+echo "[$(date)] Profile run complete."
+echo "[$(date)] Cleaning up $OUTPUT_DIR ..."
+rm -rf "$OUTPUT_DIR"
+echo "[$(date)] Done."
