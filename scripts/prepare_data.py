@@ -1028,7 +1028,7 @@ def _run_convert_rich(
     errors: list[str] = []
     oom_paths: list[str] = []
     since_ckpt = 0
-    _log_interval = 5 * 60  # seconds between progress prints
+    _log_interval = 60  # seconds between periodic summaries
     _t0 = time.time()
     _last_log = _t0
 
@@ -1039,15 +1039,24 @@ def _run_convert_rich(
     with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=1) as executor:
         with tqdm(total=len(pending), unit="group", desc="  groups", dynamic_ncols=True, smoothing=0.1) as bar:
 
-            futures = {executor.submit(converter, t): t for t in pending}
+            _submit_time = time.time()
+            futures: dict = {executor.submit(converter, t): (t, _submit_time) for t in pending}
+
             for fut in as_completed(futures):
+                task, t_submit = futures[fut]
+                elapsed = time.time() - t_submit
+                name = os.path.splitext(os.path.basename(task[1]))[0]
+
                 try:
                     raw_result = fut.result()
                 except Exception as e:
                     counts["error"] += 1
                     errors.append(str(e))
+                    print(f"  [{time.strftime('%H:%M:%S')}] ERR  {name}  {elapsed:.0f}s  {e}",
+                          flush=True)
                     bar.update(1)
                     continue
+
                 # Converters may return a single dict or a list of dicts (chunked).
                 result_list: list[dict] = (
                     raw_result if isinstance(raw_result, list) else [raw_result]
@@ -1065,6 +1074,18 @@ def _run_convert_rich(
                             oom_paths.append(result["path"])
                     filtered_games_total += result.get("filtered_games", 0)
 
+                # Per-task completion line.
+                total_fr = sum(r.get("frames", 0) for r in result_list)
+                total_g  = sum(r.get("games",  0) for r in result_list)
+                n_chunks = len(result_list)
+                top_status = result_list[0]["status"].upper()
+                chunk_tag  = f"×{n_chunks}" if n_chunks > 1 else "   "
+                print(
+                    f"  [{time.strftime('%H:%M:%S')}] {top_status}{chunk_tag}"
+                    f"  {name:<32s}  {total_fr:>10,} fr  {total_g:>6,} g  {elapsed:>6.0f}s",
+                    flush=True,
+                )
+
                 bar.set_postfix(
                     ok=counts["ok"], skip=counts["skip"],
                     filt_g=filtered_games_total, err=counts["error"],
@@ -1077,13 +1098,21 @@ def _run_convert_rich(
                     done = counts["ok"] + counts["skip"] + counts["error"]
                     ram_gb = psutil.virtual_memory().used / 1024 ** 3
                     ram_tot = psutil.virtual_memory().total / 1024 ** 3
+                    in_flight = [
+                        (t, ts) for f, (t, ts) in futures.items() if f.running()
+                    ]
                     print(
-                        f"  [{time.strftime('%H:%M:%S')}] {done}/{len(pending)} groups"
+                        f"\n  [{time.strftime('%H:%M:%S')}] === {done}/{len(pending)}"
                         f"  ok={counts['ok']} skip={counts['skip']} err={counts['error']}"
                         f"  ram={ram_gb:.0f}/{ram_tot:.0f}GB"
-                        f"  elapsed={(now - _t0)/60:.1f}min",
+                        f"  elapsed={(now - _t0)/60:.1f}min ===",
                         flush=True,
                     )
+                    if in_flight:
+                        for t, ts in sorted(in_flight, key=lambda x: x[1]):
+                            n = os.path.splitext(os.path.basename(t[1]))[0]
+                            print(f"    running  {n}  {now - ts:.0f}s", flush=True)
+                    print("", flush=True)
 
                 if write_index and since_ckpt >= checkpoint_every and accum["pl_paths"]:
                     _write_index_rich(index_path, accum)
