@@ -17,7 +17,7 @@
 # SGE directives  — identical to the production job
 # --------------------------------------------------------------------------- #
 #$ -S /bin/bash
-#$ -l h_rt=4:0:0
+#$ -l h_rt=12:0:0
 #$ -l mem=40G
 #$ -pe smp 36
 #$ -ac allow=B
@@ -72,7 +72,7 @@ py-spy record \
         --output-dir "$OUTPUT_DIR" \
         --workers    "$WORKERS" \
         --max-groups "$N_GROUPS" \
-        --skip-download --skip-extract --skip-db
+        --skip-db
 
 echo "[$(date)] Flame graph written to $REPORT_DIR/profile.svg"
 
