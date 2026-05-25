@@ -1166,12 +1166,14 @@ def _run_convert_rich(
                     groups_done = counts["ok"] + counts["skip"] + counts["error"]
                     ram_gb = psutil.virtual_memory().used / 1024 ** 3
                     ram_tot = psutil.virtual_memory().total / 1024 ** 3
+                    npz_on_disk = sum(1 for e in os.scandir(npz_dir) if e.name.endswith(".npz") and e.name != "index.npz")
                     in_flight = [
                         (t, ts) for f, (t, ts) in futures.items() if f.running()
                     ]
                     print(
                         f"\n  [{time.strftime('%H:%M:%S')}] === {files_done:,}/{total_files:,} files"
                         f"  ({groups_done}/{len(pending)} groups)"
+                        f"  npz_on_disk={npz_on_disk:,}"
                         f"  ok={counts['ok']} skip={counts['skip']} err={counts['error']}"
                         f"  ram={ram_gb:.0f}/{ram_tot:.0f}GB"
                         f"  elapsed={(now - _t0)/60:.1f}min ===",
