@@ -1066,7 +1066,8 @@ def _run_convert_rich(
     pending = [t for t in tasks if not _task_indexed(t[1])]
     if max_groups > 0:
         pending = pending[:max_groups]
-    print(f"  pending: {len(pending):,} players to process", flush=True)
+    total_files = sum(len(t[0]) for t in pending)
+    print(f"  pending: {len(pending):,} groups  {total_files:,} files", flush=True)
 
     # Print commit budget from /proc/meminfo so OOM risk is visible upfront.
     try:
@@ -1099,8 +1100,9 @@ def _run_convert_rich(
         return
 
     n_workers = min(workers, len(pending))
+    files_done = 0
     with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=1) as executor:
-        with tqdm(total=len(pending), unit="group", desc="  groups", dynamic_ncols=True, smoothing=0.1) as bar:
+        with tqdm(total=total_files, unit="file", desc="  files", dynamic_ncols=True, smoothing=0.1) as bar:
 
             _submit_time = time.time()
             futures: dict = {executor.submit(converter, t): (t, _submit_time) for t in pending}
@@ -1109,6 +1111,7 @@ def _run_convert_rich(
                 task, t_submit = futures[fut]
                 elapsed = time.time() - t_submit
                 name = os.path.splitext(os.path.basename(task[1]))[0]
+                n_task_files = len(task[0])
 
                 try:
                     raw_result = fut.result()
@@ -1117,7 +1120,8 @@ def _run_convert_rich(
                     errors.append(str(e))
                     print(f"  [{time.strftime('%H:%M:%S')}] ERR  {name}  {elapsed:.0f}s  {e}",
                           flush=True)
-                    bar.update(1)
+                    files_done += n_task_files
+                    bar.update(n_task_files)
                     continue
 
                 # Converters may return a single dict or a list of dicts (chunked).
@@ -1145,27 +1149,29 @@ def _run_convert_rich(
                 chunk_tag  = f"×{n_chunks}" if n_chunks > 1 else "   "
                 print(
                     f"  [{time.strftime('%H:%M:%S')}] {top_status}{chunk_tag}"
-                    f"  {name:<32s}  {total_fr:>10,} fr  {total_g:>6,} g  {elapsed:>6.0f}s",
+                    f"  {name:<32s}  {n_task_files:>5} files  {total_fr:>10,} fr  {total_g:>6,} g  {elapsed:>6.0f}s",
                     flush=True,
                 )
 
+                files_done += n_task_files
                 bar.set_postfix(
                     ok=counts["ok"], skip=counts["skip"],
                     filt_g=filtered_games_total, err=counts["error"],
                 )
-                bar.update(1)
+                bar.update(n_task_files)
 
                 now = time.time()
                 if now - _last_log >= _log_interval:
                     _last_log = now
-                    done = counts["ok"] + counts["skip"] + counts["error"]
+                    groups_done = counts["ok"] + counts["skip"] + counts["error"]
                     ram_gb = psutil.virtual_memory().used / 1024 ** 3
                     ram_tot = psutil.virtual_memory().total / 1024 ** 3
                     in_flight = [
                         (t, ts) for f, (t, ts) in futures.items() if f.running()
                     ]
                     print(
-                        f"\n  [{time.strftime('%H:%M:%S')}] === {done}/{len(pending)}"
+                        f"\n  [{time.strftime('%H:%M:%S')}] === {files_done:,}/{total_files:,} files"
+                        f"  ({groups_done}/{len(pending)} groups)"
                         f"  ok={counts['ok']} skip={counts['skip']} err={counts['error']}"
                         f"  ram={ram_gb:.0f}/{ram_tot:.0f}GB"
                         f"  elapsed={(now - _t0)/60:.1f}min ===",
@@ -1174,7 +1180,8 @@ def _run_convert_rich(
                     if in_flight:
                         for t, ts in sorted(in_flight, key=lambda x: x[1]):
                             n = os.path.splitext(os.path.basename(t[1]))[0]
-                            print(f"    running  {n}  {now - ts:.0f}s", flush=True)
+                            nf = len(t[0])
+                            print(f"    running  {n}  {nf} files  {now - ts:.0f}s", flush=True)
                     print("", flush=True)
 
                 if write_index and since_ckpt >= checkpoint_every and accum["pl_paths"]:
