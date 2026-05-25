@@ -61,7 +61,6 @@ import multiprocessing as mp
 import os
 import re
 import tarfile
-import threading
 import time
 
 import urllib.request
@@ -89,7 +88,6 @@ _NLD_NAO_BASE  = "https://dl.fbaipublicfiles.com/nld/nld-nao/"
 _NAO_TOP10_URL = "https://storage.googleapis.com/dm_nethack/nao_top10.tar"
 
 _xl_by_player: dict[str, list[dict]] = {}
-_game_q: mp.Queue | None = None  # set before Pool; workers tick per decoded game
 
 
 _XLOG_NAMES = [
@@ -490,8 +488,6 @@ def _convert_player(task: tuple) -> dict:
         src_timestamps.append(file_ts)
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
         game_meta.append(_game_meta_from_xlog(entry, n_frames, file_ts))
-        if _game_q is not None:
-            _game_q.put(os.getpid())
 
     if not chars_parts:
         return {"status": "filter"}
@@ -776,8 +772,6 @@ def _convert_aa_group(task: tuple) -> dict:
         source_game_ids.append(basename)
         ts = int(entry.get("starttime", 0) or 0)
         game_meta.append(_game_meta_from_xlog(entry, n_frames, ts))
-        if _game_q is not None:
-            _game_q.put(os.getpid())
 
     if not chars_parts:
         return {"status": "filter"}
@@ -1004,47 +998,8 @@ def _run_convert_rich(
     if not pending:
         return
 
-    total_games = sum(len(t[0]) for t in pending)
-
-    global _game_q
-    _game_q = mp.Queue()
-
-    import psutil
-    total_ram_gb = psutil.virtual_memory().total / 1024 ** 3
-
-    def _read_commit_free_gb() -> float:
-        try:
-            vals: dict[str, int] = {}
-            with open("/proc/meminfo") as _f:
-                for _line in _f:
-                    k, v = _line.split(":", 1)
-                    vals[k.strip()] = int(v.split()[0])
-            return (vals["CommitLimit"] - vals["Committed_AS"]) / 1024 ** 2
-        except Exception:
-            return float("nan")
-
-    def _drain_game_q(game_bar: tqdm) -> None:
-        while True:
-            try:
-                val = _game_q.get(timeout=0.5)
-                if val is None:
-                    break
-                used_gb = psutil.virtual_memory().used / 1024 ** 3
-                cmt_free_gb = _read_commit_free_gb()
-                game_bar.set_postfix_str(
-                    f"ram={used_gb:.1f}/{total_ram_gb:.0f}GB cmt={cmt_free_gb:.0f}GB",
-                    refresh=False,
-                )
-                game_bar.update(1)
-            except Exception:
-                pass
-
     with mp.Pool(min(workers, len(pending)), maxtasksperchild=1) as pool:
-        with tqdm(total=len(pending), unit="group", desc="  groups", dynamic_ncols=True, position=0, smoothing=0.1) as bar, \
-             tqdm(total=total_games,  unit="game",  desc="  games ", dynamic_ncols=True, position=1, smoothing=0.1) as game_bar:
-
-            drain_thread = threading.Thread(target=_drain_game_q, args=(game_bar,), daemon=True)
-            drain_thread.start()
+        with tqdm(total=len(pending), unit="group", desc="  groups", dynamic_ncols=True, smoothing=0.1) as bar:
 
             for raw_result in pool.imap_unordered(converter, pending):
                 # Converters may return a single dict or a list of dicts (chunked).
@@ -1087,11 +1042,6 @@ def _run_convert_rich(
                 if write_index and since_ckpt >= checkpoint_every and accum["pl_paths"]:
                     _write_index_rich(index_path, accum)
                     since_ckpt = 0
-
-            _game_q.put(None)
-            drain_thread.join()
-
-    _game_q = None
 
     if write_index and accum["pl_paths"]:
         _write_index_rich(index_path, accum)
