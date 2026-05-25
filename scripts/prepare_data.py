@@ -66,7 +66,7 @@ import time
 import urllib.request
 import zipfile
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Union
@@ -998,10 +998,13 @@ def _run_convert_rich(
     if not pending:
         return
 
-    with mp.Pool(min(workers, len(pending)), maxtasksperchild=1) as pool:
+    n_workers = min(workers, len(pending))
+    with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=1) as executor:
         with tqdm(total=len(pending), unit="group", desc="  groups", dynamic_ncols=True, smoothing=0.1) as bar:
 
-            for raw_result in pool.imap_unordered(converter, pending):
+            futures = {executor.submit(converter, t): t for t in pending}
+            for fut in as_completed(futures):
+                raw_result = fut.result()
                 # Converters may return a single dict or a list of dicts (chunked).
                 result_list: list[dict] = (
                     raw_result if isinstance(raw_result, list) else [raw_result]
