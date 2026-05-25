@@ -78,16 +78,14 @@ echo "[$(date)] [nld-aa] Starting..."
 python -u "$CODE_DIR/scripts/prepare_data.py" nld-aa \
     --output-dir "$RAW_DIR_ACTIVE" \
     --workers    "$WORKERS" \
-    --skip-db \
-    --profile
+    --skip-db
 
 if [ -s "$NPZ_DIR/errors.txt" ]; then
     echo "[$(date)] [nld-aa] Retrying $(wc -l < "$NPZ_DIR/errors.txt") failures at 10 workers..."
     python -u "$CODE_DIR/scripts/prepare_data.py" nld-aa \
         --output-dir "$RAW_DIR_ACTIVE" \
         --workers    10 \
-        --skip-download --skip-extract --skip-db \
-        --profile
+        --skip-download --skip-extract --skip-db
 fi
 
 # --------------------------------------------------------------------------- #
