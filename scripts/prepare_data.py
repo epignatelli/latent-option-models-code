@@ -426,37 +426,98 @@ def _decode(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
     }, len(tty_chars)
 
 
+def _find_existing_chunks(output_path: str) -> list[str]:
+    """Return existing chunk paths for output_path, or [] if none exist."""
+    stem, ext = os.path.splitext(output_path)
+    if os.path.exists(output_path):
+        return [output_path]
+    existing = []
+    for i in range(100_000):
+        cpath = f"{stem}_{i}{ext}"
+        if not os.path.exists(cpath):
+            break
+        existing.append(cpath)
+    return existing
+
+
+class _ChunkWriter:
+    """Accumulates decoded frames and flushes npz chunks at _NAO_TOP10_MAX_FRAMES.
+
+    Callers feed individual games via ``add()``, then call ``finish()`` to flush
+    the final chunk and collect results.  A single-chunk output is renamed from
+    stem_0.npz back to stem.npz so the naming stays clean.
+    """
+
+    def __init__(self, output_path: str, id_key: str, id_dtype) -> None:
+        self._output_path = output_path
+        self._stem, self._ext = os.path.splitext(output_path)
+        self._id_key = id_key
+        self._id_dtype = id_dtype
+        self._chars:   list[np.ndarray] = []
+        self._colors:  list[np.ndarray] = []
+        self._offsets: list[int] = [0]
+        self._ids:     list = []
+        self._meta:    list[dict] = []
+        self._chunk_frames = 0
+        self._chunk_idx = 0
+        self._paths:   list[str] = []
+        self._results: list[dict] = []
+
+    def add(self, chars: np.ndarray, colors: np.ndarray, id_val, game_meta: dict) -> None:
+        n = chars.shape[0]
+        if self._chars and self._chunk_frames + n > _NAO_TOP10_MAX_FRAMES:
+            self._flush()
+        self._chars.append(chars)
+        self._colors.append(colors)
+        self._offsets.append(self._offsets[-1] + n)
+        self._ids.append(id_val)
+        self._meta.append(game_meta)
+        self._chunk_frames += n
+
+    def _flush(self) -> None:
+        if not self._chars:
+            return
+        cpath = f"{self._stem}_{self._chunk_idx}{self._ext}"
+        np.savez_compressed(
+            cpath,
+            tty_chars=np.concatenate(self._chars),
+            tty_colors=np.concatenate(self._colors),
+            offsets=np.array(self._offsets, dtype=np.int64),
+            **{self._id_key: np.array(self._ids, dtype=self._id_dtype)},
+        )
+        self._results.append({"status": "ok", "path": cpath,
+                               "frames": self._offsets[-1],
+                               "games": len(self._offsets) - 1,
+                               "game_meta": self._meta, "filtered_games": 0})
+        self._paths.append(cpath)
+        self._chunk_idx += 1
+        self._chars = []; self._colors = []; self._offsets = [0]
+        self._ids = []; self._meta = []; self._chunk_frames = 0
+
+    def finish(self, filtered_games: int = 0) -> list[dict]:
+        self._flush()
+        if not self._results:
+            return [{"status": "filter", "filtered_games": filtered_games}]
+        self._results[0]["filtered_games"] += filtered_games
+        if len(self._paths) == 1:
+            os.rename(self._paths[0], self._output_path)
+            self._results[0]["path"] = self._output_path
+        return self._results
+
+
 def _convert_player(task: tuple) -> list[dict]:
     """Decode all games for one nld-nao player into per-player npz chunk(s).
-
-    Each bz2 file is one game.  Valid games are streamed and flushed into npz
-    chunks of at most _NAO_TOP10_MAX_FRAMES frames each.  Single-chunk players
-    keep the original player.npz naming; multi-chunk players use player_0.npz,
-    player_1.npz, … so that peak RAM is bounded by one chunk at a time (~7 GB).
 
     Uses the module-level ``_xl_by_player`` dict which workers inherit from the
     main process via fork.
     """
     input_files, output_path, ttyrec_version, min_frames, player_name = task
     xl_entries = _xl_by_player.get(player_name, [])
-    stem, ext = os.path.splitext(output_path)
 
-    # Skip check: single-chunk (stem.npz) or first multi-chunk (stem_0.npz).
-    if os.path.exists(output_path):
-        existing_paths = [output_path]
-    elif os.path.exists(f"{stem}_0{ext}"):
-        existing_paths = []
-        for i in range(100_000):
-            cpath = f"{stem}_{i}{ext}"
-            if not os.path.exists(cpath):
-                break
-            existing_paths.append(cpath)
-    else:
-        existing_paths = []
-
-    if existing_paths:
+    existing = _find_existing_chunks(output_path)
+    if existing:
         results: list[dict] = []
-        for cpath in existing_paths:
+        for cpath in existing:
             try:
                 with np.load(cpath) as f:
                     offsets = f["offsets"]
@@ -476,41 +537,10 @@ def _convert_player(task: tuple) -> list[dict]:
                              "game_meta": game_meta})
         return results
 
-    # Stream-decode: accumulate games into the current chunk; flush when full.
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-
-    chunk_idx = 0
-    chars_parts: list[np.ndarray] = []
-    colors_parts: list[np.ndarray] = []
-    offsets_list: list[int] = [0]
-    src_timestamps: list[int] = []
-    game_meta_chunk: list[dict] = []
-    chunk_frames = 0
+    writer = _ChunkWriter(output_path, "source_timestamps", np.int64)
     filtered_games = 0
     H = W = None
-    results = []
-    paths_written: list[str] = []
-
-    def _flush() -> None:
-        nonlocal chunk_idx, chars_parts, colors_parts, offsets_list
-        nonlocal src_timestamps, game_meta_chunk, chunk_frames
-        if not chars_parts:
-            return
-        cpath = f"{stem}_{chunk_idx}{ext}"
-        np.savez_compressed(
-            cpath,
-            tty_chars=np.concatenate(chars_parts),
-            tty_colors=np.concatenate(colors_parts),
-            offsets=np.array(offsets_list, dtype=np.int64),
-            source_timestamps=np.array(src_timestamps, dtype=np.int64),
-        )
-        results.append({"status": "ok", "path": cpath,
-                         "frames": offsets_list[-1], "games": len(offsets_list) - 1,
-                         "game_meta": game_meta_chunk, "filtered_games": 0})
-        paths_written.append(cpath)
-        chunk_idx += 1
-        chars_parts = []; colors_parts = []; offsets_list = [0]
-        src_timestamps = []; game_meta_chunk = []; chunk_frames = 0
 
     for bz2_path in sorted(input_files):
         file_ts = _parse_filename_ts(bz2_path)
@@ -523,33 +553,14 @@ def _convert_player(task: tuple) -> list[dict]:
             continue
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
-        if chars_parts and chunk_frames + n_frames > _NAO_TOP10_MAX_FRAMES:
-            _flush()
-        chars_parts.append(arrays["tty_chars"].astype(np.uint8))
-        colors_parts.append(
-            arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
-            if "tty_colors" in arrays
-            else np.zeros((n_frames, H, W), dtype=np.uint8)
-        )
-        chunk_frames += n_frames
-        offsets_list.append(offsets_list[-1] + n_frames)
-        src_timestamps.append(file_ts)
+        chars = arrays["tty_chars"].astype(np.uint8)
+        colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
+                  if "tty_colors" in arrays
+                  else np.zeros((n_frames, H, W), dtype=np.uint8))
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
-        game_meta_chunk.append(_game_meta_from_xlog(entry, n_frames, file_ts))
+        writer.add(chars, colors, file_ts, _game_meta_from_xlog(entry, n_frames, file_ts))
 
-    _flush()
-
-    if not results:
-        return [{"status": "filter", "filtered_games": filtered_games}]
-
-    results[0]["filtered_games"] += filtered_games
-
-    # Single-chunk players: rename stem_0.npz → stem.npz (clean naming).
-    if len(paths_written) == 1:
-        os.rename(paths_written[0], output_path)
-        results[0]["path"] = output_path
-
-    return results
+    return writer.finish(filtered_games)
 
 
 # --------------------------------------------------------------------------- #
@@ -752,32 +763,16 @@ def _discover_nld_aa_grouped(nle_data_dir: str, output_dir: str,
 def _convert_aa_group(task: tuple) -> list[dict]:
     """Decode all games in one nld-aa game dir into per-group npz chunk(s).
 
-    Each bz2 file is one complete game.  Xlogfile entries are matched via the
-    ``ttyrecname`` field so metadata is accurate for every game.  Groups with
-    more than _NAO_TOP10_MAX_FRAMES frames are split into group_0.npz,
-    group_1.npz, … to cap peak RAM to one chunk at a time.
+    Xlogfile entries are matched via the ``ttyrecname`` field so metadata is
+    accurate for every game.
     """
     bz2_files, output_path, ttyrec_version, min_frames, game_dir = task
-
     xl_by_name = _read_aa_xlogfile(game_dir)
-    stem, ext = os.path.splitext(output_path)
 
-    # Skip check: single-chunk (stem.npz) or first multi-chunk (stem_0.npz).
-    if os.path.exists(output_path):
-        existing_paths = [output_path]
-    elif os.path.exists(f"{stem}_0{ext}"):
-        existing_paths = []
-        for i in range(100_000):
-            cpath = f"{stem}_{i}{ext}"
-            if not os.path.exists(cpath):
-                break
-            existing_paths.append(cpath)
-    else:
-        existing_paths = []
-
-    if existing_paths:
+    existing = _find_existing_chunks(output_path)
+    if existing:
         results: list[dict] = []
-        for cpath in existing_paths:
+        for cpath in existing:
             try:
                 with np.load(cpath) as f:
                     offsets = f["offsets"]
@@ -799,45 +794,11 @@ def _convert_aa_group(task: tuple) -> list[dict]:
                              "game_meta": game_meta})
         return results
 
-    bz2_sorted = sorted(
-        bz2_files,
-        key=lambda p: int(os.path.basename(p).split(".")[2]),
-    )
-
+    bz2_sorted = sorted(bz2_files, key=lambda p: int(os.path.basename(p).split(".")[2]))
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-
-    chunk_idx = 0
-    chars_parts: list[np.ndarray] = []
-    colors_parts: list[np.ndarray] = []
-    offsets_list: list[int] = [0]
-    source_game_ids: list[str] = []
-    game_meta_chunk: list[dict] = []
-    chunk_frames = 0
+    writer = _ChunkWriter(output_path, "source_game_ids", "U64")
     filtered_games = 0
     H = W = None
-    results = []
-    paths_written: list[str] = []
-
-    def _flush() -> None:
-        nonlocal chunk_idx, chars_parts, colors_parts, offsets_list
-        nonlocal source_game_ids, game_meta_chunk, chunk_frames
-        if not chars_parts:
-            return
-        cpath = f"{stem}_{chunk_idx}{ext}"
-        np.savez_compressed(
-            cpath,
-            tty_chars=np.concatenate(chars_parts),
-            tty_colors=np.concatenate(colors_parts),
-            offsets=np.array(offsets_list, dtype=np.int64),
-            source_game_ids=np.array(source_game_ids, dtype="U64"),
-        )
-        results.append({"status": "ok", "path": cpath,
-                         "frames": offsets_list[-1], "games": len(offsets_list) - 1,
-                         "game_meta": game_meta_chunk, "filtered_games": 0})
-        paths_written.append(cpath)
-        chunk_idx += 1
-        chars_parts = []; colors_parts = []; offsets_list = [0]
-        source_game_ids = []; game_meta_chunk = []; chunk_frames = 0
 
     for bz2_path in bz2_sorted:
         basename = os.path.basename(bz2_path)
@@ -851,33 +812,14 @@ def _convert_aa_group(task: tuple) -> list[dict]:
             continue
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
-        if chars_parts and chunk_frames + n_frames > _NAO_TOP10_MAX_FRAMES:
-            _flush()
-        chars_parts.append(arrays["tty_chars"].astype(np.uint8))
-        colors_parts.append(
-            arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
-            if "tty_colors" in arrays
-            else np.zeros((n_frames, H, W), dtype=np.uint8)
-        )
-        chunk_frames += n_frames
-        offsets_list.append(offsets_list[-1] + n_frames)
-        source_game_ids.append(basename)
+        chars = arrays["tty_chars"].astype(np.uint8)
+        colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
+                  if "tty_colors" in arrays
+                  else np.zeros((n_frames, H, W), dtype=np.uint8))
         ts = int(entry.get("starttime", 0) or 0)
-        game_meta_chunk.append(_game_meta_from_xlog(entry, n_frames, ts))
+        writer.add(chars, colors, basename, _game_meta_from_xlog(entry, n_frames, ts))
 
-    _flush()
-
-    if not results:
-        return [{"status": "filter", "filtered_games": filtered_games}]
-
-    results[0]["filtered_games"] += filtered_games
-
-    # Single-chunk groups: rename stem_0.npz → stem.npz (clean naming).
-    if len(paths_written) == 1:
-        os.rename(paths_written[0], output_path)
-        results[0]["path"] = output_path
-
-    return results
+    return writer.finish(filtered_games)
 
 
 def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
