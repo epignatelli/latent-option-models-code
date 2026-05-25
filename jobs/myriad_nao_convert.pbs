@@ -13,7 +13,7 @@
 #$ -S /bin/bash
 #$ -l h_rt=48:0:0
 #$ -l mem=16G
-#$ -pe smp 20
+#$ -pe smp 36
 #$ -ac allow=B
 #$ -l tmpfs=50G
 #$ -N nle_convert
@@ -25,7 +25,7 @@
 # CONFIGURATION — edit before submitting
 # --------------------------------------------------------------------------- #
 DEST_BASE="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/datasets"
-WORKERS=20
+WORKERS=36
 OUTPUT_DIR="$HOME/lom/datasets"
 RAW_DIR="/dev/shm/lom_$$"
 CODE_DIR="$HOME/repos/latent-option-models-code"
