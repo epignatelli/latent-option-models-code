@@ -1004,7 +1004,13 @@ def _run_convert_rich(
 
             futures = {executor.submit(converter, t): t for t in pending}
             for fut in as_completed(futures):
-                raw_result = fut.result()
+                try:
+                    raw_result = fut.result()
+                except Exception as e:
+                    counts["error"] += 1
+                    errors.append(str(e))
+                    bar.update(1)
+                    continue
                 # Converters may return a single dict or a list of dicts (chunked).
                 result_list: list[dict] = (
                     raw_result if isinstance(raw_result, list) else [raw_result]
