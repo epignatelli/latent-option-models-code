@@ -559,6 +559,10 @@ def _convert_player(task: tuple) -> list[dict]:
     _last_wprint = time.time()
 
     for i, bz2_path in enumerate(sorted_files):
+        now = time.time()
+        if now - _last_wprint >= 30:
+            _last_wprint = now
+            print(f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {player_name}  {i+1}/{n_files}  {os.path.basename(bz2_path)}  {writer._offsets[-1]:,} fr so far", flush=True)
         file_ts = _parse_filename_ts(bz2_path)
         try:
             arrays, n_frames = _decode([bz2_path], ttyrec_version)
@@ -575,10 +579,6 @@ def _convert_player(task: tuple) -> list[dict]:
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
         writer.add(chars, colors, file_ts, _game_meta_from_xlog(entry, n_frames, file_ts))
-        now = time.time()
-        if now - _last_wprint >= 30:
-            _last_wprint = now
-            print(f"  [{time.strftime('%H:%M:%S')}] [{pid}]  ...   {player_name}  {i+1}/{n_files} files  {writer._offsets[-1]:,} fr", flush=True)
 
     return writer.finish(filtered_games)
 
@@ -826,6 +826,10 @@ def _convert_aa_group(task: tuple) -> list[dict]:
     _last_wprint = time.time()
 
     for i, bz2_path in enumerate(bz2_sorted):
+        now = time.time()
+        if now - _last_wprint >= 30:
+            _last_wprint = now
+            print(f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {group_name}  {i+1}/{n_files}  {os.path.basename(bz2_path)}  {writer._offsets[-1]:,} fr so far", flush=True)
         basename = os.path.basename(bz2_path)
         entry = xl_by_name.get(basename, {})
         try:
@@ -843,10 +847,6 @@ def _convert_aa_group(task: tuple) -> list[dict]:
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
         ts = int(entry.get("starttime", 0) or 0)
         writer.add(chars, colors, basename, _game_meta_from_xlog(entry, n_frames, ts))
-        now = time.time()
-        if now - _last_wprint >= 30:
-            _last_wprint = now
-            print(f"  [{time.strftime('%H:%M:%S')}] [{pid}]  ...   {group_name}  {i+1}/{n_files} files  {writer._offsets[-1]:,} fr", flush=True)
 
     return writer.finish(filtered_games)
 
