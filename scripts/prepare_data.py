@@ -494,6 +494,8 @@ class _ChunkWriter:
             self._chars = []; self._colors = []; self._offsets = [0]
             self._ids = []; self._meta = []; self._chunk_frames = 0
             return
+        print(f"  [{time.strftime('%H:%M:%S')}] [{os.getpid()}] CHUNK  {os.path.basename(cpath)}"
+              f"  {self._offsets[-1]:,} fr  {len(self._offsets)-1} g", flush=True)
         self._results.append({"status": "ok", "path": cpath,
                                "frames": self._offsets[-1],
                                "games": len(self._offsets) - 1,
@@ -550,8 +552,13 @@ def _convert_player(task: tuple) -> list[dict]:
     writer = _ChunkWriter(output_path, "source_timestamps", np.int64)
     filtered_games = 0
     H = W = None
+    sorted_files = sorted(input_files)
+    n_files = len(sorted_files)
+    pid = os.getpid()
+    print(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {player_name}  {n_files} files", flush=True)
+    _last_wprint = time.time()
 
-    for bz2_path in sorted(input_files):
+    for i, bz2_path in enumerate(sorted_files):
         file_ts = _parse_filename_ts(bz2_path)
         try:
             arrays, n_frames = _decode([bz2_path], ttyrec_version)
@@ -568,6 +575,10 @@ def _convert_player(task: tuple) -> list[dict]:
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
         writer.add(chars, colors, file_ts, _game_meta_from_xlog(entry, n_frames, file_ts))
+        now = time.time()
+        if now - _last_wprint >= 30:
+            _last_wprint = now
+            print(f"  [{time.strftime('%H:%M:%S')}] [{pid}]  ...   {player_name}  {i+1}/{n_files} files  {writer._offsets[-1]:,} fr", flush=True)
 
     return writer.finish(filtered_games)
 
@@ -808,8 +819,13 @@ def _convert_aa_group(task: tuple) -> list[dict]:
     writer = _ChunkWriter(output_path, "source_game_ids", "U64")
     filtered_games = 0
     H = W = None
+    group_name = os.path.basename(game_dir)
+    n_files = len(bz2_sorted)
+    pid = os.getpid()
+    print(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {group_name}  {n_files} files", flush=True)
+    _last_wprint = time.time()
 
-    for bz2_path in bz2_sorted:
+    for i, bz2_path in enumerate(bz2_sorted):
         basename = os.path.basename(bz2_path)
         entry = xl_by_name.get(basename, {})
         try:
@@ -827,6 +843,10 @@ def _convert_aa_group(task: tuple) -> list[dict]:
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
         ts = int(entry.get("starttime", 0) or 0)
         writer.add(chars, colors, basename, _game_meta_from_xlog(entry, n_frames, ts))
+        now = time.time()
+        if now - _last_wprint >= 30:
+            _last_wprint = now
+            print(f"  [{time.strftime('%H:%M:%S')}] [{pid}]  ...   {group_name}  {i+1}/{n_files} files  {writer._offsets[-1]:,} fr", flush=True)
 
     return writer.finish(filtered_games)
 
