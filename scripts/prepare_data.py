@@ -783,6 +783,7 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
             tty_colors=np.concatenate(colors_parts),
             offsets=np.array(offsets_list, dtype=np.int64),
         )
+        del chars_parts, colors_parts
         results.append({
             "status": "ok",
             "path": chunk_path,
@@ -913,7 +914,9 @@ def _convert_aa_group(task: tuple) -> list[dict]:
         writer.add(chars, colors, basename, _game_meta_from_xlog(entry, n_frames, ts))
         _worker_progress(group_name, i + 1, n_files, writer._offsets[-1])
 
-    return writer.finish(filtered_games)
+    results = writer.finish(filtered_games)
+    del writer
+    return results
 
 
 def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
@@ -1162,7 +1165,7 @@ def _run_convert_rich(
         _bar_thread = threading.Thread(target=_bar_manager, daemon=True)
         _bar_thread.start()
 
-    with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=1) as executor:  # type: ignore[call-arg]
+    with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=8) as executor:  # type: ignore[call-arg]
         with tqdm(total=total_files, unit="file", desc="  total", dynamic_ncols=True,
                   smoothing=0.1, position=0, file=sys.stdout) as bar:
 
