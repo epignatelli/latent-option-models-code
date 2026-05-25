@@ -1,22 +1,27 @@
 #!/bin/bash -l
-# SGE job: full nld-aa conversion with profiling on Myriad.
+# SGE job: profile the nld-aa conversion pipeline with py-spy.
 #
-# Runs the complete nld-aa dataset with --profile so each worker emits
-# per-step RSS and timing.  Results are rsynced to bologna.
-# Output lands in logs/profile.out.
+# Runs 4 workers over 50 groups under py-spy --subprocesses, producing:
+#   logs/profile.svg        — flame graph (open in browser)
+#   logs/profile_report.txt — top-30 functions by cumulative time (pstats)
+#
+# Both files are rsynced to bologna after the job completes.
 #
 # Usage: qsub jobs/myriad_profile.pbs
+#
+# Assumes nld-aa is already downloaded and extracted on Myriad
+# (re-uses data from a previous run).
 
 # --------------------------------------------------------------------------- #
 # SGE directives
 # --------------------------------------------------------------------------- #
 #$ -S /bin/bash
-#$ -l h_rt=48:0:0
-#$ -l mem=40G
-#$ -pe smp 36
+#$ -l h_rt=2:0:0
+#$ -l mem=20G
+#$ -pe smp 4
 #$ -ac allow=B
-#$ -l tmpfs=50G
-#$ -N lom_aa_profile
+#$ -l tmpfs=10G
+#$ -N lom_profile
 #$ -o logs/profile.out
 #$ -j y
 #$ -cwd
@@ -24,11 +29,13 @@
 # --------------------------------------------------------------------------- #
 # CONFIGURATION
 # --------------------------------------------------------------------------- #
-DEST="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/datasets/nle/aa"
-WORKERS=36
-OUTPUT_DIR="$HOME/lom/datasets"
-RAW_DIR="/dev/shm/lom_aa_$$"
+DEST_LOGS="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/profile"
+WORKERS=4
+N_GROUPS=50
+RAW_DIR="$HOME/lom/datasets"         # nld-aa already extracted here
+OUTPUT_DIR="/dev/shm/lom_profile_$$"
 CODE_DIR="$HOME/repos/latent-option-models-code"
+REPORT_DIR="$CODE_DIR/logs"
 
 # --------------------------------------------------------------------------- #
 # Environment
@@ -43,60 +50,70 @@ if ! conda env list | grep -q "^lom-convert "; then
     conda run -n lom-convert pip install "tyro>=0.8" "nle>=0.9"
 fi
 conda activate lom-convert
+pip install -q py-spy
 
-mkdir -p "$OUTPUT_DIR" logs
-if mkdir -p "$RAW_DIR" && touch "$RAW_DIR/.write_test" 2>/dev/null; then
-    rm -f "$RAW_DIR/.write_test"
-    RAW_DIR_ACTIVE="$RAW_DIR"
-    echo "RAW_DIR=$RAW_DIR_ACTIVE (local /dev/shm)"
-else
-    RAW_DIR_ACTIVE="$OUTPUT_DIR"
-    echo "WARNING: cannot write to $RAW_DIR — falling back to $OUTPUT_DIR (NFS)"
-fi
+mkdir -p "$OUTPUT_DIR" "$REPORT_DIR"
 
-echo "[$(date)] host=$(hostname)  workers=$WORKERS"
+echo "[$(date)] host=$(hostname)  workers=$WORKERS  groups=$N_GROUPS"
+echo "[$(date)] raw=$RAW_DIR  output=$OUTPUT_DIR"
 echo ""
 
-# Background monitor — logs CPU/RAM/net every 60s to logs/monitor_aa.log
-(while true; do
-    echo "=== $(date) ==="
-    free -h
-    top -b -n 1 -u uceeepi | grep -E "top|PID|python"
-    awk 'NR>2 {printf "%-10s rx:%s tx:%s\n",$1,$2,$10}' /proc/net/dev
-    echo ""
-    sleep 60
-done) >> logs/monitor_aa.log 2>&1 &
-MONITOR_PID=$!
-trap "kill $MONITOR_PID 2>/dev/null" EXIT
-
 # --------------------------------------------------------------------------- #
-# Convert
+# py-spy flame graph
+# Samples all subprocesses (worker processes) at 100 Hz.
+# Output: logs/profile.svg — open in any browser.
 # --------------------------------------------------------------------------- #
-NPZ_DIR="$RAW_DIR_ACTIVE/nle/aa"
-
-echo "[$(date)] [nld-aa] Starting..."
-python -u "$CODE_DIR/scripts/prepare_data.py" nld-aa \
-    --output-dir "$RAW_DIR_ACTIVE" \
-    --workers    "$WORKERS" \
-    --skip-db
-
-if [ -s "$NPZ_DIR/errors.txt" ]; then
-    echo "[$(date)] [nld-aa] Retrying $(wc -l < "$NPZ_DIR/errors.txt") failures at 10 workers..."
+echo "[$(date)] Running py-spy (flame graph) ..."
+py-spy record \
+    --subprocesses \
+    --rate 100 \
+    --output "$REPORT_DIR/profile.svg" \
+    -- \
     python -u "$CODE_DIR/scripts/prepare_data.py" nld-aa \
-        --output-dir "$RAW_DIR_ACTIVE" \
-        --workers    10 \
+        --raw-dir     "$RAW_DIR" \
+        --output-dir  "$OUTPUT_DIR" \
+        --workers     "$WORKERS" \
+        --max-groups  "$N_GROUPS" \
         --skip-download --skip-extract --skip-db
-fi
+
+echo "[$(date)] Flame graph written to $REPORT_DIR/profile.svg"
 
 # --------------------------------------------------------------------------- #
-# Rsync
+# cProfile text report (single worker so the main process captures everything)
+# Output: logs/profile_report.txt — top functions by cumulative time.
 # --------------------------------------------------------------------------- #
-echo "[$(date)] [nld-aa] Rsyncing to $DEST ..."
-rsync -avz --progress "$NPZ_DIR/" "$DEST/"
+echo ""
+echo "[$(date)] Running cProfile (text report, 1 worker) ..."
+python -u -m cProfile -o "$REPORT_DIR/profile.pstats" \
+    "$CODE_DIR/scripts/prepare_data.py" nld-aa \
+        --raw-dir     "$RAW_DIR" \
+        --output-dir  "$OUTPUT_DIR" \
+        --workers     1 \
+        --max-groups  10 \
+        --skip-download --skip-extract --skip-db
+
+python -c "
+import pstats, sys
+p = pstats.Stats('$REPORT_DIR/profile.pstats', stream=open('$REPORT_DIR/profile_report.txt', 'w'))
+p.sort_stats('cumulative')
+p.print_stats(50)
+p.sort_stats('tottime')
+p.print_stats(50)
+"
+echo "[$(date)] Text report written to $REPORT_DIR/profile_report.txt"
+
+# --------------------------------------------------------------------------- #
+# Rsync reports to bologna
+# --------------------------------------------------------------------------- #
+echo ""
+echo "[$(date)] Rsyncing reports to $DEST_LOGS ..."
+rsync -avz \
+    "$REPORT_DIR/profile.svg" \
+    "$REPORT_DIR/profile_report.txt" \
+    "$DEST_LOGS/"
 
 # --------------------------------------------------------------------------- #
 # Cleanup
 # --------------------------------------------------------------------------- #
-echo "[$(date)] [nld-aa] Cleaning up $RAW_DIR ..."
-rm -rf "${RAW_DIR:?}"
+rm -rf "$OUTPUT_DIR"
 echo "[$(date)] Done."
