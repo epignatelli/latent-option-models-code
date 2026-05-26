@@ -449,16 +449,33 @@ def _decode(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
 
 
 def _decode_with_timeout(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
-    """Run _decode with a SIGALRM watchdog.  Raises TimeoutError if NLE hangs."""
-    def _alarm(signum, frame):
+    """Run _decode in a daemon thread; raises TimeoutError if NLE hangs past 300s.
+
+    SIGALRM is unreliable here: it fires once, interrupts the blocking syscall
+    with EINTR, but the NLE C code retries in a loop so the process hangs forever.
+    threading.Event.wait(timeout) uses sem_timedwait internally and returns after
+    300s regardless of what the C code is doing.  The leaked daemon thread is
+    killed when the worker process is eventually replaced by maxtasksperchild.
+    """
+    result_box: list = [None]
+    error_box:  list = [None]
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            result_box[0] = _decode(ttyrec_files, ttyrec_version)
+        except Exception as exc:
+            error_box[0] = exc
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    if not done.wait(300):
         raise TimeoutError(f"_decode timed out after 300s on {ttyrec_files[0]}")
-    old = signal.signal(signal.SIGALRM, _alarm)
-    signal.alarm(300)
-    try:
-        return _decode(ttyrec_files, ttyrec_version)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old)
+    if error_box[0] is not None:
+        raise error_box[0]
+    return result_box[0]
 
 
 def _find_existing_chunks(output_path: str) -> list[str]:
