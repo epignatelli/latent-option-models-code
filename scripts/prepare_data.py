@@ -212,7 +212,7 @@ def _download(url: str, dest: str) -> None:
         with urllib.request.urlopen(url) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             with tqdm(total=total or None, unit="B", unit_scale=True,
-                      desc=f"  {name}", file=sys.stdout, dynamic_ncols=True) as bar:
+                      desc=f"  {name}", file=sys.stdout, dynamic_ncols=True, smoothing=0) as bar:
                 with open(tmp, "wb") as fh:
                     while True:
                         chunk = resp.read(1 << 20)  # 1 MB
@@ -238,7 +238,7 @@ def _parallel_download(base_url: str, filenames: list[str], dest_dir: str, worke
             pool.submit(_download, base_url + name, os.path.join(dest_dir, name)): name
             for name in pending
         }
-        with tqdm(total=len(futures), unit="file", file=sys.stdout) as bar:
+        with tqdm(total=len(futures), unit="file", file=sys.stdout, smoothing=0) as bar:
             for future in as_completed(futures):
                 name = futures[future]
                 try:
@@ -265,7 +265,7 @@ def _extract_zips(filenames: list[str], zip_dir: str, dest_dir: str, workers: in
             for member in zf.infolist():
                 if member.is_dir():
                     os.makedirs(os.path.join(dest_dir, member.filename), exist_ok=True)
-    with tqdm(total=len(filenames), unit="zip", file=sys.stdout) as bar:
+    with tqdm(total=len(filenames), unit="zip", file=sys.stdout, smoothing=0) as bar:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             def _do_zip(t: tuple) -> None:
                 with zipfile.ZipFile(t[0], "r") as zf:
@@ -287,7 +287,7 @@ def _extract_tar(tar_path: str, dest_dir: str) -> None:
     with tarfile.open(tar_path, "r:*") as tf:
         members = tf.getmembers()
         total = sum(m.size for m in members)
-        with tqdm(total=total, unit="B", unit_scale=True, desc=os.path.basename(tar_path), file=sys.stdout) as bar:
+        with tqdm(total=total, unit="B", unit_scale=True, desc=os.path.basename(tar_path), file=sys.stdout, smoothing=0) as bar:
             for member in members:
                 tf.extract(member, dest_dir)
                 bar.update(member.size)
@@ -1067,7 +1067,7 @@ def _run_convert_rich(
                         total=total_t, initial=done,
                         desc=f"  {name[:20]}", position=slot,
                         leave=False, unit="f", file=sys.stdout,
-                        ncols=120, smoothing=0.1, mininterval=60.0,
+                        ncols=120, smoothing=0, mininterval=60.0,
                     )
                 b = _wbars[name]
                 delta = done - b.n
@@ -1106,7 +1106,7 @@ def _run_convert_rich(
         result_iter = pool.imap_unordered(_convert_wrapper, pending)
 
         with tqdm(total=total_files, unit="file", desc="  total",
-                  ncols=120, smoothing=0.1, position=0,
+                  ncols=120, smoothing=0, position=0,
                   file=sys.stdout, mininterval=5.0) as bar:
 
             while True:
@@ -1300,7 +1300,7 @@ def _build_rich_index_from_scan(
     errors = 0
 
     with mp.Pool(workers) as pool:
-        with tqdm(total=total, unit="player", desc="  index", dynamic_ncols=True, file=sys.stdout) as bar:
+        with tqdm(total=total, unit="player", desc="  index", dynamic_ncols=True, file=sys.stdout, smoothing=0) as bar:
             for result in pool.imap_unordered(_index_worker_rich, npz_files):
                 if "error" in result:
                     errors += 1
