@@ -129,7 +129,7 @@ _GAME_META_DEFAULT: dict = {
 
 # Maximum frames per nao-top10 chunk npz.  Players with more frames are split
 # into multiple files so no single npz is too large to load during training.
-_NAO_TOP10_MAX_FRAMES = 2_000_000
+_MAX_FRAMES_PER_CHUNK = 2_000_000
 
 
 # --------------------------------------------------------------------------- #
@@ -481,7 +481,7 @@ def _find_existing_chunks(output_path: str) -> list[str]:
 
 
 class _ChunkWriter:
-    """Accumulates decoded frames and flushes npz chunks at _NAO_TOP10_MAX_FRAMES.
+    """Accumulates decoded frames and flushes npz chunks at _MAX_FRAMES_PER_CHUNK.
 
     Callers feed individual games via ``add()``, then call ``finish()`` to flush
     the final chunk and collect results.  A single-chunk output is renamed from
@@ -505,7 +505,7 @@ class _ChunkWriter:
 
     def add(self, chars: np.ndarray, colors: np.ndarray, id_val, game_meta: dict) -> None:
         n = chars.shape[0]
-        if self._chars and self._chunk_frames + n > _NAO_TOP10_MAX_FRAMES:
+        if self._chars and self._chunk_frames + n > _MAX_FRAMES_PER_CHUNK:
             self._flush()
         self._chars.append(chars)
         self._colors.append(colors)
@@ -681,7 +681,7 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
     """Merge all nao-top10 sessions for one player into per-player npz chunk(s).
 
     No xlogfile is available for this dataset; game_meta contains only frame
-    counts.  If the total frame count exceeds _NAO_TOP10_MAX_FRAMES the games
+    counts.  If the total frame count exceeds _MAX_FRAMES_PER_CHUNK the games
     are split into multiple contiguous chunks, each written as a separate npz
     (e.g. Luxidream_0.npz, Luxidream_1.npz …).  Single-chunk players keep the
     original Luxidream.npz naming (no suffix).
@@ -714,12 +714,12 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
     if not valid:
         return [{"status": "filter"}]
 
-    # Group valid games into chunks of at most _NAO_TOP10_MAX_FRAMES frames each.
+    # Group valid games into chunks of at most _MAX_FRAMES_PER_CHUNK frames each.
     chunks: list[list[int]] = []   # each inner list is indices into `valid`
     current_chunk: list[int] = []
     current_frames = 0
     for idx, (_, n_frames) in enumerate(valid):
-        if current_chunk and current_frames + n_frames > _NAO_TOP10_MAX_FRAMES:
+        if current_chunk and current_frames + n_frames > _MAX_FRAMES_PER_CHUNK:
             chunks.append(current_chunk)
             current_chunk = []
             current_frames = 0
