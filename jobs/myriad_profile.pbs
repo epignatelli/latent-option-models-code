@@ -19,7 +19,7 @@
 #$ -S /bin/bash
 #$ -l h_rt=12:0:0
 #$ -l mem=40G
-#$ -pe smp 28
+#$ -pe smp 32
 #$ -ac allow=B
 #$ -l tmpfs=20G
 #$ -N lom_profile
