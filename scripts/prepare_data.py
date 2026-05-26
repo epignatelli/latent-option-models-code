@@ -185,6 +185,8 @@ class BaseArgs:
     """Skip building / updating index.npz."""
     max_groups: int = 0
     """Maximum number of groups (players/game-dirs) to convert. 0 = no limit (process all)."""
+    log_dir: str = "logs"
+    """Directory for debug.log and workers.log. Defaults to 'logs/' relative to cwd."""
 
 
 @dataclass
@@ -1592,9 +1594,10 @@ def _run_nao_top10(args: BaseArgs) -> None:
     index_path  = os.path.join(npz_dir, "index.npz")
 
     os.makedirs(npz_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
     _PROGRESS_QUEUE = mp.Queue()
-    _WORKER_LOG_PATH = os.path.join(npz_dir, "workers.log")
-    _DEBUG_LOG_PATH  = os.path.join(npz_dir, "debug.log")
+    _WORKER_LOG_PATH = os.path.join(args.log_dir, "workers-nao-top10.log")
+    _DEBUG_LOG_PATH  = os.path.join(args.log_dir, "debug-nao-top10.log")
 
     print("\n─── nao-top10 ───────────────────────────────────────────────────", flush=True)
     print(f"[log]      debug → {_DEBUG_LOG_PATH}", flush=True)
@@ -1657,9 +1660,10 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
     index_path  = os.path.join(npz_dir, "index.npz")
 
     os.makedirs(npz_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
     _PROGRESS_QUEUE = mp.Queue()
-    _WORKER_LOG_PATH = os.path.join(npz_dir, "workers.log")
-    _DEBUG_LOG_PATH  = os.path.join(npz_dir, "debug.log")
+    _WORKER_LOG_PATH = os.path.join(args.log_dir, f"workers-{dataset}.log")
+    _DEBUG_LOG_PATH  = os.path.join(args.log_dir, f"debug-{dataset}.log")
     print(f"[log]      debug → {_DEBUG_LOG_PATH}", flush=True)
 
     filenames  = _nld_aa_zips() if dataset == "nld-aa" else _nld_nao_zips()

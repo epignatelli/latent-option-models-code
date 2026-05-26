@@ -78,6 +78,7 @@ run_dataset() {
     python -u "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
         --raw-dir    "$RAW_DIR" \
         --output-dir "$OUTPUT_DIR" \
+        --log-dir    "$CODE_DIR/logs" \
         --workers    "$WORKERS" \
         $skip_db_flag
 
