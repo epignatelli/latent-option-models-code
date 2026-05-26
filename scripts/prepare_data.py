@@ -59,16 +59,18 @@ import logging
 import multiprocessing as mp
 import os
 import re
+import signal
 import sys
 import tarfile
 import threading
 import time
+import traceback
 
 import psutil
 import urllib.request
 import zipfile
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Union
@@ -92,6 +94,9 @@ _NAO_TOP10_URL = "https://storage.googleapis.com/dm_nethack/nao_top10.tar"
 _xl_by_player: dict[str, list[dict]] = {}
 _PROGRESS_QUEUE: "mp.Queue | None" = None
 _WORKER_LOG_PATH: str = ""
+_DEBUG_LOG_PATH:  str = ""
+_DECODE_TIMEOUT_S: int = 300
+_POOL_CONVERTER = None  # set in _run_nld before Pool creation; inherited via fork
 
 
 def _worker_log(msg: str) -> None:
@@ -106,11 +111,28 @@ def _worker_log(msg: str) -> None:
         print(msg, flush=True)
 
 
-def _worker_progress(name: str, done: int, total: int, frames: int) -> None:
+def _dbg(msg: str) -> None:
+    """Write one line to the debug log. Called from both main and worker processes."""
+    if _DEBUG_LOG_PATH:
+        try:
+            with open(_DEBUG_LOG_PATH, "a") as _f:
+                # Single write → O_APPEND atomicity on Linux; safe for concurrent workers.
+                _f.write(f"[{time.strftime('%H:%M:%S')}][{os.getpid()}] {msg}\n")
+        except OSError:
+            pass
+
+
+def _worker_progress(
+    name: str, done: int, total: int, frames: int,
+    ok: int = 0, filter_g: int = 0, err: int = 0, skip: int = 0,
+    current_file: str = "",
+) -> None:
     """Send a lightweight progress update to the main process bar manager."""
     if _PROGRESS_QUEUE is not None:
         try:
-            _PROGRESS_QUEUE.put_nowait((name, done, total, frames))
+            _PROGRESS_QUEUE.put_nowait(
+                (name, done, total, frames, ok, filter_g, err, skip, current_file)
+            )
         except Exception:
             pass
 
@@ -466,8 +488,24 @@ def _decode(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
     }, len(tty_chars)
 
 
+def _decode_with_timeout(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
+    """Run _decode with a SIGALRM watchdog.  Raises TimeoutError if NLE hangs."""
+    def _alarm(signum, frame):
+        raise TimeoutError(
+            f"_decode timed out after {_DECODE_TIMEOUT_S}s on {ttyrec_files[0]}"
+        )
+    old = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(_DECODE_TIMEOUT_S)
+    try:
+        return _decode(ttyrec_files, ttyrec_version)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
 def _find_existing_chunks(output_path: str) -> list[str]:
     """Return existing chunk paths for output_path, or [] if none exist."""
+    _dbg(f"FIND_CHUNKS {output_path}")
     stem, ext = os.path.splitext(output_path)
     if os.path.exists(output_path):
         return [output_path]
@@ -518,15 +556,19 @@ class _ChunkWriter:
         if not self._chars:
             return
         cpath = f"{self._stem}_{self._chunk_idx}{self._ext}"
+        _dbg(f"CONCAT_START {os.path.basename(cpath)} arrays={len(self._chars)}")
         try:
             chars  = np.concatenate(self._chars)
             colors = np.concatenate(self._colors)
+            _dbg(f"SAVEZ_START {os.path.basename(cpath)} shape={chars.shape}")
             np.savez_compressed(
                 cpath, tty_chars=chars, tty_colors=colors,
                 offsets=np.array(self._offsets, dtype=np.int64),
                 **{self._id_key: np.array(self._ids, dtype=self._id_dtype)},
             )
+            _dbg(f"SAVEZ_END {os.path.basename(cpath)}")
         except Exception as exc:
+            _dbg(f"FLUSH_ERROR {os.path.basename(cpath)}: {exc}")
             self._results.append({"status": "error", "path": cpath,
                                    "error": f"flush failed ({self._offsets[-1]} frames): {exc}"})
             self._paths.append(cpath)
@@ -579,11 +621,13 @@ def _convert_player(task: tuple) -> list[dict]:
     if existing:
         results: list[dict] = []
         for cpath in existing:
+            _dbg(f"LOAD_EXISTING {cpath}")
             try:
                 with np.load(cpath) as f:
                     offsets = f["offsets"]
                     src_ts = f["source_timestamps"] if "source_timestamps" in f else None
             except Exception as exc:
+                _dbg(f"LOAD_EXISTING_ERROR {cpath}: {exc}")
                 return [{"status": "error", "path": cpath,
                          "msg": f"failed to read {cpath}: {exc}"}]
             n_games = len(offsets) - 1
@@ -598,34 +642,63 @@ def _convert_player(task: tuple) -> list[dict]:
                              "game_meta": game_meta})
         return results
 
+    _dbg(f"MAKEDIRS {os.path.dirname(output_path) or '.'}")
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     writer = _ChunkWriter(output_path, "source_timestamps", np.int64)
     filtered_games = 0
+    w_ok = w_filter = w_err = 0
     H = W = None
     sorted_files = sorted(input_files)
     n_files = len(sorted_files)
     pid = os.getpid()
     _worker_log(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {player_name}  {n_files} files")
+    _dbg(f"TASK_START {player_name} n_files={n_files} output={output_path}")
     _worker_progress(player_name, 0, n_files, 0)
     _last_wprint = time.time()
+    _last_progress = time.time()
 
     for i, bz2_path in enumerate(sorted_files):
+        current_file = os.path.basename(bz2_path)
         now = time.time()
+
         if now - _last_wprint >= 30:
             _last_wprint = now
             _worker_log(
                 f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {player_name}"
-                f"  {i+1}/{n_files}  {os.path.basename(bz2_path)}"
+                f"  {i+1}/{n_files}  {current_file}"
                 f"  {writer._offsets[-1]:,} fr so far"
             )
+
+        _dbg(f"OPEN_BZ2 {bz2_path}")
         file_ts = _parse_filename_ts(bz2_path)
+
+        _dbg(f"DECODE_START {player_name} [{i+1}/{n_files}] {current_file}")
         try:
-            arrays, n_frames = _decode([bz2_path], ttyrec_version)
-        except Exception:
+            arrays, n_frames = _decode_with_timeout([bz2_path], ttyrec_version)
+        except TimeoutError as exc:
+            w_err += 1
+            _dbg(f"DECODE_TIMEOUT {player_name} [{i+1}/{n_files}] {current_file}: {exc}")
+            _worker_progress(player_name, i + 1, n_files, writer._offsets[-1],
+                             w_ok, w_filter, w_err, 0, current_file)
             continue
+        except Exception as exc:
+            w_err += 1
+            _dbg(f"DECODE_ERROR {player_name} [{i+1}/{n_files}] {current_file}: {exc}")
+            _worker_progress(player_name, i + 1, n_files, writer._offsets[-1],
+                             w_ok, w_filter, w_err, 0, current_file)
+            continue
+
+        _dbg(f"DECODE_END {player_name} [{i+1}/{n_files}] {current_file} n_frames={n_frames}")
+
         if not arrays or n_frames < min_frames:
+            w_filter += 1
             filtered_games += 1
+            if now - _last_progress >= 5.0:
+                _last_progress = now
+                _worker_progress(player_name, i + 1, n_files, writer._offsets[-1],
+                                 w_ok, w_filter, w_err, 0, current_file)
             continue
+
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
         chars = arrays["tty_chars"].astype(np.uint8)
@@ -635,9 +708,17 @@ def _convert_player(task: tuple) -> list[dict]:
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
         entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
         writer.add(chars, colors, file_ts, _game_meta_from_xlog(entry, n_frames, file_ts))
-        _worker_progress(player_name, i + 1, n_files, writer._offsets[-1])
+        w_ok += 1
 
-    return writer.finish(filtered_games)
+        if now - _last_progress >= 5.0:
+            _last_progress = now
+            _worker_progress(player_name, i + 1, n_files, writer._offsets[-1],
+                             w_ok, w_filter, w_err, 0, current_file)
+
+    _dbg(f"TASK_FINISH {player_name} w_ok={w_ok} w_filter={w_filter} w_err={w_err}")
+    results = writer.finish(filtered_games)
+    del writer
+    return results
 
 
 # --------------------------------------------------------------------------- #
@@ -797,8 +878,10 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
 
 def _read_aa_xlogfile(game_dir: str) -> dict[str, dict]:
     """Return mapping ttyrecname → xlogfile entry for all games in game_dir."""
+    _dbg(f"XLOG_LISTDIR {game_dir}")
     for fname in os.listdir(game_dir):
         if fname.endswith(".xlogfile"):
+            _dbg(f"XLOG_OPEN {os.path.join(game_dir, fname)}")
             result: dict[str, dict] = {}
             with open(os.path.join(game_dir, fname), "r", errors="replace") as fh:
                 for line in fh:
@@ -806,6 +889,7 @@ def _read_aa_xlogfile(game_dir: str) -> dict[str, dict]:
                     key = entry.get("ttyrecname", "")
                     if key:
                         result[key] = entry
+            _dbg(f"XLOG_DONE {fname} entries={len(result)}")
             return result
     return {}
 
@@ -874,35 +958,63 @@ def _convert_aa_group(task: tuple) -> list[dict]:
         return results
 
     bz2_sorted = sorted(bz2_files, key=lambda p: int(os.path.basename(p).split(".")[2]))
+    _dbg(f"MAKEDIRS {os.path.dirname(output_path) or '.'}")
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     writer = _ChunkWriter(output_path, "source_game_ids", "U64")
     filtered_games = 0
+    w_ok = w_filter = w_err = 0
     H = W = None
     group_name = os.path.basename(game_dir)
     n_files = len(bz2_sorted)
     pid = os.getpid()
     _worker_log(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {group_name}  {n_files} files")
+    _dbg(f"TASK_START {group_name} n_files={n_files} output={output_path}")
     _worker_progress(group_name, 0, n_files, 0)
     _last_wprint = time.time()
+    _last_progress = time.time()
 
     for i, bz2_path in enumerate(bz2_sorted):
+        current_file = os.path.basename(bz2_path)
         now = time.time()
+
         if now - _last_wprint >= 30:
             _last_wprint = now
             _worker_log(
                 f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {group_name}"
-                f"  {i+1}/{n_files}  {os.path.basename(bz2_path)}"
+                f"  {i+1}/{n_files}  {current_file}"
                 f"  {writer._offsets[-1]:,} fr so far"
             )
-        basename = os.path.basename(bz2_path)
-        entry = xl_by_name.get(basename, {})
+
+        _dbg(f"OPEN_BZ2 {bz2_path}")
+        entry = xl_by_name.get(current_file, {})
+
+        _dbg(f"DECODE_START {group_name} [{i+1}/{n_files}] {current_file}")
         try:
-            arrays, n_frames = _decode([bz2_path], ttyrec_version)
-        except Exception:
+            arrays, n_frames = _decode_with_timeout([bz2_path], ttyrec_version)
+        except TimeoutError as exc:
+            w_err += 1
+            _dbg(f"DECODE_TIMEOUT {group_name} [{i+1}/{n_files}] {current_file}: {exc}")
+            _worker_progress(group_name, i + 1, n_files, writer._offsets[-1],
+                             w_ok, w_filter, w_err, 0, current_file)
             continue
+        except Exception as exc:
+            w_err += 1
+            _dbg(f"DECODE_ERROR {group_name} [{i+1}/{n_files}] {current_file}: {exc}")
+            _worker_progress(group_name, i + 1, n_files, writer._offsets[-1],
+                             w_ok, w_filter, w_err, 0, current_file)
+            continue
+
+        _dbg(f"DECODE_END {group_name} [{i+1}/{n_files}] {current_file} n_frames={n_frames}")
+
         if not arrays or n_frames < min_frames:
+            w_filter += 1
             filtered_games += 1
+            if now - _last_progress >= 5.0:
+                _last_progress = now
+                _worker_progress(group_name, i + 1, n_files, writer._offsets[-1],
+                                 w_ok, w_filter, w_err, 0, current_file)
             continue
+
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
         chars = arrays["tty_chars"].astype(np.uint8)
@@ -911,9 +1023,15 @@ def _convert_aa_group(task: tuple) -> list[dict]:
                   if "tty_colors" in arrays
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
         ts = int(entry.get("starttime", 0) or 0)
-        writer.add(chars, colors, basename, _game_meta_from_xlog(entry, n_frames, ts))
-        _worker_progress(group_name, i + 1, n_files, writer._offsets[-1])
+        writer.add(chars, colors, current_file, _game_meta_from_xlog(entry, n_frames, ts))
+        w_ok += 1
 
+        if now - _last_progress >= 5.0:
+            _last_progress = now
+            _worker_progress(group_name, i + 1, n_files, writer._offsets[-1],
+                             w_ok, w_filter, w_err, 0, current_file)
+
+    _dbg(f"TASK_FINISH {group_name} w_ok={w_ok} w_filter={w_filter} w_err={w_err}")
     results = writer.finish(filtered_games)
     del writer
     return results
@@ -1052,6 +1170,58 @@ def _load_rich_accum(index_path: str) -> tuple[dict, set[str]]:
 # --- Conversion runners ----------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
+def _convert_wrapper(task: tuple) -> tuple:
+    """Module-level wrapper so imap_unordered can pickle it.
+
+    Returns (name, n_files, elapsed_s, result_list, exc_str_or_None).
+    exc_str is the formatted traceback if the converter raised; None on success.
+    """
+    t0 = time.monotonic()
+    name = os.path.splitext(os.path.basename(task[1]))[0]
+    n_files = len(task[0])
+    _dbg(f"WRAPPER_START {name} n_files={n_files}")
+    try:
+        results = _POOL_CONVERTER(task)  # type: ignore[operator]
+        _dbg(f"WRAPPER_END {name} elapsed={time.monotonic()-t0:.1f}s")
+        return name, n_files, time.monotonic() - t0, results, None
+    except Exception:
+        tb = traceback.format_exc()
+        _dbg(f"WRAPPER_EXCEPTION {name}: {tb}")
+        return name, n_files, time.monotonic() - t0, [], tb
+
+
+def _setup_signal_handlers(counts: dict, wbars: dict, t0: float) -> None:
+    """Install SIGTERM / SIGXCPU handlers that dump current state before exit."""
+    def _handler(signum: int, frame: object) -> None:
+        sig_name = {signal.SIGTERM: "SIGTERM", signal.SIGXCPU: "SIGXCPU"}.get(signum, str(signum))
+        elapsed  = time.time() - t0
+        active   = list(wbars.keys())
+        ram_gb   = psutil.virtual_memory().used / 1024 ** 3
+        msg = (
+            f"[{time.strftime('%H:%M:%S')}] SIGNAL {sig_name} received  "
+            f"elapsed={elapsed:.0f}s  ram={ram_gb:.1f}GB\n"
+            f"  counts={counts}\n"
+            f"  active_tasks={active}\n"
+        )
+        if _DEBUG_LOG_PATH:
+            try:
+                with open(_DEBUG_LOG_PATH, "a") as _f:
+                    _f.write(msg)
+            except OSError:
+                pass
+        sys.stderr.write(msg)
+        sys.stderr.flush()
+        # Re-raise default so the process actually dies.
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    signal.signal(signal.SIGTERM, _handler)
+    try:
+        signal.signal(signal.SIGXCPU, _handler)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def _run_convert_rich(
     tasks: list[tuple],
     workers: int,
@@ -1061,30 +1231,22 @@ def _run_convert_rich(
     checkpoint_every: int = 500,
     max_groups: int = 0,
 ) -> None:
-    """Convert per-player tasks and progressively write a rich index.npz.
+    """Convert per-player tasks with mp.Pool.imap_unordered and progressive indexing."""
+    global _POOL_CONVERTER
+    _POOL_CONVERTER = converter
 
-    Resumes from an existing partial index on restart: players already in the
-    index are skipped; players whose npz file exists but are not yet indexed
-    have their metadata rebuilt from ``source_timestamps`` without re-decoding.
-    """
     total = len(tasks)
     print(f"  players found: {total:,}", flush=True)
 
     index_path = os.path.join(npz_dir, "index.npz")
 
-    # Reload any existing partial checkpoint.
     accum, indexed_paths = _new_rich_accum(), set()
     if write_index and os.path.exists(index_path):
         accum, indexed_paths = _load_rich_accum(index_path)
 
-    # Tasks whose output is already in the index are truly skipped.
-    # For chunked converters the task output_path (t[1]) may be the unsuffixed
-    # base name; a player is considered indexed if ANY of its chunk paths appear
-    # in indexed_paths (checked by prefix match on the stem).
     def _task_indexed(task_output_path: str) -> bool:
         if task_output_path in indexed_paths:
             return True
-        # Chunked players: check whether stem_0.npz (first chunk) is indexed.
         stem = os.path.splitext(task_output_path)[0]
         return f"{stem}_0.npz" in indexed_paths
 
@@ -1094,13 +1256,12 @@ def _run_convert_rich(
     total_files = sum(len(t[0]) for t in pending)
     print(f"  pending: {len(pending):,} groups  {total_files:,} files", flush=True)
 
-    # Print commit budget from /proc/meminfo so OOM risk is visible upfront.
     try:
-        meminfo = {}
+        meminfo: dict[str, int] = {}
         with open("/proc/meminfo") as _f:
             for _line in _f:
                 k, v = _line.split(":", 1)
-                meminfo[k.strip()] = int(v.split()[0])  # kB
+                meminfo[k.strip()] = int(v.split()[0])
         commit_limit_gb = meminfo.get("CommitLimit", 0) / 1024 ** 2
         committed_gb    = meminfo.get("Committed_AS", 0) / 1024 ** 2
         print(
@@ -1112,28 +1273,28 @@ def _run_convert_rich(
     except Exception:
         pass
 
-    counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
-    filtered_games_total = 0
-    errors: list[str] = []
-    oom_paths: list[str] = []
-    since_ckpt = 0
-    _log_interval = 60  # seconds between periodic summaries
-    _t0 = time.time()
-    _last_log = _t0
-
     if not pending:
         return
 
-    n_workers = min(workers, len(pending))
+    counts = {"ok": 0, "skip": 0, "filter": 0, "error": 0}
+    filtered_games_total = 0
+    errors: list[str] = []
+    error_paths: list[str] = []
+    since_ckpt = 0
+    _log_interval = 60
+    _t0 = time.time()
+    _last_log = _t0
     files_done = 0
 
-    # --- Per-worker tqdm bars driven by a background thread reading _PROGRESS_QUEUE ---
-    # Position 0 = overall bar (bottom, persistent).
-    # Positions 1..n_workers = one slot per worker (leave=False, reused as workers finish).
-    _wbars:      dict[str, tqdm] = {}          # name → bar
-    _wbar_slots: list[int] = list(range(1, n_workers + 1))
-    _wbar_lock   = threading.Lock()
-    _bar_thread: threading.Thread | None = None
+    n_workers = min(workers, len(pending))
+    _dbg(f"POOL_START n_workers={n_workers} pending={len(pending)} total_files={total_files}")
+
+    # Per-worker tqdm bars (positions 1..n_workers) + overall bar (position 0).
+    _wbars:       dict[str, tqdm] = {}
+    _wbar_slots:  list[int] = list(range(1, n_workers + 1))
+    _wbar_slot_of: dict[str, int] = {}   # name → slot (for safe close)
+    _wbar_lock    = threading.Lock()
+    _bar_thread:  threading.Thread | None = None
 
     def _bar_manager() -> None:
         while True:
@@ -1143,104 +1304,137 @@ def _run_convert_rich(
                 continue
             if msg is None:
                 break
-            name, done, total, frames = msg
+            name, done, total_t, frames, ok, filter_g, err, skip, current_file = msg
             with _wbar_lock:
                 if name not in _wbars:
                     if not _wbar_slots:
                         continue
                     slot = _wbar_slots.pop(0)
+                    _wbar_slot_of[name] = slot
                     _wbars[name] = tqdm(
-                        total=total, initial=done,
-                        desc=f"  {name[:26]}", position=slot,
+                        total=total_t, initial=done,
+                        desc=f"  {name[:20]}", position=slot,
                         leave=False, unit="f", file=sys.stdout,
-                        dynamic_ncols=True, smoothing=0.3,
+                        ncols=120, smoothing=0.1, mininterval=60.0,
                     )
                 b = _wbars[name]
                 delta = done - b.n
                 if delta > 0:
                     b.update(delta)
-                b.set_postfix(fr=f"{frames:,}", refresh=True)
+                b.set_postfix(
+                    ok=ok, filt=filter_g, err=err,
+                    fr=f"{frames:,}",
+                    f=current_file[:18] if current_file else "",
+                    refresh=True,
+                )
 
     if _PROGRESS_QUEUE is not None:
         _bar_thread = threading.Thread(target=_bar_manager, daemon=True)
         _bar_thread.start()
 
-    with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=8) as executor:  # type: ignore[call-arg]
-        with tqdm(total=total_files, unit="file", desc="  total", dynamic_ncols=True,
-                  smoothing=0.1, position=0, file=sys.stdout) as bar:
+    # Heartbeat: writes to debug log every 10s so we can detect a stuck main loop.
+    _hb_stop = threading.Event()
+    def _heartbeat() -> None:
+        while not _hb_stop.wait(10.0):
+            active = list(_wbars.keys())
+            ram_gb = psutil.virtual_memory().used / 1024 ** 3
+            _dbg(
+                f"HEARTBEAT ok={counts['ok']} skip={counts['skip']} "
+                f"err={counts['error']} filter={counts['filter']} "
+                f"files_done={files_done}/{total_files} "
+                f"active={len(active)} names={active[:8]} "
+                f"ram={ram_gb:.1f}GB"
+            )
+    _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+    _hb_thread.start()
 
-            _submit_time = time.time()
-            futures: dict = {executor.submit(converter, t): (t, _submit_time) for t in pending}
+    _setup_signal_handlers(counts, _wbars, _t0)
 
-            for fut in as_completed(futures):
-                task, t_submit = futures[fut]
-                elapsed = time.time() - t_submit
-                name = os.path.splitext(os.path.basename(task[1]))[0]
-                n_task_files = len(task[0])
+    with mp.Pool(processes=n_workers, maxtasksperchild=8) as pool:
+        result_iter = pool.imap_unordered(_convert_wrapper, pending)
+
+        with tqdm(total=total_files, unit="file", desc="  total",
+                  ncols=120, smoothing=0.1, position=0,
+                  file=sys.stdout, mininterval=5.0) as bar:
+
+            while True:
+                _dbg("MAIN_LOOP_NEXT_RESULT")
+                try:
+                    raw = next(result_iter)
+                except StopIteration:
+                    _dbg("MAIN_LOOP_DONE")
+                    break
+                except Exception as pool_exc:
+                    tb = traceback.format_exc()
+                    _dbg(f"POOL_EXCEPTION {type(pool_exc).__name__}: {tb}")
+                    tqdm.write(
+                        f"  [{time.strftime('%H:%M:%S')}] POOL ERROR: {pool_exc}",
+                        file=sys.stdout,
+                    )
+                    counts["error"] += 1
+                    continue
+
+                name, n_task_files, elapsed, result_list, exc_str = raw
 
                 # Close the per-worker bar and return its slot.
                 with _wbar_lock:
                     if name in _wbars:
                         _wbars[name].close()
-                        slot = _wbars[name]._pos  # type: ignore[attr-defined]
-                        _wbar_slots.append(slot)
+                        slot = _wbar_slot_of.pop(name, None)
+                        if slot is not None:
+                            _wbar_slots.append(slot)
                         del _wbars[name]
 
-                try:
-                    raw_result = fut.result()
-                except Exception as e:
+                if exc_str:
+                    _dbg(f"TASK_EXCEPTION {name}:\n{exc_str}")
                     counts["error"] += 1
-                    errors.append(str(e))
+                    errors.append(exc_str.splitlines()[-1])
                     tqdm.write(
-                        f"  [{time.strftime('%H:%M:%S')}] ERR  {name}  {elapsed:.0f}s  {e}",
+                        f"  [{time.strftime('%H:%M:%S')}] ERR   "
+                        f"  {name:<32}  {n_task_files:>5} files  {elapsed:.0f}s"
+                        f"  {errors[-1]}",
                         file=sys.stdout,
                     )
                     files_done += n_task_files
                     bar.update(n_task_files)
+                    bar.set_postfix(ok=counts["ok"], skip=counts["skip"],
+                                    filt_g=filtered_games_total, err=counts["error"])
                     continue
 
-                # Converters may return a single dict or a list of dicts (chunked).
-                result_list: list[dict] = (
-                    raw_result if isinstance(raw_result, list) else [raw_result]
-                )
                 for result in result_list:
                     status = result["status"]
                     counts[status] += 1
-
                     if status in ("ok", "skip") and result.get("game_meta"):
                         _accum_player_result(accum, result)
                         since_ckpt += 1
                     elif status == "error":
                         errors.append(result.get("error", result.get("msg", "unknown")))
                         if result.get("path"):
-                            oom_paths.append(result["path"])
+                            error_paths.append(result["path"])
                     filtered_games_total += result.get("filtered_games", 0)
 
-                # Per-task completion line — use tqdm.write so it doesn't scramble bars.
-                total_fr = sum(r.get("frames", 0) for r in result_list)
-                total_g  = sum(r.get("games",  0) for r in result_list)
-                n_chunks = len(result_list)
-                top_status = result_list[0]["status"].upper()
+                total_fr   = sum(r.get("frames", 0) for r in result_list)
+                total_g    = sum(r.get("games",  0) for r in result_list)
+                n_chunks   = len(result_list)
+                top_status = result_list[0]["status"].upper() if result_list else "UNK"
                 chunk_tag  = f"×{n_chunks}" if n_chunks > 1 else "   "
                 tqdm.write(
                     f"  [{time.strftime('%H:%M:%S')}] {top_status}{chunk_tag}"
-                    f"  {name:<32s}  {n_task_files:>5} files"
+                    f"  {name:<32}  {n_task_files:>5} files"
                     f"  {total_fr:>10,} fr  {total_g:>6,} g  {elapsed:>6.0f}s",
                     file=sys.stdout,
                 )
 
                 files_done += n_task_files
-                bar.set_postfix(
-                    ok=counts["ok"], skip=counts["skip"],
-                    filt_g=filtered_games_total, err=counts["error"],
-                )
                 bar.update(n_task_files)
+                bar.set_postfix(ok=counts["ok"], skip=counts["skip"],
+                                filt_g=filtered_games_total, err=counts["error"])
 
                 now = time.time()
                 if now - _last_log >= _log_interval:
                     _last_log = now
                     groups_done = counts["ok"] + counts["skip"] + counts["error"]
-                    ram_gb = psutil.virtual_memory().used / 1024 ** 3
+                    ram_gb  = psutil.virtual_memory().used  / 1024 ** 3
                     ram_tot = psutil.virtual_memory().total / 1024 ** 3
                     npz_on_disk = sum(
                         1 for e in os.scandir(npz_dir)
@@ -1257,23 +1451,27 @@ def _run_convert_rich(
                     )
 
                 if write_index and since_ckpt >= checkpoint_every and accum["pl_paths"]:
+                    _dbg(f"INDEX_CHECKPOINT players={len(accum['pl_paths'])}")
                     _write_index_rich(index_path, accum)
                     since_ckpt = 0
 
-    # Stop bar manager thread.
+    # Shut down background threads.
+    _hb_stop.set()
     if _PROGRESS_QUEUE is not None and _bar_thread is not None:
         _PROGRESS_QUEUE.put(None)
         _bar_thread.join(timeout=2.0)
 
+    _dbg("POOL_CLOSED writing final index")
+
     if write_index and accum["pl_paths"]:
         _write_index_rich(index_path, accum)
 
-    if oom_paths:
+    if error_paths:
         retry_path = os.path.join(npz_dir, "errors.txt")
         with open(retry_path, "a") as _f:
-            for p in oom_paths:
+            for p in error_paths:
                 _f.write(p + "\n")
-        print(f"\n  {len(oom_paths)} failed group(s) recorded in {retry_path}", flush=True)
+        print(f"\n  {len(error_paths)} failed group(s) recorded in {retry_path}", flush=True)
 
     if errors:
         print("\n  first 10 errors:", flush=True)
@@ -1385,6 +1583,7 @@ def _nld_nao_zips() -> list[str]:
 
 
 def _run_nao_top10(args: BaseArgs) -> None:
+    global _PROGRESS_QUEUE, _WORKER_LOG_PATH, _DEBUG_LOG_PATH
     raw         = args.raw_dir or args.output_dir
     zip_dir     = os.path.join(raw, "zips", "nao-top10")
     tar_path    = os.path.join(zip_dir, "nao_top10.tar")
@@ -1392,7 +1591,13 @@ def _run_nao_top10(args: BaseArgs) -> None:
     npz_dir     = os.path.join(args.output_dir, "nle", "nao-top10")
     index_path  = os.path.join(npz_dir, "index.npz")
 
+    os.makedirs(npz_dir, exist_ok=True)
+    _PROGRESS_QUEUE = mp.Queue()
+    _WORKER_LOG_PATH = os.path.join(npz_dir, "workers.log")
+    _DEBUG_LOG_PATH  = os.path.join(npz_dir, "debug.log")
+
     print("\n─── nao-top10 ───────────────────────────────────────────────────", flush=True)
+    print(f"[log]      debug → {_DEBUG_LOG_PATH}", flush=True)
 
     if not args.skip_download:
         os.makedirs(zip_dir, exist_ok=True)
@@ -1441,7 +1646,7 @@ def _run_nao_top10(args: BaseArgs) -> None:
 
 
 def _run_nld(dataset: str, args: BaseArgs) -> None:
-    global _PROGRESS_QUEUE, _WORKER_LOG_PATH
+    global _PROGRESS_QUEUE, _WORKER_LOG_PATH, _DEBUG_LOG_PATH
     assert dataset in ("nld-aa", "nld-nao")
     raw         = args.raw_dir or args.output_dir
     zip_dir     = os.path.join(raw, "zips", dataset)
@@ -1454,6 +1659,8 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
     os.makedirs(npz_dir, exist_ok=True)
     _PROGRESS_QUEUE = mp.Queue()
     _WORKER_LOG_PATH = os.path.join(npz_dir, "workers.log")
+    _DEBUG_LOG_PATH  = os.path.join(npz_dir, "debug.log")
+    print(f"[log]      debug → {_DEBUG_LOG_PATH}", flush=True)
 
     filenames  = _nld_aa_zips() if dataset == "nld-aa" else _nld_nao_zips()
     base_url   = _NLD_AA_BASE   if dataset == "nld-aa" else _NLD_NAO_BASE

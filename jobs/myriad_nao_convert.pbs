@@ -45,12 +45,14 @@ fi
 conda activate lom-convert
 
 mkdir -p "$OUTPUT_DIR" logs
+# RAW_DIR is fast local storage for extraction only; OUTPUT_DIR (NFS) always
+# holds the .npz output so partial progress survives a job crash.
 if mkdir -p "$RAW_DIR" && touch "$RAW_DIR/.write_test" 2>/dev/null; then
     rm -f "$RAW_DIR/.write_test"
-    OUTPUT_DIR="$RAW_DIR"
-    echo "OUTPUT_DIR=$OUTPUT_DIR (local /dev/shm)"
+    echo "RAW_DIR=$RAW_DIR (local /dev/shm)  OUTPUT_DIR=$OUTPUT_DIR (NFS)"
 else
-    echo "WARNING: cannot write to $RAW_DIR — falling back to $OUTPUT_DIR (NFS)"
+    echo "WARNING: cannot write to $RAW_DIR — raw data will also go to $OUTPUT_DIR (NFS)"
+    RAW_DIR="$OUTPUT_DIR"
 fi
 
 # Background monitor — logs CPU/RAM/net every 60s to logs/monitor.log
@@ -70,29 +72,19 @@ run_dataset() {
     local npz_subdir=$2
     local dest=$3
     local skip_db_flag=${4:-}
-    local npz_dir="$OUTPUT_DIR/$npz_subdir"
+    local npz_dir="$OUTPUT_DIR/nle/$npz_subdir"
 
     echo "[$(date)] [$dataset] Starting..."
     python -u "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
+        --raw-dir    "$RAW_DIR" \
         --output-dir "$OUTPUT_DIR" \
-        --workers "$WORKERS" \
+        --workers    "$WORKERS" \
         $skip_db_flag
-
-    local errors_file="$npz_dir/errors.txt"
-    if [ -s "$errors_file" ]; then
-        echo "[$(date)] [$dataset] Retrying $(wc -l < "$errors_file") failures at 10 workers..."
-        python -u "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
-            --output-dir "$OUTPUT_DIR" \
-            --workers 10 \
-            --skip-download \
-            --skip-extract \
-            $skip_db_flag
-    fi
 
     echo "[$(date)] [$dataset] Rsyncing to $dest..."
     rsync -avz --progress "$npz_dir/" "$dest/"
 
-    echo "[$(date)] [$dataset] Cleaning up..."
+    echo "[$(date)] [$dataset] Cleaning up ephemeral raw data..."
     rm -rf "${RAW_DIR:?}/${dataset}" "${RAW_DIR:?}/zips/${dataset}" "${RAW_DIR:?}/${dataset}.db"
 
     echo "[$(date)] [$dataset] Done."
@@ -101,8 +93,8 @@ run_dataset() {
 # --------------------------------------------------------------------------- #
 # Run all datasets
 # --------------------------------------------------------------------------- #
-# run_dataset "nao-top10" "nle/nao-top10" "$DEST_BASE/nle/nao-top10"
-# run_dataset "nld-aa"    "nle/aa"        "$DEST_BASE/nle/aa"        "--skip-db"
-run_dataset "nld-nao"   "nle/nao"       "$DEST_BASE/nle/nao"       "--skip-db"
+# run_dataset "nao-top10" "nao-top10" "$DEST_BASE/nle/nao-top10"
+# run_dataset "nld-aa"    "aa"        "$DEST_BASE/nle/aa"        "--skip-db"
+run_dataset "nld-nao"   "nao"        "$DEST_BASE/nle/nao"       "--skip-db"
 
 echo "[$(date)] All datasets done."
