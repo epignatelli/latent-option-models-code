@@ -55,7 +55,6 @@ Usage:
 from __future__ import annotations
 
 import bisect
-import logging
 import multiprocessing as mp
 import os
 import re
@@ -81,8 +80,6 @@ import numpy as np
 import tyro
 from tqdm import tqdm
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-
 ROWS, COLS = 24, 80
 
 _HEX_RE   = re.compile(r"^0x[0-9a-fA-F]+$")
@@ -95,7 +92,6 @@ _xl_by_player: dict[str, list[dict]] = {}
 _PROGRESS_QUEUE: "mp.Queue | None" = None
 _WORKER_LOG_PATH: str = ""
 _DEBUG_LOG_PATH:  str = ""
-_DECODE_TIMEOUT_S: int = 300
 _POOL_CONVERTER = None  # set in _run_nld before Pool creation; inherited via fork
 
 
@@ -291,7 +287,7 @@ def _extract_tar(tar_path: str, dest_dir: str) -> None:
 
 
 
-def _build_nle_db(unzipped_dir: str, db_path: str, dataset_name: str, use_altorg: bool) -> None:
+def _build_nle_db(unzipped_dir: str, db_path: str, dataset: str) -> None:
     if os.path.exists(db_path):
         print(f"  NLE database already exists at {db_path} — skipping.", flush=True)
         return
@@ -308,10 +304,10 @@ def _build_nle_db(unzipped_dir: str, db_path: str, dataset_name: str, use_altorg
     t0 = time.time()
     nld_db.create(filename=db_path)
     print(f"  [{time.strftime('%H:%M:%S')}] DB created, populating rows ...", flush=True)
-    if use_altorg:
-        nld.add_altorg_directory(unzipped_dir, dataset_name, filename=db_path)
+    if dataset == "nld-nao":
+        nld.add_altorg_directory(unzipped_dir, dataset, filename=db_path)
     else:
-        nld.add_nledata_directory(unzipped_dir, dataset_name, filename=db_path)
+        nld.add_nledata_directory(unzipped_dir, dataset, filename=db_path)
     print(f"  [{time.strftime('%H:%M:%S')}] DB done in {(time.time()-t0)/60:.1f} min → {db_path}", flush=True)
 
 
@@ -447,11 +443,9 @@ def _decode(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
 def _decode_with_timeout(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
     """Run _decode with a SIGALRM watchdog.  Raises TimeoutError if NLE hangs."""
     def _alarm(signum, frame):
-        raise TimeoutError(
-            f"_decode timed out after {_DECODE_TIMEOUT_S}s on {ttyrec_files[0]}"
-        )
+        raise TimeoutError(f"_decode timed out after 300s on {ttyrec_files[0]}")
     old = signal.signal(signal.SIGALRM, _alarm)
-    signal.alarm(_DECODE_TIMEOUT_S)
+    signal.alarm(300)
     try:
         return _decode(ttyrec_files, ttyrec_version)
     finally:
@@ -706,114 +700,40 @@ def _discover_nao_top10(extract_dir: str, output_dir: str, min_frames: int) -> l
 
 
 def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
-    """Merge all nao-top10 sessions for one player into per-player npz chunk(s).
-
-    No xlogfile is available for this dataset; game_meta contains only frame
-    counts.  If the total frame count exceeds _MAX_FRAMES_PER_CHUNK the games
-    are split into multiple contiguous chunks, each written as a separate npz
-    (e.g. Luxidream_0.npz, Luxidream_1.npz …).  Single-chunk players keep the
-    original Luxidream.npz naming (no suffix).
-
-    Returns a list of result dicts — one per chunk written (or skipped).
-    """
+    """Merge all nao-top10 sessions for one player into per-player npz chunk(s)."""
     session_files, output_path, min_frames = task
 
-    valid: list[tuple[str, int]] = []
-    game_meta_all: list[dict] = []
+    existing = _load_existing_results(
+        output_path, "source_filenames",
+        lambda _, n: dict(_GAME_META_DEFAULT, length=n),
+    )
+    if existing is not None:
+        return existing
+
     H = W = None
+    filtered = 0
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    writer = _ChunkWriter(output_path, "source_filenames", "U512")
 
     for npz_path in sorted(session_files):
         try:
             with np.load(npz_path) as f:
-                shape = f["tty_chars"].shape
+                chars  = f["tty_chars"].astype(np.uint8)
+                colors = (np.clip(f["tty_colors"].astype(np.int16), 0, 31).astype(np.uint8)
+                          if "tty_colors" in f else np.zeros_like(chars))
         except Exception:
+            filtered += 1
             continue
-        n_frames = shape[0]
-        if H is None:
-            H, W = shape[1], shape[2]
+        n_frames = chars.shape[0]
         if n_frames < min_frames:
+            filtered += 1
             continue
-        valid.append((npz_path, n_frames))
-        game_meta_all.append(dict(_GAME_META_DEFAULT, length=n_frames))
+        if H is None:
+            H, W = chars.shape[1], chars.shape[2]
+        writer.add(chars, colors, os.path.basename(npz_path),
+                   dict(_GAME_META_DEFAULT, length=n_frames))
 
-    if not valid:
-        return [{"status": "filter"}]
-
-    chunks: list[list[int]] = []
-    current_chunk: list[int] = []
-    current_frames = 0
-    for idx, (_, n_frames) in enumerate(valid):
-        if current_chunk and current_frames + n_frames > _MAX_FRAMES_PER_CHUNK:
-            chunks.append(current_chunk)
-            current_chunk = []
-            current_frames = 0
-        current_chunk.append(idx)
-        current_frames += n_frames
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    n_chunks = len(chunks)
-    _stem, _ext = os.path.splitext(output_path)
-    paths = [output_path] if n_chunks == 1 else [f"{_stem}_{i}{_ext}" for i in range(n_chunks)]
-
-    if all(os.path.exists(p) for p in paths):
-        results: list[dict] = []
-        for chunk_path in paths:
-            try:
-                with np.load(chunk_path) as f:
-                    offsets = f["offsets"]
-            except Exception as exc:
-                return [{"status": "error", "path": chunk_path,
-                         "msg": f"failed to read {chunk_path}: {exc}"}]
-            n_games = len(offsets) - 1
-            gm = [
-                dict(_GAME_META_DEFAULT,
-                     length=int(offsets[i + 1]) - int(offsets[i]))
-                for i in range(n_games)
-            ]
-            results.append({"status": "skip", "path": chunk_path,
-                             "frames": int(offsets[-1]),
-                             "games": n_games, "game_meta": gm})
-        return results
-
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    results = []
-    for chunk_idx, game_indices in enumerate(chunks):
-        chunk_path  = paths[chunk_idx]
-        chunk_valid = [valid[i] for i in game_indices]
-        chunk_meta  = [game_meta_all[i] for i in game_indices]
-        offsets_list: list[int] = [0]
-        chars_parts: list[np.ndarray] = []
-        colors_parts: list[np.ndarray] = []
-        for npz_path, n_frames in chunk_valid:
-            try:
-                with np.load(npz_path) as f:
-                    chars_parts.append(f["tty_chars"].astype(np.uint8))
-                    colors_parts.append(
-                        np.clip(f["tty_colors"].astype(np.int16), 0, 31).astype(np.uint8)
-                        if "tty_colors" in f
-                        else np.zeros((n_frames, H, W), dtype=np.uint8)
-                    )
-            except Exception:
-                chars_parts.append(np.zeros((n_frames, H, W), dtype=np.uint8))
-                colors_parts.append(np.zeros((n_frames, H, W), dtype=np.uint8))
-            offsets_list.append(offsets_list[-1] + n_frames)
-        np.savez_compressed(
-            chunk_path,
-            tty_chars=np.concatenate(chars_parts),
-            tty_colors=np.concatenate(colors_parts),
-            offsets=np.array(offsets_list, dtype=np.int64),
-        )
-        del chars_parts, colors_parts
-        results.append({
-            "status": "ok",
-            "path": chunk_path,
-            "frames": offsets_list[-1],
-            "games": len(chunk_valid),
-            "game_meta": chunk_meta,
-        })
-
-    return results
+    return writer.finish(filtered)
 
 
 def _read_aa_xlogfile(game_dir: str) -> dict[str, dict]:
@@ -834,8 +754,25 @@ def _read_aa_xlogfile(game_dir: str) -> dict[str, dict]:
     return {}
 
 
-def _discover_nld_aa_grouped(nle_data_dir: str, output_dir: str,
-                              min_frames: int) -> list[tuple]:
+def _discover_bz2_tasks(
+    data_root: str, output_dir: str, ttyrec_version: int,
+    min_frames: int, id_is_dir: bool = False,
+) -> list[tuple]:
+    """Build a task list from a directory of per-player/group subdirs of .bz2 files."""
+    tasks = []
+    for name in sorted(os.listdir(data_root)):
+        sub_dir = os.path.join(data_root, name)
+        if not os.path.isdir(sub_dir):
+            continue
+        bz2_files = [os.path.join(sub_dir, f) for f in os.listdir(sub_dir) if f.endswith(".bz2")]
+        if not bz2_files:
+            continue
+        id_val = sub_dir if id_is_dir else name
+        tasks.append((bz2_files, os.path.join(output_dir, f"{name}.npz"), ttyrec_version, min_frames, id_val))
+    return tasks
+
+
+def _discover_nld_aa_grouped(nle_data_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
     """One task per game dir (fake player = one Autoascend run, ~100 games each)."""
     data_root = os.path.join(nle_data_dir, "nld-aa", "nle_data")
     if not os.path.isdir(data_root):
@@ -843,24 +780,7 @@ def _discover_nld_aa_grouped(nle_data_dir: str, output_dir: str,
             f"nld-aa data not found at {data_root}\n"
             "Pass --nld-aa-subdir to point at the right sub-directory."
         )
-    tasks: list[tuple] = []
-    for gdir in sorted(os.listdir(data_root)):
-        game_dir = os.path.join(data_root, gdir)
-        if not os.path.isdir(game_dir):
-            continue
-        bz2_files = [
-            os.path.join(game_dir, f)
-            for f in os.listdir(game_dir)
-            if f.endswith(".bz2")
-        ]
-        if not bz2_files:
-            continue
-        tasks.append((
-            bz2_files,
-            os.path.join(output_dir, f"{gdir}.npz"),
-            3, min_frames, game_dir,
-        ))
-    return tasks
+    return _discover_bz2_tasks(data_root, output_dir, 3, min_frames, id_is_dir=True)
 
 
 def _convert_aa_group(task: tuple) -> list[dict]:
@@ -900,27 +820,8 @@ def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> li
     if not os.path.isdir(data_root):
         raise FileNotFoundError(f"nld-nao data not found at {data_root}")
 
-    nld_nao_dir = os.path.join(nle_data_dir, "nld-nao")
-    _xl_by_player = _load_xlogfiles(nld_nao_dir)
-
-    tasks: list[tuple] = []
-    for player in sorted(os.listdir(data_root)):
-        player_dir = os.path.join(data_root, player)
-        if not os.path.isdir(player_dir):
-            continue
-        bz2_files = [
-            os.path.join(player_dir, f)
-            for f in os.listdir(player_dir)
-            if f.endswith(".bz2")
-        ]
-        if not bz2_files:
-            continue
-        tasks.append((
-            bz2_files,
-            os.path.join(output_dir, f"{player}.npz"),
-            1, min_frames, player,
-        ))
-    return tasks
+    _xl_by_player = _load_xlogfiles(os.path.join(nle_data_dir, "nld-nao"))
+    return _discover_bz2_tasks(data_root, output_dir, 1, min_frames, id_is_dir=False)
 
 
 
@@ -1494,9 +1395,8 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
     _DEBUG_LOG_PATH  = os.path.join(args.log_dir, f"debug-{dataset}.log")
     print(f"[log]      debug → {_DEBUG_LOG_PATH}", flush=True)
 
-    filenames  = _NLD_AA_ZIPS if dataset == "nld-aa" else _NLD_NAO_ZIPS
-    base_url   = _NLD_AA_BASE   if dataset == "nld-aa" else _NLD_NAO_BASE
-    use_altorg = dataset == "nld-nao"
+    filenames = _NLD_AA_ZIPS if dataset == "nld-aa" else _NLD_NAO_ZIPS
+    base_url  = _NLD_AA_BASE  if dataset == "nld-aa" else _NLD_NAO_BASE
 
     print(f"\n─── {dataset} ───────────────────────────────────────────────────", flush=True)
 
@@ -1525,7 +1425,7 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
 
     if not args.skip_db:
         print(f"[db]       → {db_path}", flush=True)
-        _build_nle_db(extract_dir, db_path, dataset, use_altorg)
+        _build_nle_db(extract_dir, db_path, dataset)
     else:
         print("[db]       skipped", flush=True)
 
