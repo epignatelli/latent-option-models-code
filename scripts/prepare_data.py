@@ -66,7 +66,6 @@ import time
 import traceback
 
 import psutil
-import shutil
 import urllib.request
 import zipfile
 from collections import defaultdict
