@@ -1065,6 +1065,12 @@ def _run_convert_rich(
     _wbar_lock    = threading.Lock()
     _bar_thread:  threading.Thread | None = None
 
+    # Tracks how many files each player has already contributed to the global bar.
+    # Written under _wbar_lock by _bar_manager; read under _wbar_lock by main loop.
+    _files_reported: dict[str, int] = {}
+    # Indirection so _bar_manager can reference bar before the tqdm context opens.
+    _bar_ref: list = [None]
+
     def _bar_manager() -> None:
         while True:
             try:
@@ -1090,6 +1096,9 @@ def _run_convert_rich(
                 delta = done - b.n
                 if delta > 0:
                     b.update(delta)
+                    _files_reported[name] = done
+                    if _bar_ref[0] is not None:
+                        _bar_ref[0].update(delta)
                 b.set_postfix(
                     ok=ok, filt=filter_g, err=err,
                     fr=f"{frames:,}",
@@ -1125,6 +1134,7 @@ def _run_convert_rich(
         with tqdm(total=total_files, unit="file", desc="  total",
                   ncols=120, smoothing=0, position=0,
                   file=sys.stdout, mininterval=5.0) as bar:
+            _bar_ref[0] = bar
 
             while True:
                 _dbg("MAIN_LOOP_NEXT_RESULT")
@@ -1152,6 +1162,9 @@ def _run_convert_rich(
                         if slot is not None:
                             _wbar_slots.append(slot)
                         del _wbars[name]
+                    reported = _files_reported.pop(name, 0)
+
+                remainder = max(0, n_task_files - reported)
 
                 if exc_str:
                     _dbg(f"TASK_EXCEPTION {name}:\n{exc_str}")
@@ -1164,7 +1177,7 @@ def _run_convert_rich(
                         file=sys.stdout,
                     )
                     files_done += n_task_files
-                    bar.update(n_task_files)
+                    bar.update(remainder)
                     bar.set_postfix(ok=counts["ok"], skip=counts["skip"],
                                     filt_g=filtered_games_total, err=counts["error"])
                     continue
@@ -1194,7 +1207,7 @@ def _run_convert_rich(
                 )
 
                 files_done += n_task_files
-                bar.update(n_task_files)
+                bar.update(remainder)
                 bar.set_postfix(ok=counts["ok"], skip=counts["skip"],
                                 filt_g=filtered_games_total, err=counts["error"])
 
