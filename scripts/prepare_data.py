@@ -154,9 +154,6 @@ _GAME_META_DEFAULT: dict = {
 _MAX_FRAMES_PER_CHUNK = 2_000_000
 
 
-# --------------------------------------------------------------------------- #
-# --- Config ----------------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
 
 @dataclass
 class BaseArgs:
@@ -209,9 +206,6 @@ class AllArgs(BaseArgs):
     """Run all three datasets in sequence."""
 
 
-# --------------------------------------------------------------------------- #
-# --- Download helpers ------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
 
 def _download(url: str, dest: str) -> None:
     if os.path.exists(dest):
@@ -259,9 +253,6 @@ def _parallel_download(base_url: str, filenames: list[str], dest_dir: str, worke
                 bar.update(1)
 
 
-# --------------------------------------------------------------------------- #
-# --- Extract helpers -------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
 
 def _extract_zips(filenames: list[str], zip_dir: str, dest_dir: str, workers: int = 1) -> None:
     _done = os.path.join(dest_dir, ".done")
@@ -299,9 +290,6 @@ def _extract_tar(tar_path: str, dest_dir: str) -> None:
     open(_done, "w").close()
 
 
-# --------------------------------------------------------------------------- #
-# --- NLE DB ----------------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
 
 def _build_nle_db(unzipped_dir: str, db_path: str, dataset_name: str, use_altorg: bool) -> None:
     if os.path.exists(db_path):
@@ -327,9 +315,6 @@ def _build_nle_db(unzipped_dir: str, db_path: str, dataset_name: str, use_altorg
     print(f"  [{time.strftime('%H:%M:%S')}] DB done in {(time.time()-t0)/60:.1f} min → {db_path}", flush=True)
 
 
-# --------------------------------------------------------------------------- #
-# --- Xlogfile helpers ------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
 
 def _parse_xlog_line(line: str) -> dict[str, str]:
     """Parse one xlogfile line; auto-detects `:` vs `\t` separator."""
@@ -416,9 +401,6 @@ def _game_meta_from_xlog(entry: dict, n_frames: int, file_ts: int) -> dict:
     }
 
 
-# --------------------------------------------------------------------------- #
-# --- ttyrec → npz conversion ------------------------------------------------ #
-# --------------------------------------------------------------------------- #
 
 def _decode(ttyrec_files: list[str], ttyrec_version: int) -> tuple[dict, int]:
     from nle import _pyconverter as nle_converter  # type: ignore[reportAttributeAccessIssue]
@@ -578,119 +560,128 @@ class _ChunkWriter:
         return self._results
 
 
-def _convert_player(task: tuple) -> list[dict]:
-    """Decode all games for one nld-nao player into per-player npz chunk(s).
-
-    Uses the module-level ``_xl_by_player`` dict which workers inherit from the
-    main process via fork.
-    """
-    input_files, output_path, ttyrec_version, min_frames, player_name = task
-    xl_entries = _xl_by_player.get(player_name, [])
-
+def _load_existing_results(output_path: str, id_key: str, make_meta) -> list[dict] | None:
+    """Return skip-result list if chunks already exist on disk, else None."""
     existing = _find_existing_chunks(output_path)
-    if existing:
-        results: list[dict] = []
-        for cpath in existing:
-            _dbg(f"LOAD_EXISTING {cpath}")
-            try:
-                with np.load(cpath) as f:
-                    offsets = f["offsets"]
-                    src_ts = f["source_timestamps"] if "source_timestamps" in f else None
-            except Exception as exc:
-                _dbg(f"LOAD_EXISTING_ERROR {cpath}: {exc}")
-                return [{"status": "error", "path": cpath,
-                         "msg": f"failed to read {cpath}: {exc}"}]
-            n_games = len(offsets) - 1
-            game_meta: list[dict] = []
-            for i in range(n_games):
-                n_frames = int(offsets[i + 1]) - int(offsets[i])
-                ts = int(src_ts[i]) if src_ts is not None and i < len(src_ts) else 0
-                entry = _match_xlog_entry(xl_entries, ts) if xl_entries and ts else {}
-                game_meta.append(_game_meta_from_xlog(entry, n_frames, ts))
-            results.append({"status": "skip", "path": cpath,
-                             "frames": int(offsets[-1]), "games": n_games,
-                             "game_meta": game_meta})
-        return results
+    if not existing:
+        return None
+    results = []
+    for cpath in existing:
+        _dbg(f"LOAD_EXISTING {cpath}")
+        try:
+            with np.load(cpath) as f:
+                offsets = f["offsets"]
+                ids = f[id_key] if id_key in f else None
+        except Exception as exc:
+            _dbg(f"LOAD_EXISTING_ERROR {cpath}: {exc}")
+            return [{"status": "error", "path": cpath, "msg": f"failed to read {cpath}: {exc}"}]
+        n_games = len(offsets) - 1
+        game_meta = [
+            make_meta(ids[i] if ids is not None and i < len(ids) else 0,
+                      int(offsets[i + 1]) - int(offsets[i]))
+            for i in range(n_games)
+        ]
+        results.append({"status": "skip", "path": cpath, "frames": int(offsets[-1]),
+                        "games": n_games, "game_meta": game_meta})
+    return results
 
-    _dbg(f"MAKEDIRS {os.path.dirname(output_path) or '.'}")
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    writer = _ChunkWriter(output_path, "source_timestamps", np.int64)
+
+def _run_bz2_loop(
+    bz2_files: list[str],
+    ttyrec_version: int,
+    min_frames: int,
+    name: str,
+    writer: _ChunkWriter,
+    get_entry_id_ts,
+) -> list[dict]:
+    """Decode a sorted list of bz2 ttyrec files and feed results into writer.
+
+    get_entry_id_ts(bz2_path, current_file, file_ts) -> (xlog_entry, id_val, ts)
+    """
     filtered_games = 0
     w_ok = w_filter = w_err = 0
     H = W = None
-    sorted_files = sorted(input_files)
-    n_files = len(sorted_files)
+    n_files = len(bz2_files)
     pid = os.getpid()
-    _worker_log(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {player_name}  {n_files} files")
-    _dbg(f"TASK_START {player_name} n_files={n_files} output={output_path}")
-    _worker_progress(player_name, 0, n_files, 0)
-    _last_wprint = time.time()
-    _last_progress = time.time()
+    _worker_log(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {name}  {n_files} files")
+    _dbg(f"TASK_START {name} n_files={n_files} output={writer._output_path}")
+    _worker_progress(name, 0, n_files, 0)
+    _last_wprint = _last_progress = time.time()
 
-    for i, bz2_path in enumerate(sorted_files):
+    for i, bz2_path in enumerate(bz2_files):
         current_file = os.path.basename(bz2_path)
         now = time.time()
-
         if now - _last_wprint >= 30:
             _last_wprint = now
             _worker_log(
-                f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {player_name}"
-                f"  {i+1}/{n_files}  {current_file}"
-                f"  {writer._offsets[-1]:,} fr so far"
+                f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {name}"
+                f"  {i+1}/{n_files}  {current_file}  {writer._offsets[-1]:,} fr so far"
             )
-
         _dbg(f"OPEN_BZ2 {bz2_path}")
         file_ts = _parse_filename_ts(bz2_path)
-
-        _dbg(f"DECODE_START {player_name} [{i+1}/{n_files}] {current_file}")
+        _dbg(f"DECODE_START {name} [{i+1}/{n_files}] {current_file}")
         try:
             arrays, n_frames = _decode_with_timeout([bz2_path], ttyrec_version)
-        except TimeoutError as exc:
-            w_err += 1
-            _dbg(f"DECODE_TIMEOUT {player_name} [{i+1}/{n_files}] {current_file}: {exc}")
-            _worker_progress(player_name, i + 1, n_files, writer._offsets[-1],
-                             w_ok, w_filter, w_err, 0, current_file)
-            continue
         except Exception as exc:
             w_err += 1
-            _dbg(f"DECODE_ERROR {player_name} [{i+1}/{n_files}] {current_file}: {exc}")
-            _worker_progress(player_name, i + 1, n_files, writer._offsets[-1],
+            kind = "TIMEOUT" if isinstance(exc, TimeoutError) else "ERROR"
+            _dbg(f"DECODE_{kind} {name} [{i+1}/{n_files}] {current_file}: {exc}")
+            _worker_progress(name, i + 1, n_files, writer._offsets[-1],
                              w_ok, w_filter, w_err, 0, current_file)
             continue
-
-        _dbg(f"DECODE_END {player_name} [{i+1}/{n_files}] {current_file} n_frames={n_frames}")
-
+        _dbg(f"DECODE_END {name} [{i+1}/{n_files}] {current_file} n_frames={n_frames}")
         if not arrays or n_frames < min_frames:
             w_filter += 1
             filtered_games += 1
             if now - _last_progress >= 5.0:
                 _last_progress = now
-                _worker_progress(player_name, i + 1, n_files, writer._offsets[-1],
+                _worker_progress(name, i + 1, n_files, writer._offsets[-1],
                                  w_ok, w_filter, w_err, 0, current_file)
             continue
-
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
         chars = arrays["tty_chars"].astype(np.uint8)
         colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
                   if "tty_colors" in arrays
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
-        entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
-        writer.add(chars, colors, file_ts, _game_meta_from_xlog(entry, n_frames, file_ts))
+        entry, id_val, ts = get_entry_id_ts(bz2_path, current_file, file_ts)
+        writer.add(chars, colors, id_val, _game_meta_from_xlog(entry, n_frames, ts))
         w_ok += 1
-
         if now - _last_progress >= 5.0:
             _last_progress = now
-            _worker_progress(player_name, i + 1, n_files, writer._offsets[-1],
+            _worker_progress(name, i + 1, n_files, writer._offsets[-1],
                              w_ok, w_filter, w_err, 0, current_file)
 
-    _dbg(f"TASK_FINISH {player_name} w_ok={w_ok} w_filter={w_filter} w_err={w_err}")
+    _dbg(f"TASK_FINISH {name} w_ok={w_ok} w_filter={w_filter} w_err={w_err}")
     return writer.finish(filtered_games)
 
 
-# --------------------------------------------------------------------------- #
-# --- Discovery -------------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
+def _convert_player(task: tuple) -> list[dict]:
+    """Decode all games for one nld-nao player into per-player npz chunk(s)."""
+    input_files, output_path, ttyrec_version, min_frames, player_name = task
+    xl_entries = _xl_by_player.get(player_name, [])
+
+    def _make_meta(id_val, n_frames):
+        ts = int(id_val)
+        entry = _match_xlog_entry(xl_entries, ts) if xl_entries and ts else {}
+        return _game_meta_from_xlog(entry, n_frames, ts)
+
+    existing = _load_existing_results(output_path, "source_timestamps", _make_meta)
+    if existing is not None:
+        return existing
+
+    _dbg(f"MAKEDIRS {os.path.dirname(output_path) or '.'}")
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    writer = _ChunkWriter(output_path, "source_timestamps", np.int64)
+
+    def _entry_id_ts(bz2_path, current_file, file_ts):
+        entry = _match_xlog_entry(xl_entries, file_ts) if xl_entries else {}
+        return entry, file_ts, file_ts
+
+    return _run_bz2_loop(sorted(input_files), ttyrec_version, min_frames,
+                         player_name, writer, _entry_id_ts)
+
+
 
 def _discover_nao_top10(extract_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
     """Group DeepMind nao-top10 sessions by player username; return consolidation tasks."""
@@ -873,114 +864,30 @@ def _discover_nld_aa_grouped(nle_data_dir: str, output_dir: str,
 
 
 def _convert_aa_group(task: tuple) -> list[dict]:
-    """Decode all games in one nld-aa game dir into per-group npz chunk(s).
-
-    Xlogfile entries are matched via the ``ttyrecname`` field so metadata is
-    accurate for every game.
-    """
+    """Decode all games in one nld-aa game dir into per-group npz chunk(s)."""
     bz2_files, output_path, ttyrec_version, min_frames, game_dir = task
     xl_by_name = _read_aa_xlogfile(game_dir)
+    group_name = os.path.basename(game_dir)
 
-    existing = _find_existing_chunks(output_path)
-    if existing:
-        results: list[dict] = []
-        for cpath in existing:
-            try:
-                with np.load(cpath) as f:
-                    offsets = f["offsets"]
-                    src_ids = f["source_game_ids"] if "source_game_ids" in f else None
-            except Exception as exc:
-                return [{"status": "error", "path": cpath,
-                         "msg": f"failed to read {cpath}: {exc}"}]
-            n_games = len(offsets) - 1
-            game_meta: list[dict] = []
-            for i in range(n_games):
-                n_frames = int(offsets[i + 1]) - int(offsets[i])
-                entry = xl_by_name.get(
-                    str(src_ids[i]) if src_ids is not None and i < len(src_ids) else "", {}
-                )
-                ts = int(entry.get("starttime", 0) or 0)
-                game_meta.append(_game_meta_from_xlog(entry, n_frames, ts))
-            results.append({"status": "skip", "path": cpath,
-                             "frames": int(offsets[-1]), "games": n_games,
-                             "game_meta": game_meta})
-        return results
+    def _make_meta(id_val, n_frames):
+        entry = xl_by_name.get(str(id_val), {})
+        return _game_meta_from_xlog(entry, n_frames, int(entry.get("starttime", 0) or 0))
+
+    existing = _load_existing_results(output_path, "source_game_ids", _make_meta)
+    if existing is not None:
+        return existing
 
     bz2_sorted = sorted(bz2_files, key=lambda p: int(os.path.basename(p).split(".")[2]))
     _dbg(f"MAKEDIRS {os.path.dirname(output_path) or '.'}")
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     writer = _ChunkWriter(output_path, "source_game_ids", "U64")
-    filtered_games = 0
-    w_ok = w_filter = w_err = 0
-    H = W = None
-    group_name = os.path.basename(game_dir)
-    n_files = len(bz2_sorted)
-    pid = os.getpid()
-    _worker_log(f"  [{time.strftime('%H:%M:%S')}] [{pid}] START  {group_name}  {n_files} files")
-    _dbg(f"TASK_START {group_name} n_files={n_files} output={output_path}")
-    _worker_progress(group_name, 0, n_files, 0)
-    _last_wprint = time.time()
-    _last_progress = time.time()
 
-    for i, bz2_path in enumerate(bz2_sorted):
-        current_file = os.path.basename(bz2_path)
-        now = time.time()
-
-        if now - _last_wprint >= 30:
-            _last_wprint = now
-            _worker_log(
-                f"  [{time.strftime('%H:%M:%S')}] [{pid}]  READ  {group_name}"
-                f"  {i+1}/{n_files}  {current_file}"
-                f"  {writer._offsets[-1]:,} fr so far"
-            )
-
-        _dbg(f"OPEN_BZ2 {bz2_path}")
+    def _entry_id_ts(bz2_path, current_file, file_ts):
         entry = xl_by_name.get(current_file, {})
+        return entry, current_file, int(entry.get("starttime", 0) or 0)
 
-        _dbg(f"DECODE_START {group_name} [{i+1}/{n_files}] {current_file}")
-        try:
-            arrays, n_frames = _decode_with_timeout([bz2_path], ttyrec_version)
-        except TimeoutError as exc:
-            w_err += 1
-            _dbg(f"DECODE_TIMEOUT {group_name} [{i+1}/{n_files}] {current_file}: {exc}")
-            _worker_progress(group_name, i + 1, n_files, writer._offsets[-1],
-                             w_ok, w_filter, w_err, 0, current_file)
-            continue
-        except Exception as exc:
-            w_err += 1
-            _dbg(f"DECODE_ERROR {group_name} [{i+1}/{n_files}] {current_file}: {exc}")
-            _worker_progress(group_name, i + 1, n_files, writer._offsets[-1],
-                             w_ok, w_filter, w_err, 0, current_file)
-            continue
-
-        _dbg(f"DECODE_END {group_name} [{i+1}/{n_files}] {current_file} n_frames={n_frames}")
-
-        if not arrays or n_frames < min_frames:
-            w_filter += 1
-            filtered_games += 1
-            if now - _last_progress >= 5.0:
-                _last_progress = now
-                _worker_progress(group_name, i + 1, n_files, writer._offsets[-1],
-                                 w_ok, w_filter, w_err, 0, current_file)
-            continue
-
-        if H is None:
-            H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
-        chars = arrays["tty_chars"].astype(np.uint8)
-        colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
-                  if "tty_colors" in arrays
-                  else np.zeros((n_frames, H, W), dtype=np.uint8))
-        ts = int(entry.get("starttime", 0) or 0)
-        writer.add(chars, colors, current_file, _game_meta_from_xlog(entry, n_frames, ts))
-        w_ok += 1
-
-        if now - _last_progress >= 5.0:
-            _last_progress = now
-            _worker_progress(group_name, i + 1, n_files, writer._offsets[-1],
-                             w_ok, w_filter, w_err, 0, current_file)
-
-    _dbg(f"TASK_FINISH {group_name} w_ok={w_ok} w_filter={w_filter} w_err={w_err}")
-    return writer.finish(filtered_games)
+    return _run_bz2_loop(bz2_sorted, ttyrec_version, min_frames,
+                         group_name, writer, _entry_id_ts)
 
 
 def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
@@ -1016,9 +923,6 @@ def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> li
     return tasks
 
 
-# --------------------------------------------------------------------------- #
-# --- Index write helpers ---------------------------------------------------- #
-# --------------------------------------------------------------------------- #
 
 def _new_rich_accum() -> dict:
     return {
@@ -1112,9 +1016,6 @@ def _load_rich_accum(index_path: str) -> tuple[dict, set[str]]:
     return a, indexed
 
 
-# --------------------------------------------------------------------------- #
-# --- Conversion runners ----------------------------------------------------- #
-# --------------------------------------------------------------------------- #
 
 def _convert_wrapper(task: tuple) -> tuple:
     """Module-level wrapper so imap_unordered can pickle it.
@@ -1425,9 +1326,6 @@ def _run_convert_rich(
     )
 
 
-# --------------------------------------------------------------------------- #
-# --- Index scan (--skip-convert case) --------------------------------------- #
-# --------------------------------------------------------------------------- #
 
 def _index_worker_rich(player_path: str) -> dict:
     """Read one per-player npz; rebuild per-game metadata from source_timestamps."""
@@ -1506,9 +1404,6 @@ def _build_rich_index_from_scan(
         _write_index_rich(index_path, accum)
 
 
-# --------------------------------------------------------------------------- #
-# --- Dataset pipelines ------------------------------------------------------ #
-# --------------------------------------------------------------------------- #
 
 _NLD_AA_ZIPS = [f"nld-aa-dir-a{c}.zip" for c in "abcdefghijklmnop"]
 _NLD_NAO_ZIPS = (
@@ -1664,9 +1559,6 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
     print(f"  data.index_path:   {index_path}", flush=True)
 
 
-# --------------------------------------------------------------------------- #
-# --- Entry point ------------------------------------------------------------ #
-# --------------------------------------------------------------------------- #
 
 def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
