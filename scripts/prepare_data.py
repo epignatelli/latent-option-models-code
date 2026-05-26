@@ -66,6 +66,7 @@ import time
 import traceback
 
 import psutil
+import shutil
 import urllib.request
 import zipfile
 from collections import defaultdict
@@ -257,6 +258,14 @@ def _extract_zips(filenames: list[str], zip_dir: str, dest_dir: str, workers: in
         return
     print(f"  extracting {len(filenames)} archives to {dest_dir} ({workers} workers)...", flush=True)
     tasks = [(os.path.join(zip_dir, name), dest_dir) for name in filenames]
+    # Pre-create all directories found across every zip so that concurrent
+    # extractall calls never race on os.mkdir.
+    print("  scanning zip manifests...", flush=True)
+    for name in filenames:
+        with zipfile.ZipFile(os.path.join(zip_dir, name), "r") as zf:
+            for member in zf.infolist():
+                if member.is_dir():
+                    os.makedirs(os.path.join(dest_dir, member.filename), exist_ok=True)
     with tqdm(total=len(filenames), unit="zip", file=sys.stdout) as bar:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             def _do_zip(t: tuple) -> None:

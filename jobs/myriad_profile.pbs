@@ -19,7 +19,7 @@
 #$ -S /bin/bash
 #$ -l h_rt=12:0:0
 #$ -l mem=40G
-#$ -pe smp 36
+#$ -pe smp 28
 #$ -ac allow=B
 #$ -l tmpfs=20G
 #$ -N lom_profile
@@ -31,7 +31,7 @@
 # CONFIGURATION
 # --------------------------------------------------------------------------- #
 DEST_LOGS="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/profile"
-WORKERS=36
+WORKERS=28
 N_GROUPS=100
 RAW_DIR="$HOME/lom/datasets"         # nld-aa already extracted here
 OUTPUT_DIR="/dev/shm/lom_profile_$$"
