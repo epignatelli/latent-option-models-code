@@ -210,22 +210,6 @@ class AllArgs(BaseArgs):
 
 
 # --------------------------------------------------------------------------- #
-# --- Sentinel helpers ------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
-
-def _sentinel(directory: str) -> str:
-    return os.path.join(directory, ".done")
-
-
-def _is_done(directory: str) -> bool:
-    return os.path.exists(_sentinel(directory))
-
-
-def _mark_done(directory: str) -> None:
-    open(_sentinel(directory), "w").close()
-
-
-# --------------------------------------------------------------------------- #
 # --- Download helpers ------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
@@ -275,45 +259,33 @@ def _parallel_download(base_url: str, filenames: list[str], dest_dir: str, worke
                 bar.update(1)
 
 
-def _remove_archives(filenames: list[str], archive_dir: str) -> None:
-    for name in filenames:
-        path = os.path.join(archive_dir, name)
-        if os.path.exists(path):
-            os.remove(path)
-    try:
-        os.rmdir(archive_dir)
-    except OSError:
-        pass
-
-
 # --------------------------------------------------------------------------- #
 # --- Extract helpers -------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
-def _extract_one_zip(args: tuple) -> None:
-    zip_path, dest_dir = args
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(dest_dir)
-
-
 def _extract_zips(filenames: list[str], zip_dir: str, dest_dir: str, workers: int = 1) -> None:
-    if _is_done(dest_dir):
+    _done = os.path.join(dest_dir, ".done")
+    if os.path.exists(_done):
         print(f"  already extracted to {dest_dir} — skipping.", flush=True)
         return
     print(f"  extracting {len(filenames)} archives to {dest_dir} ({workers} workers)...", flush=True)
     tasks = [(os.path.join(zip_dir, name), dest_dir) for name in filenames]
     with tqdm(total=len(filenames), unit="zip", file=sys.stdout) as bar:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_extract_one_zip, t): t[0] for t in tasks}
+            def _do_zip(t: tuple) -> None:
+                with zipfile.ZipFile(t[0], "r") as zf:
+                    zf.extractall(t[1])
+            futures = {pool.submit(_do_zip, t): t[0] for t in tasks}
             for fut in as_completed(futures):
                 bar.set_postfix_str(os.path.basename(futures[fut]))
                 fut.result()
                 bar.update(1)
-    _mark_done(dest_dir)
+    open(_done, "w").close()
 
 
 def _extract_tar(tar_path: str, dest_dir: str) -> None:
-    if _is_done(dest_dir):
+    _done = os.path.join(dest_dir, ".done")
+    if os.path.exists(_done):
         print(f"  already extracted to {dest_dir} — skipping.", flush=True)
         return
     print(f"  extracting {tar_path} to {dest_dir} ...", flush=True)
@@ -324,7 +296,7 @@ def _extract_tar(tar_path: str, dest_dir: str) -> None:
             for member in members:
                 tf.extract(member, dest_dir)
                 bar.update(member.size)
-    _mark_done(dest_dir)
+    open(_done, "w").close()
 
 
 # --------------------------------------------------------------------------- #
@@ -554,6 +526,16 @@ class _ChunkWriter:
         self._meta.append(game_meta)
         self._chunk_frames += n
 
+    def _advance_chunk(self, cpath: str) -> None:
+        self._paths.append(cpath)
+        self._chunk_idx += 1
+        self._chars = []
+        self._colors = []
+        self._offsets = [0]
+        self._ids = []
+        self._meta = []
+        self._chunk_frames = 0
+
     def _flush(self) -> None:
         if not self._chars:
             return
@@ -573,14 +555,7 @@ class _ChunkWriter:
             _dbg(f"FLUSH_ERROR {os.path.basename(cpath)}: {exc}")
             self._results.append({"status": "error", "path": cpath,
                                    "error": f"flush failed ({self._offsets[-1]} frames): {exc}"})
-            self._paths.append(cpath)
-            self._chunk_idx += 1
-            self._chars = []
-            self._colors = []
-            self._offsets = [0]
-            self._ids = []
-            self._meta = []
-            self._chunk_frames = 0
+            self._advance_chunk(cpath)
             return
         _worker_log(
             f"  [{time.strftime('%H:%M:%S')}] [{os.getpid()}] CHUNK  {os.path.basename(cpath)}"
@@ -590,14 +565,7 @@ class _ChunkWriter:
                                "frames": self._offsets[-1],
                                "games": len(self._offsets) - 1,
                                "game_meta": self._meta, "filtered_games": 0})
-        self._paths.append(cpath)
-        self._chunk_idx += 1
-        self._chars = []
-        self._colors = []
-        self._offsets = [0]
-        self._ids = []
-        self._meta = []
-        self._chunk_frames = 0
+        self._advance_chunk(cpath)
 
     def finish(self, filtered_games: int = 0) -> list[dict]:
         self._flush()
@@ -704,7 +672,6 @@ def _convert_player(task: tuple) -> list[dict]:
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
         chars = arrays["tty_chars"].astype(np.uint8)
-        assert H is not None and W is not None
         colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
                   if "tty_colors" in arrays
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
@@ -718,9 +685,7 @@ def _convert_player(task: tuple) -> list[dict]:
                              w_ok, w_filter, w_err, 0, current_file)
 
     _dbg(f"TASK_FINISH {player_name} w_ok={w_ok} w_filter={w_filter} w_err={w_err}")
-    results = writer.finish(filtered_games)
-    del writer
-    return results
+    return writer.finish(filtered_games)
 
 
 # --------------------------------------------------------------------------- #
@@ -748,17 +713,6 @@ def _discover_nao_top10(extract_dir: str, output_dir: str, min_frames: int) -> l
     return tasks
 
 
-def _chunk_paths(output_path: str, n_chunks: int) -> list[str]:
-    """Return the list of chunk file paths for a player.
-
-    Single-chunk players keep the original name (no suffix).
-    Multi-chunk players use stem_0.npz, stem_1.npz, …
-    """
-    if n_chunks == 1:
-        return [output_path]
-    stem, ext = os.path.splitext(output_path)
-    return [f"{stem}_{i}{ext}" for i in range(n_chunks)]
-
 
 def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
     """Merge all nao-top10 sessions for one player into per-player npz chunk(s).
@@ -773,9 +727,6 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
     """
     session_files, output_path, min_frames = task
 
-    # Pass 1: discover valid sessions and per-game frame counts.
-    # np.concatenate needs parts + output simultaneously; pre-allocating once and
-    # filling in-place halves peak RAM to just the output array + one session.
     valid: list[tuple[str, int]] = []
     game_meta_all: list[dict] = []
     H = W = None
@@ -797,8 +748,7 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
     if not valid:
         return [{"status": "filter"}]
 
-    # Group valid games into chunks of at most _MAX_FRAMES_PER_CHUNK frames each.
-    chunks: list[list[int]] = []   # each inner list is indices into `valid`
+    chunks: list[list[int]] = []
     current_chunk: list[int] = []
     current_frames = 0
     for idx, (_, n_frames) in enumerate(valid):
@@ -812,10 +762,9 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
         chunks.append(current_chunk)
 
     n_chunks = len(chunks)
-    paths = _chunk_paths(output_path, n_chunks)
+    _stem, _ext = os.path.splitext(output_path)
+    paths = [output_path] if n_chunks == 1 else [f"{_stem}_{i}{_ext}" for i in range(n_chunks)]
 
-    # Skip check: all expected chunk files must exist; re-do the whole player if
-    # only some exist (partial previous run).
     if all(os.path.exists(p) for p in paths):
         results: list[dict] = []
         for chunk_path in paths:
@@ -836,7 +785,6 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
                              "games": n_games, "game_meta": gm})
         return results
 
-    # Pass 2: write each chunk — load sessions into RAM, concatenate, savez.
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     results = []
     for chunk_idx, game_indices in enumerate(chunks):
@@ -846,7 +794,6 @@ def _consolidate_nao_top10_player(task: tuple) -> list[dict]:
         offsets_list: list[int] = [0]
         chars_parts: list[np.ndarray] = []
         colors_parts: list[np.ndarray] = []
-        assert H is not None and W is not None
         for npz_path, n_frames in chunk_valid:
             try:
                 with np.load(npz_path) as f:
@@ -1020,7 +967,6 @@ def _convert_aa_group(task: tuple) -> list[dict]:
         if H is None:
             H, W = arrays["tty_chars"].shape[1], arrays["tty_chars"].shape[2]
         chars = arrays["tty_chars"].astype(np.uint8)
-        assert H is not None and W is not None
         colors = (arrays["tty_colors"].astype(np.int16).clip(0, 31).astype(np.uint8)
                   if "tty_colors" in arrays
                   else np.zeros((n_frames, H, W), dtype=np.uint8))
@@ -1034,9 +980,7 @@ def _convert_aa_group(task: tuple) -> list[dict]:
                              w_ok, w_filter, w_err, 0, current_file)
 
     _dbg(f"TASK_FINISH {group_name} w_ok={w_ok} w_filter={w_filter} w_err={w_err}")
-    results = writer.finish(filtered_games)
-    del writer
-    return results
+    return writer.finish(filtered_games)
 
 
 def _discover_nld_nao(nle_data_dir: str, output_dir: str, min_frames: int) -> list[tuple]:
@@ -1213,7 +1157,6 @@ def _setup_signal_handlers(counts: dict, wbars: dict, t0: float) -> None:
                 pass
         sys.stderr.write(msg)
         sys.stderr.flush()
-        # Re-raise default so the process actually dies.
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
@@ -1246,13 +1189,11 @@ def _run_convert_rich(
     if write_index and os.path.exists(index_path):
         accum, indexed_paths = _load_rich_accum(index_path)
 
-    def _task_indexed(task_output_path: str) -> bool:
-        if task_output_path in indexed_paths:
-            return True
-        stem = os.path.splitext(task_output_path)[0]
-        return f"{stem}_0.npz" in indexed_paths
-
-    pending = [t for t in tasks if not _task_indexed(t[1])]
+    pending = [
+        t for t in tasks
+        if t[1] not in indexed_paths
+        and f"{os.path.splitext(t[1])[0]}_0.npz" not in indexed_paths
+    ]
     if max_groups > 0:
         pending = pending[:max_groups]
     total_files = sum(len(t[0]) for t in pending)
@@ -1291,10 +1232,9 @@ def _run_convert_rich(
     n_workers = min(workers, len(pending))
     _dbg(f"POOL_START n_workers={n_workers} pending={len(pending)} total_files={total_files}")
 
-    # Per-worker tqdm bars (positions 1..n_workers) + overall bar (position 0).
     _wbars:       dict[str, tqdm] = {}
     _wbar_slots:  list[int] = list(range(1, n_workers + 1))
-    _wbar_slot_of: dict[str, int] = {}   # name → slot (for safe close)
+    _wbar_slot_of: dict[str, int] = {}
     _wbar_lock    = threading.Lock()
     _bar_thread:  threading.Thread | None = None
 
@@ -1378,7 +1318,6 @@ def _run_convert_rich(
 
                 name, n_task_files, elapsed, result_list, exc_str = raw
 
-                # Close the per-worker bar and return its slot.
                 with _wbar_lock:
                     if name in _wbars:
                         _wbars[name].close()
@@ -1457,7 +1396,6 @@ def _run_convert_rich(
                     _write_index_rich(index_path, accum)
                     since_ckpt = 0
 
-    # Shut down background threads.
     _hb_stop.set()
     if _PROGRESS_QUEUE is not None and _bar_thread is not None:
         _PROGRESS_QUEUE.put(None)
@@ -1572,16 +1510,12 @@ def _build_rich_index_from_scan(
 # --- Dataset pipelines ------------------------------------------------------ #
 # --------------------------------------------------------------------------- #
 
-def _nld_aa_zips() -> list[str]:
-    return [f"nld-aa-dir-a{c}.zip" for c in "abcdefghijklmnop"]
-
-
-def _nld_nao_zips() -> list[str]:
-    suffixes = [f"a{c}" for c in "abcdefghijklmnopqrstuvwxyz"] + \
-               [f"b{c}" for c in "abcdefghijklmn"]
-    zips = [f"nld-nao-dir-{s}.zip" for s in suffixes]
-    zips.append("nld-nao_xlogfiles.zip")
-    return zips
+_NLD_AA_ZIPS = [f"nld-aa-dir-a{c}.zip" for c in "abcdefghijklmnop"]
+_NLD_NAO_ZIPS = (
+    [f"nld-nao-dir-a{c}.zip" for c in "abcdefghijklmnopqrstuvwxyz"]
+    + [f"nld-nao-dir-b{c}.zip" for c in "abcdefghijklmn"]
+    + ["nld-nao_xlogfiles.zip"]
+)
 
 
 def _run_nao_top10(args: BaseArgs) -> None:
@@ -1655,8 +1589,7 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
     zip_dir     = os.path.join(raw, "zips", dataset)
     extract_dir = os.path.join(raw, dataset)
     db_path     = os.path.join(raw, f"{dataset}.db")
-    _npz_subdirs = {"nld-aa": "aa", "nld-nao": "nao"}
-    npz_dir     = os.path.join(args.output_dir, "nle", _npz_subdirs[dataset])
+    npz_dir     = os.path.join(args.output_dir, "nle", "aa" if dataset == "nld-aa" else "nao")
     index_path  = os.path.join(npz_dir, "index.npz")
 
     os.makedirs(npz_dir, exist_ok=True)
@@ -1666,7 +1599,7 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
     _DEBUG_LOG_PATH  = os.path.join(args.log_dir, f"debug-{dataset}.log")
     print(f"[log]      debug → {_DEBUG_LOG_PATH}", flush=True)
 
-    filenames  = _nld_aa_zips() if dataset == "nld-aa" else _nld_nao_zips()
+    filenames  = _NLD_AA_ZIPS if dataset == "nld-aa" else _NLD_NAO_ZIPS
     base_url   = _NLD_AA_BASE   if dataset == "nld-aa" else _NLD_NAO_BASE
     use_altorg = dataset == "nld-nao"
 
@@ -1684,7 +1617,14 @@ def _run_nld(dataset: str, args: BaseArgs) -> None:
         print(f"[extract]  → {extract_dir}", flush=True)
         _extract_zips(filenames, zip_dir, extract_dir, workers=args.workers)
         if not args.keep_archives:
-            _remove_archives(filenames, zip_dir)
+            for _name in filenames:
+                _p = os.path.join(zip_dir, _name)
+                if os.path.exists(_p):
+                    os.remove(_p)
+            try:
+                os.rmdir(zip_dir)
+            except OSError:
+                pass
     else:
         print("[extract]  skipped", flush=True)
 
