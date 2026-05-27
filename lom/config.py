@@ -47,6 +47,7 @@ class DataCfg:
     val_fraction: float = 0.05
     buffer_size: int = 1_000
     steps_per_epoch: int = 10_000
+    max_player_frames: int = 0  # 0 = no limit; set >0 to skip oversized player files
 
 
 @dataclass

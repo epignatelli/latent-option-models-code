@@ -80,7 +80,7 @@ class GameBuffer:
         with np.load(self._paths[idx]) as f:
             chars = f["tty_chars"].astype(np.uint8)
             if "tty_colors" in f:
-                colors = np.clip(f["tty_colors"].astype(np.int16), 0, COLOR_VOCAB - 1).astype(np.uint8)
+                colors = f["tty_colors"].clip(0, COLOR_VOCAB - 1).astype(np.uint8)
             else:
                 colors = np.zeros_like(chars)
             offsets = f["offsets"] if "offsets" in f else np.array([0, len(chars)], dtype=np.int64)
@@ -192,9 +192,14 @@ class NpzTrajectoryDataset(Dataset):
         index_path: str,
         val_fraction: float = 0.05,
         seed: int = 42,
+        max_player_frames: int = 0,
         **kwargs,
     ) -> Tuple["NpzTrajectoryDataset", "NpzTrajectoryDataset"]:
-        """Split index into train / val datasets (by player for rich index)."""
+        """Split index into train / val datasets (by player for rich index).
+
+        max_player_frames: if > 0, exclude player files with more total frames
+            (prevents OOM when loading outlier files with millions of frames).
+        """
         idx = np.load(index_path)
         if "player_paths" in idx:
             paths   = idx["player_paths"].astype(str)
@@ -202,6 +207,13 @@ class NpzTrajectoryDataset(Dataset):
         else:
             paths   = idx["paths"].astype(str)
             lengths = idx["lengths"].astype(np.int32)
+
+        if max_player_frames > 0:
+            mask  = lengths <= max_player_frames
+            paths   = paths[mask]
+            lengths = lengths[mask]
+            log.info("max_player_frames=%d: %d/%d players retained",
+                     max_player_frames, mask.sum(), len(mask))
 
         rng = np.random.default_rng(seed)
         n_val = max(1, int(len(paths) * val_fraction))
@@ -248,6 +260,7 @@ def build_npz_dataloaders(
     refresh_every: float = 60.0,
     seed: int = 42,
     return_sequence: bool = False,
+    max_player_frames: int = 0,
 ) -> Tuple[DataLoader, DataLoader]:
     """Build train + val DataLoaders from a prepare_data index file.
 
@@ -257,6 +270,7 @@ def build_npz_dataloaders(
         index_path,
         val_fraction=val_fraction,
         seed=seed,
+        max_player_frames=max_player_frames,
         context_len=context_len,
         horizon=horizon,
         buffer_size=buffer_size,

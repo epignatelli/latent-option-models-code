@@ -103,6 +103,7 @@ class Trainer(ABC):
             steps_per_epoch=d.steps_per_epoch,
             seed=t.seed,
             return_sequence=isinstance(cfg, LOMCfg),
+            max_player_frames=d.max_player_frames,
         )
 
         self.models = self.build_models().to(self.device)
@@ -129,8 +130,8 @@ class Trainer(ABC):
             if "cpu" not in str(self.device)
             else NullCtx()
         )
-        self.scaler = torch.cuda.GradScaler(
-            enabled=(amp_dtype == torch.float16 and "cuda" in str(self.device))
+        self.scaler = torch.amp.GradScaler(
+            "cuda", enabled=(amp_dtype == torch.float16 and "cuda" in str(self.device))
         )
 
         os.makedirs(t.ckpt_dir, exist_ok=True)
