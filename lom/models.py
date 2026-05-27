@@ -86,6 +86,7 @@ class LatentActionModel(SerialisableModule):
         vq_entropy_weight: float = 0.01,
         vq_beta: float = 0.25,
         vq_reset_thresh: int = 100,
+        vq_ema_decay: float = 0.99,
         dropout: float = 0.0,
         bias: bool = False,
     ):
@@ -106,6 +107,7 @@ class LatentActionModel(SerialisableModule):
         self.vq_entropy_weight = vq_entropy_weight
         self.vq_beta = vq_beta
         self.vq_reset_thresh = vq_reset_thresh
+        self.vq_ema_decay = vq_ema_decay
         self.dropout = dropout
         self.bias = bias
         self.has_condition = condition_dim is not None
@@ -140,6 +142,7 @@ class LatentActionModel(SerialisableModule):
             entropy_weight=vq_entropy_weight,
             vq_beta=vq_beta,
             vq_reset_thresh=vq_reset_thresh,
+            ema_decay=vq_ema_decay,
         )
 
     def _build_mask(self, c: int, k: int, device: torch.device) -> torch.Tensor:

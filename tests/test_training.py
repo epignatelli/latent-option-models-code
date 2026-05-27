@@ -118,7 +118,7 @@ def lom_batch():
 def test_lam_step_keys():
     trainer = lam_trainer_with_models()
     out = trainer.step(lam_batch())
-    assert {"recon", "vq_loss", "entropy", "total_loss"} == set(out.keys())
+    assert {"recon", "vq_loss", "commit_loss", "entropy", "total_loss"} == set(out.keys())
 
 
 def test_lam_step_backward():
@@ -131,6 +131,7 @@ def test_lom_step_keys():
     trainer = lom_trainer_with_models()
     out = trainer.step(lom_batch())
     assert {"lam_recon", "lom_recon", "vq_loss_option", "vq_loss_action",
+            "commit_loss_option", "commit_loss_action",
             "entropy_option", "entropy_action", "total_loss"} == set(out.keys())
 
 

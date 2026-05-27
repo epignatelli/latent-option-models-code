@@ -380,11 +380,20 @@ class VQConfig:
     entropy_weight: float = 0.01
     vq_beta: float = 0.25
     vq_reset_thresh: int = 100
+    ema_decay: float = 0.99
 
 
 class VectorQuantizer(nn.Module):
-    """EMA-free VQ with cosine-distance assignment, straight-through estimator,
-    entropy regularisation and optional dead-code reset.
+    """EMA VQ with cosine-distance assignment, straight-through estimator,
+    entropy regularisation and dead-code reset.
+
+    The codebook is a buffer updated by exponential moving average (not the
+    optimizer), following van den Oord et al. 2017.  This decouples codebook
+    learning from the choice of optimizer and avoids the codebook drifting
+    off the unit sphere.
+
+    Only the encoder's commitment loss flows through the optimizer;
+    the codebook itself is updated in-place during each forward pass.
     """
 
     def __init__(
@@ -395,6 +404,7 @@ class VectorQuantizer(nn.Module):
         entropy_weight: float,
         vq_beta: float,
         vq_reset_thresh: int = 100,
+        ema_decay: float = 0.99,
     ):
         super().__init__()
         self.latent_dim = latent_dim
@@ -402,16 +412,18 @@ class VectorQuantizer(nn.Module):
         self.entropy_weight = entropy_weight
         self.vq_beta = vq_beta
         self.vq_reset_thresh = vq_reset_thresh
+        self.ema_decay = ema_decay
         self.drop = nn.Dropout(dropout)
 
         bound = (3 / latent_dim) ** 0.5
-        self.codebook = nn.Parameter(torch.empty(num_options, latent_dim).uniform_(-bound, bound))
-        self._normalize_codebook()
+        codebook_init = F.normalize(
+            torch.empty(num_options, latent_dim).uniform_(-bound, bound), dim=-1
+        )
+        # Codebook is a buffer — updated by EMA, not the optimizer.
+        self.register_buffer("codebook", codebook_init)
+        self.register_buffer("ema_cluster_size", torch.ones(num_options))
+        self.register_buffer("ema_embed_sum", codebook_init.clone())
         self.register_buffer("last_active", torch.zeros(num_options, dtype=torch.long))
-
-    def _normalize_codebook(self) -> None:
-        with torch.no_grad():
-            self.codebook.data.copy_(F.normalize(self.codebook.data, dim=-1))
 
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, dict, torch.Tensor]:
         """
@@ -429,31 +441,46 @@ class VectorQuantizer(nn.Module):
         indices = dist.argmin(dim=-1)
         z_hard = F.normalize(self.codebook[indices], dim=-1)
 
-        # Dead-code reset
-        if self.training and self.vq_reset_thresh > 0:
-            self.last_active += 1
-            self.last_active[indices.view(-1).unique()] = 0
-            dead = (self.last_active >= self.vq_reset_thresh).nonzero(as_tuple=True)[0]
-            if dead.numel():
-                alive = (self.last_active < self.vq_reset_thresh).nonzero(as_tuple=True)[0]
-                if alive.numel():
-                    src = alive[torch.randint(alive.numel(), (dead.numel(),), device=z.device)]
-                    with torch.no_grad():
-                        self.codebook.data[dead] = self.codebook.data[src]
-                        self.last_active[dead] = 0
+        if self.training:
+            with torch.no_grad():
+                one_hot = torch.zeros(z_norm.shape[0], self.num_options, device=z.device)
+                one_hot.scatter_(1, indices.unsqueeze(1), 1)
+
+                # EMA update of cluster sizes and embedding sums
+                cluster_size = one_hot.sum(0)
+                self.ema_cluster_size.mul_(self.ema_decay).add_(cluster_size, alpha=1 - self.ema_decay)
+                embed_sum = one_hot.T @ z_norm  # (K, D)
+                self.ema_embed_sum.mul_(self.ema_decay).add_(embed_sum, alpha=1 - self.ema_decay)
+
+                # Laplace-smoothed codebook update
+                n = self.ema_cluster_size.sum()
+                smoothed = (self.ema_cluster_size + 1e-5) / (n + self.num_options * 1e-5) * n
+                self.codebook.copy_(self.ema_embed_sum / smoothed.unsqueeze(1))
+
+                # Dead-code reset: copy a random live entry into each dead slot
+                if self.vq_reset_thresh > 0:
+                    self.last_active += 1
+                    self.last_active[indices.view(-1).unique()] = 0
+                    dead = (self.last_active >= self.vq_reset_thresh).nonzero(as_tuple=True)[0]
+                    if dead.numel():
+                        alive = (self.last_active < self.vq_reset_thresh).nonzero(as_tuple=True)[0]
+                        if alive.numel():
+                            src = alive[torch.randint(alive.numel(), (dead.numel(),), device=z.device)]
+                            self.codebook[dead] = self.codebook[src]
+                            self.ema_embed_sum[dead] = self.ema_embed_sum[src]
+                            self.ema_cluster_size[dead] = self.ema_cluster_size[src]
+                            self.last_active[dead] = 0
 
         z_q = z + (z_hard - z).detach()  # straight-through
 
         commit_loss = F.mse_loss(z, z_hard.detach())
-        q_loss = F.mse_loss(z_hard, z.detach())
         entropy = self._entropy(dist)
-        vq_loss = q_loss + self.vq_beta * commit_loss - self.entropy_weight * entropy
+        vq_loss = self.vq_beta * commit_loss - self.entropy_weight * entropy
 
         return (
             z_q,
             {
                 "vq_loss": vq_loss,
-                "q_loss": q_loss,
                 "commit_loss": commit_loss,
                 "entropy": entropy,
             },
@@ -465,4 +492,4 @@ class VectorQuantizer(nn.Module):
         return -(avg_probs * avg_probs.clamp(min=eps).log()).sum()
 
     def lookup(self, indices: torch.Tensor) -> torch.Tensor:
-        return self.codebook[indices]
+        return F.normalize(self.codebook[indices], dim=-1)

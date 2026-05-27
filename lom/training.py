@@ -329,6 +329,7 @@ class LAMTrainer(Trainer):
             vq_entropy_weight=m.vq_entropy_weight,
             vq_beta=m.vq_beta,
             vq_reset_thresh=m.vq_reset_thresh,
+            vq_ema_decay=m.vq_ema_decay,
         )
         return nn.ModuleDict(
             {
@@ -348,6 +349,7 @@ class LAMTrainer(Trainer):
         return {
             "recon": recon,
             "vq_loss": vq["vq_loss"],
+            "commit_loss": vq["commit_loss"],
             "entropy": vq["entropy"],
             "total_loss": total,
         }
@@ -380,6 +382,7 @@ class LOMTrainer(Trainer):
             vq_entropy_weight=m.vq_entropy_weight,
             vq_beta=m.vq_beta,
             vq_reset_thresh=m.vq_reset_thresh,
+            vq_ema_decay=m.vq_ema_decay,
         )
         return nn.ModuleDict(
             {
@@ -438,6 +441,8 @@ class LOMTrainer(Trainer):
             "lom_recon": lom_recon,
             "vq_loss_option": vq_opt["vq_loss"],
             "vq_loss_action": vq_act["vq_loss"],
+            "commit_loss_option": vq_opt["commit_loss"],
+            "commit_loss_action": vq_act["commit_loss"],
             "entropy_option": vq_opt["entropy"],
             "entropy_action": vq_act["entropy"],
             "total_loss": total,

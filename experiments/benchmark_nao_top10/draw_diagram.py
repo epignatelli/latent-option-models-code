@@ -196,7 +196,7 @@ sub_box(ax, 0.55, 11.8, 7.9, 3.35, "LAM Encoder  —  LatentActionModel(codebook
          "  temporal attn: (B×120, 6, 256) bidirectional",
          "pool OPT token → mean over S → (B, 256) → vq_proj → (B, 512)",
          "VectorQuantizer: cosine dist, STE, entropy reg, dead-code reset",
-         "  z_q  (B, 512),   vq_loss = q_loss + β·commit - λ·entropy"],
+         "  z_q  (B, 512),   vq_loss = β·commit - λ·entropy  (codebook updated by EMA)"],
         "#fef9e7")
 
 sub_box(ax, 0.55, 9.15, 7.9, 2.45, "LAM Dynamics  —  DynamicsModel(predict_sequence=False)",
