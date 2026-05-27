@@ -642,16 +642,17 @@ class VectorQuantizer(nn.Module):
                 one_hot = torch.zeros(z_norm.shape[0], self.num_options, device=z.device)
                 one_hot.scatter_(1, indices.unsqueeze(1), 1)
 
-                # EMA update of cluster sizes and embedding sums
+                # EMA update: use float32 to avoid bf16 accumulation under autocast
+                z_norm_f32 = z_norm.float()
                 cluster_size = one_hot.sum(0)
                 self.ema_cluster_size.mul_(self.ema_decay).add_(cluster_size, alpha=1 - self.ema_decay)
-                embed_sum = one_hot.T @ z_norm  # (K, D)
+                embed_sum = one_hot.T @ z_norm_f32  # (K, D)
                 self.ema_embed_sum.mul_(self.ema_decay).add_(embed_sum, alpha=1 - self.ema_decay)
 
-                # Laplace-smoothed codebook update
+                # Laplace-smoothed codebook update; normalise to keep entries on the unit sphere
                 n = self.ema_cluster_size.sum()
                 smoothed = (self.ema_cluster_size + 1e-5) / (n + self.num_options * 1e-5) * n
-                self.codebook.copy_(self.ema_embed_sum / smoothed.unsqueeze(1))
+                self.codebook.copy_(F.normalize(self.ema_embed_sum / smoothed.unsqueeze(1), dim=-1))
 
                 # Dead-code reset: copy a random live entry into each dead slot
                 if self.vq_reset_thresh > 0:
@@ -669,7 +670,7 @@ class VectorQuantizer(nn.Module):
 
         z_q = z + (z_hard - z).detach()  # straight-through
 
-        commit_loss = F.mse_loss(z, z_hard.detach())
+        commit_loss = F.mse_loss(F.normalize(z, dim=-1), z_hard.detach())
         entropy = self._entropy(dist)
         vq_loss = self.vq_beta * commit_loss - self.entropy_weight * entropy
 

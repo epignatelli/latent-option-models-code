@@ -232,8 +232,9 @@ class Trainer(ABC):
             if i >= self.cfg.train.eval_iters:
                 break
             batch = [x.to(self.device) for x in batch]
-            for k, v in self.step(batch).items():
-                totals[k] = totals.get(k, 0.0) + v.item()
+            with self.ctx:
+                for k, v in self.step(batch).items():
+                    totals[k] = totals.get(k, 0.0) + v.item()
         for mod in self.models.values():
             mod.train()
         return {k: v / (i + 1) for k, v in totals.items()}
