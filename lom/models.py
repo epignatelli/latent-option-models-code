@@ -36,10 +36,12 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from .modules import (
+    BidirectionalEncoder,
     LayerNorm,
     PatchEmbedding,
     ScreenTokeniser,
     SpatioTemporalTransformer,
+    TwoPassEncoder,
     VectorQuantizer,
     SerialisableModule,
 )
@@ -50,21 +52,11 @@ from .modules import (
 
 
 class LatentActionModel(SerialisableModule):
-    """Bidirectional STP-Transformer: (history, future[, condition]) → z via VQ.
+    """Frame encoder + VQ: (history, future[, condition]) → z via VQ.
 
-    Two encoder modes, selected by `two_encoder`:
-
-    False (default) — single bidirectional transformer over the concatenated sequence:
-        [h_0, …, h_{c-1},  (z_cond,)  OPT,  f_0, …, f_{k-1}]
-        OPT is masked from future frames; its pooled representation is quantised.
-        History and future attend to each other, so z captures the delta.
-
-    True — two independent transformer passes (JEPA-style):
-        context pass:  [h_0, …, h_{c-1},  (z_cond)]   → pool → h_ctx  (B, D)
-        target  pass:  [f_0, …, f_{k-1}]               → pool → h_tgt  (B, D)
-        concat([h_ctx, h_tgt]) → vq_proj → z
-        z is the sole bridge between context and target; no cross-attention leakage.
-        The shared transformer weights are called twice with independent sequences.
+    Encoder is selected by two_encoder:
+      False (default): BidirectionalEncoder — single pass with masked OPT token
+      True:            TwoPassEncoder — separate context/target passes, concat-pooled
     """
 
     def __init__(
@@ -94,11 +86,11 @@ class LatentActionModel(SerialisableModule):
         self.vocab_size = vocab_size
         self.obs_h = obs_h
         self.obs_w = obs_w
+        self.d_model = d_model
         self.n_layers = n_layers
         self.n_heads = n_heads
-        self.d_model = d_model
-        self.latent_dim = latent_dim
         self.context_length = context_length
+        self.latent_dim = latent_dim
         self.codebook_size = codebook_size
         self.horizon = horizon
         self.patch_size = patch_size
@@ -111,38 +103,16 @@ class LatentActionModel(SerialisableModule):
         self.vq_ema_decay = vq_ema_decay
         self.dropout = dropout
         self.bias = bias
-        self.has_condition = condition_dim is not None
 
-        self.tokeniser = ScreenTokeniser()
-        self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
-        S = self.S = self.embed.n_tokens
-
-        extra = 1 if self.has_condition else 0
-        if two_encoder:
-            # Shared transformer is called independently for context and target.
-            # max_temporal_len must cover the longer of the two sequences.
-            max_temporal_len = max(context_length + extra, horizon)
-        else:
-            max_temporal_len = context_length + extra + 1 + horizon
-
-        self.cond_proj = (
-            nn.Linear(condition_dim, d_model, bias=bias) if self.has_condition else None
+        encoder_cls = TwoPassEncoder if two_encoder else BidirectionalEncoder
+        self.encoder = encoder_cls(
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, horizon=horizon,
+            patch_size=patch_size, condition_dim=condition_dim,
+            dropout=dropout, bias=bias,
         )
-        if not two_encoder:
-            self.opt_token = nn.Parameter(torch.randn(1, 1, S, d_model) * 0.02)
-        self.transformer = SpatioTemporalTransformer(
-            d_model=d_model,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            n_spatial_positions=S,
-            max_temporal_len=max_temporal_len,
-            dropout=dropout,
-            bias=bias,
-            causal_temporal=False,
-        )
-        # two_encoder concatenates context and target pooled vectors before projection
-        vq_in_dim = 2 * d_model if two_encoder else d_model
-        self.vq_proj = nn.Linear(vq_in_dim, latent_dim, bias=bias)
+        self.vq_proj = nn.Linear(self.encoder.out_dim, latent_dim, bias=bias)
         self.ln_vq = LayerNorm(latent_dim, bias)
         self.vq = VectorQuantizer(
             latent_dim=latent_dim,
@@ -153,14 +123,6 @@ class LatentActionModel(SerialisableModule):
             vq_reset_thresh=vq_reset_thresh,
             ema_decay=vq_ema_decay,
         )
-
-    def _build_mask(self, c: int, k: int, device: torch.device) -> torch.Tensor:
-        extra = 1 if self.has_condition else 0
-        T = c + extra + 1 + k
-        opt_pos = c + extra
-        mask = torch.zeros(T, T, device=device)
-        mask[opt_pos, opt_pos + 1 :] = float("-inf")  # OPT cannot attend to any future frame
-        return mask.view(1, 1, T, T)
 
     def forward(
         self,
@@ -176,56 +138,8 @@ class LatentActionModel(SerialisableModule):
         Returns:
             z_q (B, latent_dim), vq loss dict, indices (B,)
         """
-        B, c = history.shape[:2]
-
-        history = self.tokeniser(history)   # (B, c, H, W) long
-        future  = self.tokeniser(future)    # (B, H, W) or (B, k, H, W) long
-        if future.ndim == 3:
-            future = future.unsqueeze(1)    # (B, 1, H, W)
-        k = future.shape[1]
-
-        hist_emb = self.embed(history)   # (B, c, S, D)
-        fut_emb  = self.embed(future)    # (B, k, S, D)
-
-        if self.two_encoder:
-            # --- context pass ---
-            ctx_parts = [hist_emb]
-            if condition is not None and self.cond_proj is not None:
-                cond_tok = (
-                    self.cond_proj(condition)
-                    .view(B, 1, 1, self.d_model)
-                    .expand(B, 1, self.S, self.d_model)
-                )
-                ctx_parts.append(cond_tok)
-            ctx_hidden = self.transformer(torch.cat(ctx_parts, dim=1))  # (B, c+extra, S, D)
-            ctx_pooled = ctx_hidden.mean(dim=(1, 2))                      # (B, D)
-
-            # --- target pass (no history, no condition) ---
-            tgt_hidden = self.transformer(fut_emb)       # (B, k, S, D)
-            tgt_pooled = tgt_hidden.mean(dim=(1, 2))     # (B, D)
-
-            z = self.ln_vq(self.vq_proj(torch.cat([ctx_pooled, tgt_pooled], dim=-1)))
-            return self.vq(z)
-
-        # --- original single-encoder path ---
-        opt_emb = self.opt_token.expand(B, 1, self.S, self.d_model)
-
-        parts = [hist_emb]
-        if condition is not None and self.cond_proj is not None:
-            cond_tok = (
-                self.cond_proj(condition)
-                .view(B, 1, 1, self.d_model)
-                .expand(B, 1, self.S, self.d_model)
-            )
-            parts.append(cond_tok)
-        parts += [opt_emb, fut_emb]
-
-        seq = torch.cat(parts, dim=1)
-        hidden = self.transformer(seq, temporal_mask=self._build_mask(c, k, history.device))
-
-        opt_pos = c + (1 if self.has_condition else 0)
-        opt_pooled = hidden[:, opt_pos, :, :].mean(dim=1)  # (B, D)
-        z = self.ln_vq(self.vq_proj(opt_pooled))
+        pooled = self.encoder(history, future, condition)
+        z = self.ln_vq(self.vq_proj(pooled))
         return self.vq(z)
 
 

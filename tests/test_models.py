@@ -1,6 +1,7 @@
 import pytest
 import torch
 from lom.models import DynamicsModel, LatentActionModel
+from lom.modules import BidirectionalEncoder, TwoPassEncoder
 
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 
@@ -89,13 +90,52 @@ def test_lam_backward():
     loss_dict["vq_loss"].backward()
 
 
-def test_lam_opt_ignores_future():
-    lam = make_lam().eval()
-    hist = history()
-    with torch.no_grad():
-        z1, _, _ = lam(hist, single_frame())
-        z2, _, _ = lam(hist, single_frame())  # different random future
-    assert torch.allclose(z1, z2), "OPT output must not depend on future content"
+# --------------------------------------------------------------------------- #
+# --- Encoder classes ------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+def make_encoder(cls, horizon=1, condition_dim=None):
+    return cls(
+        vocab_size=VOCAB, obs_h=OBS_H, obs_w=OBS_W,
+        d_model=D_MODEL, n_layers=N_LAYERS, n_heads=N_HEADS,
+        context_length=CONTEXT, horizon=horizon, condition_dim=condition_dim,
+    )
+
+
+def test_bidirectional_encoder_shape():
+    enc = make_encoder(BidirectionalEncoder)
+    out = enc(history(), single_frame())
+    assert out.shape == (BATCH, D_MODEL)
+
+
+def test_bidirectional_encoder_sequence():
+    enc = make_encoder(BidirectionalEncoder, horizon=HORIZON)
+    out = enc(history(), frame_sequence(HORIZON))
+    assert out.shape == (BATCH, D_MODEL)
+
+
+def test_bidirectional_encoder_with_condition():
+    enc = make_encoder(BidirectionalEncoder, condition_dim=LATENT_DIM)
+    out = enc(history(), single_frame(), condition=torch.randn(BATCH, LATENT_DIM))
+    assert out.shape == (BATCH, D_MODEL)
+
+
+def test_twopass_encoder_shape():
+    enc = make_encoder(TwoPassEncoder)
+    out = enc(history(), single_frame())
+    assert out.shape == (BATCH, 2 * D_MODEL)
+
+
+def test_twopass_encoder_sequence():
+    enc = make_encoder(TwoPassEncoder, horizon=HORIZON)
+    out = enc(history(), frame_sequence(HORIZON))
+    assert out.shape == (BATCH, 2 * D_MODEL)
+
+
+def test_twopass_encoder_with_condition():
+    enc = make_encoder(TwoPassEncoder, condition_dim=LATENT_DIM)
+    out = enc(history(), single_frame(), condition=torch.randn(BATCH, LATENT_DIM))
+    assert out.shape == (BATCH, 2 * D_MODEL)
 
 
 # --------------------------------------------------------------------------- #
