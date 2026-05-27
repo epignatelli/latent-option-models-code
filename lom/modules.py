@@ -649,10 +649,10 @@ class VectorQuantizer(nn.Module):
                 embed_sum = one_hot.T @ z_norm_f32  # (K, D)
                 self.ema_embed_sum.mul_(self.ema_decay).add_(embed_sum, alpha=1 - self.ema_decay)
 
-                # Laplace-smoothed codebook update; normalise to keep entries on the unit sphere
+                # Laplace-smoothed codebook update
                 n = self.ema_cluster_size.sum()
                 smoothed = (self.ema_cluster_size + 1e-5) / (n + self.num_options * 1e-5) * n
-                self.codebook.copy_(F.normalize(self.ema_embed_sum / smoothed.unsqueeze(1), dim=-1))
+                self.codebook.copy_(self.ema_embed_sum / smoothed.unsqueeze(1))
 
                 # Dead-code reset: copy a random live entry into each dead slot
                 if self.vq_reset_thresh > 0:
@@ -670,7 +670,7 @@ class VectorQuantizer(nn.Module):
 
         z_q = z + (z_hard - z).detach()  # straight-through
 
-        commit_loss = F.mse_loss(F.normalize(z, dim=-1), z_hard.detach())
+        commit_loss = (1 - F.cosine_similarity(z, z_hard.detach(), dim=-1)).mean()
         entropy = self._entropy(dist)
         vq_loss = self.vq_beta * commit_loss - self.entropy_weight * entropy
 
