@@ -334,7 +334,8 @@ class LAMTrainer(Trainer):
         return nn.ModuleDict(
             {
                 "lam": LatentActionModel(
-                    **base, codebook_size=m.num_options, horizon=1, **vq
+                    **base, codebook_size=m.num_options, horizon=1,
+                    two_encoder=m.two_encoder, **vq
                 ),
                 "dynamics": DynamicsModel(**base, predict_sequence=False),
             }
@@ -387,13 +388,15 @@ class LOMTrainer(Trainer):
         return nn.ModuleDict(
             {
                 "option_lam": LatentActionModel(
-                    **base, codebook_size=m.num_options, horizon=d.horizon, **vq
+                    **base, codebook_size=m.num_options, horizon=d.horizon,
+                    two_encoder=m.two_encoder, **vq
                 ),
                 "action_lam": LatentActionModel(
                     **base,
                     codebook_size=e.n_actions,
                     horizon=1,
                     condition_dim=m.latent_dim,
+                    two_encoder=m.two_encoder,
                     **vq,
                 ),
                 "lam_dynamics": DynamicsModel(**base, predict_sequence=False),

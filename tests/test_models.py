@@ -5,7 +5,7 @@ from lom.models import DynamicsModel, LatentActionModel
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 
 
-def make_lam(horizon=1, condition_dim=None):
+def make_lam(horizon=1, condition_dim=None, two_encoder=False):
     return LatentActionModel(
         vocab_size=VOCAB,
         obs_h=OBS_H,
@@ -18,6 +18,7 @@ def make_lam(horizon=1, condition_dim=None):
         codebook_size=32,
         horizon=horizon,
         condition_dim=condition_dim,
+        two_encoder=two_encoder,
     )
 
 
@@ -95,6 +96,37 @@ def test_lam_opt_ignores_future():
         z1, _, _ = lam(hist, single_frame())
         z2, _, _ = lam(hist, single_frame())  # different random future
     assert torch.allclose(z1, z2), "OPT output must not depend on future content"
+
+
+# --------------------------------------------------------------------------- #
+# --- LatentActionModel two_encoder=True ------------------------------------ #
+# --------------------------------------------------------------------------- #
+
+def test_two_encoder_lam_shapes():
+    lam = make_lam(two_encoder=True)
+    z_q, _, indices = lam(history(), single_frame())
+    assert z_q.shape == (BATCH, LATENT_DIM)
+    assert indices.shape == (BATCH,)
+
+
+def test_two_encoder_lam_sequence_future():
+    lam = make_lam(horizon=HORIZON, two_encoder=True)
+    z_q, _, indices = lam(history(), frame_sequence(HORIZON))
+    assert z_q.shape == (BATCH, LATENT_DIM)
+    assert indices.shape == (BATCH,)
+
+
+def test_two_encoder_lam_with_condition():
+    lam = make_lam(condition_dim=LATENT_DIM, two_encoder=True)
+    cond = torch.randn(BATCH, LATENT_DIM)
+    z_q, _, _ = lam(history(), single_frame(), condition=cond)
+    assert z_q.shape == (BATCH, LATENT_DIM)
+
+
+def test_two_encoder_lam_backward():
+    lam = make_lam(two_encoder=True)
+    _, loss_dict, _ = lam(history(), single_frame())
+    loss_dict["vq_loss"].backward()
 
 
 def test_lam_serialise_roundtrip(tmp_path):

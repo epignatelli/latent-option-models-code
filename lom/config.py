@@ -24,6 +24,7 @@ class ModelCfg:
     vq_beta: float = 0.25
     vq_reset_thresh: int = 100
     vq_ema_decay: float = 0.99
+    two_encoder: bool = False  # True: JEPA-style separate context/target encoder passes
     patch_size: int = 1
     dropout: float = 0.0
     bias: bool = False
