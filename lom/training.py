@@ -227,7 +227,7 @@ class Trainer(ABC):
         for mod in self.models.values():
             mod.eval()
         totals: dict = {}
-        i = 0
+        i = -1
         for i, batch in enumerate(self.val_loader):
             if i >= self.cfg.train.eval_iters:
                 break
@@ -408,7 +408,7 @@ class LOMTrainer(Trainer):
         m = self.cfg.model
 
         z_opt, vq_opt, _ = self.models["option_lam"](history, sequence)
-        z_act, vq_act, _ = self.models["action_lam"](history, next_frame, z_opt)
+        z_act, vq_act, _ = self.models["action_lam"](history, next_frame, z_opt.detach())
 
         lam_logits = self.models["lam_dynamics"](history, z_act)
         lam_recon = reconstruction_loss(lam_logits, tokenise(next_frame), self.cfg.env.vocab_size)

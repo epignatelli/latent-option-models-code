@@ -427,7 +427,7 @@ class VectorQuantizer(nn.Module):
         dist = -self.drop(torch.matmul(z_norm, cb_norm.T))  # (N, K)
 
         indices = dist.argmin(dim=-1)
-        z_hard = self.codebook[indices]
+        z_hard = F.normalize(self.codebook[indices], dim=-1)
 
         # Dead-code reset
         if self.training and self.vq_reset_thresh > 0:
@@ -446,7 +446,7 @@ class VectorQuantizer(nn.Module):
 
         commit_loss = F.mse_loss(z, z_hard.detach())
         q_loss = F.mse_loss(z_hard, z.detach())
-        entropy = self._entropy(indices)
+        entropy = self._entropy(dist)
         vq_loss = q_loss + self.vq_beta * commit_loss - self.entropy_weight * entropy
 
         return (
@@ -460,10 +460,9 @@ class VectorQuantizer(nn.Module):
             indices,
         )
 
-    def _entropy(self, indices: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
-        counts = torch.bincount(indices.view(-1), minlength=self.num_options).float()
-        p = counts / counts.sum()
-        return -(p * p.clamp(min=eps).log()).sum()
+    def _entropy(self, dist: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
+        avg_probs = F.softmax(-dist, dim=-1).mean(0)  # (K,) mean soft assignment over batch
+        return -(avg_probs * avg_probs.clamp(min=eps).log()).sum()
 
     def lookup(self, indices: torch.Tensor) -> torch.Tensor:
         return self.codebook[indices]
