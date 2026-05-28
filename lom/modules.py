@@ -354,7 +354,9 @@ class PatchEmbedding(nn.Module):
         B, T, H, W = x.shape
         P, D = self.patch_size, self.d_model
 
-        emb = self.char_embed(x)  # (B, T, H, W, D)
+        emb = self.char_embed(x)
+        if torch.is_autocast_enabled():
+            emb = emb.to(torch.bfloat16)  # nn.Embedding is not autocasted; cast manually
 
         if self.patch_proj is not None:
             emb = emb.reshape(B, T, H // P, P, W // P, P, D)
