@@ -120,21 +120,25 @@ def _run_step(model_type: str, models: dict, batch: list, device, ctx, e) -> tor
         return lam_recon + lom_recon + vq_opt["vq_loss"] + vq_act["vq_loss"]
 
 
+def _make_frame(shape: tuple, rng: torch.Generator) -> torch.Tensor:
+    """Random frame with valid token ranges: char in [0,256), color in [0,32)."""
+    f = torch.empty(shape, dtype=torch.uint8)
+    f[..., 0] = torch.randint(0, 256, shape[:-1], generator=rng)
+    f[..., 1] = torch.randint(0,  32, shape[:-1], generator=rng)
+    return f
+
+
 def _make_dummy_batch(batch_size: int, model_type: str,
                       context_len: int, horizon: int, e) -> list[torch.Tensor]:
     """Synthetic uint8 frames — same shapes as the real dataloader, no disk I/O."""
     H, W = e.obs_h, e.obs_w
     rng = torch.Generator()
     rng.manual_seed(SEED)
-    history    = torch.randint(0, 256, (batch_size, context_len, H, W, 2),
-                               dtype=torch.uint8, generator=rng)
-    next_frame = torch.randint(0, 256, (batch_size, 1, H, W, 2),
-                               dtype=torch.uint8, generator=rng)
+    history    = _make_frame((batch_size, context_len, H, W, 2), rng)
+    next_frame = _make_frame((batch_size, 1, H, W, 2), rng)
     if model_type == "lom":
-        future   = torch.randint(0, 256, (batch_size, 1, H, W, 2),
-                                 dtype=torch.uint8, generator=rng)
-        sequence = torch.randint(0, 256, (batch_size, horizon, H, W, 2),
-                                 dtype=torch.uint8, generator=rng)
+        future   = _make_frame((batch_size, 1, H, W, 2), rng)
+        sequence = _make_frame((batch_size, horizon, H, W, 2), rng)
         return [history, next_frame, future, sequence]
     return [history, next_frame]
 
