@@ -146,6 +146,24 @@ def _make_dummy_batch(batch_size: int, model_type: str,
     return [history, next_frame]
 
 
+def _log_memory_breakdown(device) -> None:
+    """Log the top live tensors by size after the first training step."""
+    snap = torch.cuda.memory_snapshot()
+    tensors: list[tuple[int, str, tuple]] = []
+    for seg in snap:
+        for blk in seg.get("blocks", []):
+            if blk.get("state") == "active_allocated":
+                tensors.append((blk["size"], str(blk.get("dtype", "?")), tuple(blk.get("frames", []))))
+    tensors.sort(key=lambda x: x[0], reverse=True)
+    total = sum(s for s, _, _ in tensors)
+    log.info("  --- memory breakdown after step 0  (total allocated = %.1f GB) ---",
+             torch.cuda.memory_allocated(device) / 1e9)
+    for size, dtype, frames in tensors[:20]:
+        src = frames[0].get("filename", "?").split("/")[-1] + ":" + str(frames[0].get("lineno", "?")) if frames else "?"
+        log.info("    %8.1f MB  %-12s  %s", size / 1e6, dtype, src)
+    log.info("  (%d tensors total, %.1f GB)", len(tensors), total / 1e9)
+
+
 def measure_one_batch_size(batch_size: int, model_type: str,
                            context_len: int, horizon: int,
                            compile_model: bool = False,
@@ -177,6 +195,9 @@ def measure_one_batch_size(batch_size: int, model_type: str,
             loss.backward()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+
+            if s == 0 and device.type == "cuda" and compile_model is False:
+                _log_memory_breakdown(device)
 
             if s == GPU_WARMUP_STEPS - 1:
                 if device.type == "cuda":
