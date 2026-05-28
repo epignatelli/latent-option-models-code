@@ -146,22 +146,52 @@ def _make_dummy_batch(batch_size: int, model_type: str,
     return [history, next_frame]
 
 
-def _log_memory_breakdown(device) -> None:
-    """Log the top live tensors by size after the first training step."""
-    snap = torch.cuda.memory_snapshot()
-    tensors: list[tuple[int, str, tuple]] = []
-    for seg in snap:
-        for blk in seg.get("blocks", []):
-            if blk.get("state") == "active_allocated":
-                tensors.append((blk["size"], str(blk.get("dtype", "?")), tuple(blk.get("frames", []))))
-    tensors.sort(key=lambda x: x[0], reverse=True)
-    total = sum(s for s, _, _ in tensors)
-    log.info("  --- memory breakdown after step 0  (total allocated = %.1f GB) ---",
-             torch.cuda.memory_allocated(device) / 1e9)
-    for size, dtype, frames in tensors[:20]:
-        src = frames[0].get("filename", "?").split("/")[-1] + ":" + str(frames[0].get("lineno", "?")) if frames else "?"
-        log.info("    %8.1f MB  %-12s  %s", size / 1e6, dtype, src)
-    log.info("  (%d tensors total, %.1f GB)", len(tensors), total / 1e9)
+def _mem(device) -> float:
+    return torch.cuda.memory_allocated(device) / 1e9
+
+
+def _run_step_traced(model_type: str, models: dict, batch: list, device, ctx, e) -> torch.Tensor:
+    """Same as _run_step but logs memory at each major operation."""
+    log.info("    [trace] base:                  %.2f GB", _mem(device))
+    if model_type == "lam":
+        history, next_frame = batch[0].to(device), batch[1].to(device)
+        log.info("    [trace] after data.to(device): %.2f GB", _mem(device))
+        with ctx:
+            z, vq_out, _ = models["lam"](history, next_frame)
+        log.info("    [trace] after LAM forward:     %.2f GB", _mem(device))
+        with ctx:
+            logits = models["dyn"](history, z)
+        log.info("    [trace] after Dyn forward:     %.2f GB", _mem(device))
+        with ctx:
+            loss = reconstruction_loss(logits, tokenise(next_frame), e.vocab_size) + vq_out["vq_loss"]
+        log.info("    [trace] after loss:            %.2f GB", _mem(device))
+        loss.backward()
+        log.info("    [trace] after backward:        %.2f GB", _mem(device))
+        return loss
+    else:
+        history    = batch[0].to(device)
+        next_frame = batch[1].to(device)
+        future     = batch[2].to(device)
+        sequence   = batch[3].to(device)
+        log.info("    [trace] after data.to(device): %.2f GB", _mem(device))
+        with ctx:
+            z_opt, vq_opt, _ = models["option_lam"](history, sequence)
+        log.info("    [trace] after option_lam:      %.2f GB", _mem(device))
+        with ctx:
+            z_act, vq_act, _ = models["action_lam"](history, next_frame, z_opt.detach())
+        log.info("    [trace] after action_lam:      %.2f GB", _mem(device))
+        with ctx:
+            lam_logits = models["lam_dynamics"](history, z_act)
+            lom_logits = models["lom_dynamics"](history, z_act, option_code=z_opt, horizon=1)
+        log.info("    [trace] after dynamics:        %.2f GB", _mem(device))
+        with ctx:
+            loss = (reconstruction_loss(lam_logits, tokenise(next_frame), e.vocab_size)
+                    + reconstruction_loss(lom_logits, tokenise(future), e.vocab_size)
+                    + vq_opt["vq_loss"] + vq_act["vq_loss"])
+        log.info("    [trace] after loss:            %.2f GB", _mem(device))
+        loss.backward()
+        log.info("    [trace] after backward:        %.2f GB", _mem(device))
+        return loss
 
 
 def measure_one_batch_size(batch_size: int, model_type: str,
@@ -190,14 +220,17 @@ def measure_one_batch_size(batch_size: int, model_type: str,
 
     try:
         for s in range(GPU_WARMUP_STEPS + GPU_MEASURE_STEPS):
+            if s == 0 and device.type == "cuda" and not compile_model:
+                log.info("  --- memory trace through step 0 ---")
+                _run_step_traced(model_type, models, batch, device, ctx, e)
+                optimizer.zero_grad(set_to_none=True)
+                continue
+
             with ctx:
                 loss = _run_step(model_type, models, batch, device, ctx, e)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
-
-            if s == 0 and device.type == "cuda" and compile_model is False:
-                _log_memory_breakdown(device)
 
             if s == GPU_WARMUP_STEPS - 1:
                 if device.type == "cuda":
