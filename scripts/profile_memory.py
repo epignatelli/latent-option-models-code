@@ -202,20 +202,24 @@ def _worker(batch_size: int, model_type: str,
             context_len: int, horizon: int,
             compile_model: bool, two_encoder: bool, q: mp.Queue) -> None:
     try:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         sps = measure_one_batch_size(batch_size, model_type, context_len, horizon,
                                      compile_model, two_encoder)
-        q.put(("ok", sps))
+        peak_gb = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+        q.put(("ok", sps, peak_gb))
     except torch.cuda.OutOfMemoryError:
-        q.put(("oom", None))
+        peak_gb = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+        q.put(("oom", None, peak_gb))
     except Exception as exc:
-        q.put(("error", str(exc)))
+        q.put(("error", str(exc), 0.0))
 
 
 def _spawn(batch_size: int, model_type: str,
            context_len: int, horizon: int,
            compile_model: bool = False,
-           two_encoder: bool = False) -> tuple[str, float | None]:
-    """Run one measurement in a subprocess; return (outcome, samp/s)."""
+           two_encoder: bool = False) -> tuple[str, float | None, float]:
+    """Run one measurement in a subprocess; return (outcome, samp/s, peak_gb)."""
     ctx = mp.get_context("spawn")
     q: mp.Queue = ctx.Queue()
     proc = ctx.Process(target=_worker,
@@ -223,7 +227,7 @@ def _spawn(batch_size: int, model_type: str,
                              compile_model, two_encoder, q))
     proc.start()
     proc.join()
-    return q.get() if not q.empty() else ("crash", None)
+    return q.get() if not q.empty() else ("crash", None, 0.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -245,13 +249,14 @@ def sweep_batch_sizes(batch_sizes: list[int],
     results: dict[int, float] = {}
     for bs in sorted(batch_sizes):
         log.info("  batch=%6d  ...", bs)
-        outcome, value = _spawn(bs, model_type, context_len, horizon, compile_model, two_encoder)
+        outcome, value, peak_gb = _spawn(bs, model_type, context_len, horizon,
+                                         compile_model, two_encoder)
         if outcome == "ok":
             results[bs] = value  # type: ignore[assignment]
-            log.info("  batch=%6d  →  %7.0f samp/s  (%.1f steps/s)",
-                     bs, value, value / bs)  # type: ignore[operator]
+            log.info("  batch=%6d  →  %7.0f samp/s  (%.1f steps/s)  peak=%.1f GB",
+                     bs, value, value / bs, peak_gb)  # type: ignore[operator]
         elif outcome == "oom":
-            log.info("  batch=%6d  →  OOM, stopping", bs)
+            log.info("  batch=%6d  →  OOM  (peak before OOM=%.1f GB), stopping", bs, peak_gb)
             break
         else:
             log.info("  batch=%6d  →  error: %s, stopping", bs, value)
