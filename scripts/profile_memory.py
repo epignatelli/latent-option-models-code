@@ -56,7 +56,7 @@ GPU_MEASURE_STEPS   = 50
 # Model builders
 # --------------------------------------------------------------------------- #
 
-def _build_lam_models(device, context_len: int):
+def _build_lam_models(device, context_len: int, two_encoder: bool = False):
     e = EnvCfg()
     m = ModelCfg(d_model=256, n_layers=4, n_heads=4, context_length=context_len,
                  latent_dim=512, num_options=256, patch_size=4)
@@ -65,6 +65,7 @@ def _build_lam_models(device, context_len: int):
         d_model=m.d_model, n_layers=m.n_layers, n_heads=m.n_heads,
         context_length=m.context_length, latent_dim=m.latent_dim,
         codebook_size=m.num_options, horizon=1, patch_size=m.patch_size,
+        two_encoder=two_encoder,
     ).to(device)
     dyn = DynamicsModel(
         vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w,
@@ -75,7 +76,7 @@ def _build_lam_models(device, context_len: int):
     return e, {"lam": lam, "dyn": dyn}
 
 
-def _build_lom_models(device, context_len: int, horizon: int):
+def _build_lom_models(device, context_len: int, horizon: int, two_encoder: bool = False):
     from lom.config import LOMModelCfg
     e = EnvCfg()
     m = LOMModelCfg(d_model=256, n_layers=4, n_heads=4, context_length=context_len,
@@ -86,9 +87,11 @@ def _build_lom_models(device, context_len: int, horizon: int):
                 patch_size=m.patch_size)
     vq = dict(codebook_size=m.num_options)
     models = {
-        "option_lam":   LatentActionModel(**base, **vq, horizon=horizon).to(device),
+        "option_lam":   LatentActionModel(**base, **vq, horizon=horizon,
+                                          two_encoder=two_encoder).to(device),
         "action_lam":   LatentActionModel(**base, **vq, horizon=1,
-                                          condition_dim=m.latent_dim).to(device),
+                                          condition_dim=m.latent_dim,
+                                          two_encoder=two_encoder).to(device),
         "lam_dynamics": DynamicsModel(**base, predict_sequence=False).to(device),
         "lom_dynamics": DynamicsModel(**base, option_dim=m.latent_dim,
                                       predict_sequence=False, horizon=horizon).to(device),
@@ -145,7 +148,8 @@ def _make_dummy_batch(batch_size: int, model_type: str,
 
 def measure_one_batch_size(batch_size: int, model_type: str,
                            context_len: int, horizon: int,
-                           compile_model: bool = False) -> float:
+                           compile_model: bool = False,
+                           two_encoder: bool = False) -> float:
     """Full training loop measurement in a clean process context."""
     import gc
 
@@ -154,9 +158,9 @@ def measure_one_batch_size(batch_size: int, model_type: str,
            if device.type == "cuda" else NullCtx())
 
     if model_type == "lam":
-        e, models = _build_lam_models(device, context_len)
+        e, models = _build_lam_models(device, context_len, two_encoder)
     else:
-        e, models = _build_lom_models(device, context_len, horizon)
+        e, models = _build_lom_models(device, context_len, horizon, two_encoder)
 
     if compile_model:
         log.info("  Compiling models ...")
@@ -195,9 +199,11 @@ def measure_one_batch_size(batch_size: int, model_type: str,
 # --------------------------------------------------------------------------- #
 
 def _worker(batch_size: int, model_type: str,
-            context_len: int, horizon: int, compile_model: bool, q: mp.Queue) -> None:
+            context_len: int, horizon: int,
+            compile_model: bool, two_encoder: bool, q: mp.Queue) -> None:
     try:
-        sps = measure_one_batch_size(batch_size, model_type, context_len, horizon, compile_model)
+        sps = measure_one_batch_size(batch_size, model_type, context_len, horizon,
+                                     compile_model, two_encoder)
         q.put(("ok", sps))
     except torch.cuda.OutOfMemoryError:
         q.put(("oom", None))
@@ -207,12 +213,14 @@ def _worker(batch_size: int, model_type: str,
 
 def _spawn(batch_size: int, model_type: str,
            context_len: int, horizon: int,
-           compile_model: bool = False) -> tuple[str, float | None]:
+           compile_model: bool = False,
+           two_encoder: bool = False) -> tuple[str, float | None]:
     """Run one measurement in a subprocess; return (outcome, samp/s)."""
     ctx = mp.get_context("spawn")
     q: mp.Queue = ctx.Queue()
     proc = ctx.Process(target=_worker,
-                       args=(batch_size, model_type, context_len, horizon, compile_model, q))
+                       args=(batch_size, model_type, context_len, horizon,
+                             compile_model, two_encoder, q))
     proc.start()
     proc.join()
     return q.get() if not q.empty() else ("crash", None)
@@ -224,7 +232,8 @@ def _spawn(batch_size: int, model_type: str,
 
 def sweep_batch_sizes(batch_sizes: list[int],
                       model_type: str, context_len: int, horizon: int,
-                      compile_model: bool = False) -> dict[int, float]:
+                      compile_model: bool = False,
+                      two_encoder: bool = False) -> dict[int, float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         free, total = torch.cuda.mem_get_info(device)
@@ -236,7 +245,7 @@ def sweep_batch_sizes(batch_sizes: list[int],
     results: dict[int, float] = {}
     for bs in sorted(batch_sizes):
         log.info("  batch=%6d  ...", bs)
-        outcome, value = _spawn(bs, model_type, context_len, horizon, compile_model)
+        outcome, value = _spawn(bs, model_type, context_len, horizon, compile_model, two_encoder)
         if outcome == "ok":
             results[bs] = value  # type: ignore[assignment]
             log.info("  batch=%6d  →  %7.0f samp/s  (%.1f steps/s)",
@@ -257,12 +266,14 @@ def sweep_batch_sizes(batch_sizes: list[int],
 
 def pareto_sweep(batch_sizes: list[int], context_lens: list[int],
                  model_type: str, horizon: int,
-                 compile_model: bool = False) -> None:
+                 compile_model: bool = False,
+                 two_encoder: bool = False) -> None:
     tokens_per_sample = lambda ctx: (ctx + (horizon if model_type == "lom" else 1)) * 120  # noqa: E731
 
     log.info("")
     log.info("═" * 70)
-    log.info("  Pareto  model=%s  horizon=%d  compile=%s", model_type, horizon, compile_model)
+    log.info("  Pareto  model=%s  horizon=%d  compile=%s  two_encoder=%s",
+             model_type, horizon, compile_model, two_encoder)
     log.info("═" * 70)
 
     rows = []
@@ -270,7 +281,8 @@ def pareto_sweep(batch_sizes: list[int], context_lens: list[int],
         toks = tokens_per_sample(ctx)
         log.info("")
         log.info("  context_len=%d  tokens/sample=%d", ctx, toks)
-        results = sweep_batch_sizes(batch_sizes, model_type, ctx, horizon, compile_model)
+        results = sweep_batch_sizes(batch_sizes, model_type, ctx, horizon,
+                                    compile_model, two_encoder)
         if results:
             best_bs  = max(results, key=results.__getitem__)
             best_sps = results[best_bs]
@@ -303,19 +315,21 @@ def main() -> None:
                         help="context lengths to sweep with --pareto")
     parser.add_argument("--compile", action="store_true",
                         help="apply torch.compile to all models before profiling")
+    parser.add_argument("--two-encoder", action="store_true",
+                        help="use TwoPassEncoder instead of BidirectionalEncoder")
     args = parser.parse_args()
 
-    log.info("=== profile_memory  model=%s  horizon=%d  compile=%s ===",
-             args.model, args.horizon, args.compile)
+    log.info("=== profile_memory  model=%s  horizon=%d  compile=%s  two_encoder=%s ===",
+             args.model, args.horizon, args.compile, args.two_encoder)
 
     if args.pareto:
         pareto_sweep(args.batch_sizes, args.context_lengths, args.model, args.horizon,
-                     args.compile)
+                     args.compile, args.two_encoder)
     else:
         log.info("Sweeping batch sizes  (model=%s  ctx=%d  horizon=%d)",
                  args.model, args.context_len, args.horizon)
         results = sweep_batch_sizes(args.batch_sizes, args.model, args.context_len, args.horizon,
-                                    args.compile)
+                                    args.compile, args.two_encoder)
         if results:
             best_bs = max(results, key=results.__getitem__)
             log.info("")
