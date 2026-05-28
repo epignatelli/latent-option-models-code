@@ -12,7 +12,8 @@ Usage:
     CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --model lom --horizon 128
 
 Each batch size runs in a fresh subprocess to avoid CUDA context corruption
-from previous OOM events. Logs to stdout and /scratch/uceeepi/lom/profile_memory.log.
+from previous OOM events. Uses synthetic random data — no dataset required.
+Logs to stdout and /scratch/uceeepi/lom/profile_memory.log.
 """
 from __future__ import annotations
 
@@ -26,7 +27,6 @@ import torch
 import torch.optim as optim
 
 from lom.config import EnvCfg, ModelCfg
-from lom.dataset import NpzTrajectoryDataset
 from lom.models import DynamicsModel, LatentActionModel
 from lom.modules import tokenise
 from lom.training import NullCtx, reconstruction_loss
@@ -44,7 +44,6 @@ _fh.setFormatter(_fmt)
 _root.addHandler(_fh)
 log = logging.getLogger(__name__)
 
-DEFAULT_INDEX       = "/scratch/uceeepi/lom/datasets/nle/nao/index.npz"
 DEFAULT_BATCH_SIZES = [256, 512, 1024, 2048, 4096, 8192, 16384]
 DEFAULT_CTX         = 4
 DEFAULT_HORIZON     = 128
@@ -121,11 +120,29 @@ def _run_step(model_type: str, models: dict, batch: list, device, ctx, e) -> tor
         return lam_recon + lom_recon + vq_opt["vq_loss"] + vq_act["vq_loss"]
 
 
-def measure_one_batch_size(batch_size: int, index_path: str, model_type: str,
+def _make_dummy_batch(batch_size: int, model_type: str,
+                      context_len: int, horizon: int, e) -> list[torch.Tensor]:
+    """Synthetic uint8 frames — same shapes as the real dataloader, no disk I/O."""
+    H, W = e.obs_h, e.obs_w
+    rng = torch.Generator()
+    rng.manual_seed(SEED)
+    history    = torch.randint(0, 256, (batch_size, context_len, H, W, 2),
+                               dtype=torch.uint8, generator=rng)
+    next_frame = torch.randint(0, 256, (batch_size, 1, H, W, 2),
+                               dtype=torch.uint8, generator=rng)
+    if model_type == "lom":
+        future   = torch.randint(0, 256, (batch_size, 1, H, W, 2),
+                                 dtype=torch.uint8, generator=rng)
+        sequence = torch.randint(0, 256, (batch_size, horizon, H, W, 2),
+                                 dtype=torch.uint8, generator=rng)
+        return [history, next_frame, future, sequence]
+    return [history, next_frame]
+
+
+def measure_one_batch_size(batch_size: int, model_type: str,
                            context_len: int, horizon: int) -> float:
     """Full training loop measurement in a clean process context."""
     import gc
-    from torch.utils.data import DataLoader
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ctx = (torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -136,26 +153,12 @@ def measure_one_batch_size(batch_size: int, index_path: str, model_type: str,
     else:
         e, models = _build_lom_models(device, context_len, horizon)
 
-    ds_horizon = horizon if model_type == "lom" else 1
-    dataset = NpzTrajectoryDataset.from_index(
-        index_path, context_len=context_len, horizon=ds_horizon,
-        buffer_size=5,
-        steps_per_epoch=(GPU_WARMUP_STEPS + GPU_MEASURE_STEPS) * batch_size,
-        seed=SEED, return_sequence=(model_type == "lom"),
-    )
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    batch = _make_dummy_batch(batch_size, model_type, context_len, horizon, e)
     optimizer = optim.AdamW([p for m in models.values() for p in m.parameters()], lr=3e-4)
-    data_iter = iter(loader)
     t_start = None
 
     try:
         for s in range(GPU_WARMUP_STEPS + GPU_MEASURE_STEPS):
-            try:
-                batch = next(data_iter)
-            except StopIteration:
-                data_iter = iter(loader)
-                batch = next(data_iter)
-
             with ctx:
                 loss = _run_step(model_type, models, batch, device, ctx, e)
             loss.backward()
@@ -182,10 +185,10 @@ def measure_one_batch_size(batch_size: int, index_path: str, model_type: str,
 # Subprocess worker (fresh CUDA context per batch size)
 # --------------------------------------------------------------------------- #
 
-def _worker(index_path: str, batch_size: int, model_type: str,
+def _worker(batch_size: int, model_type: str,
             context_len: int, horizon: int, q: mp.Queue) -> None:
     try:
-        sps = measure_one_batch_size(batch_size, index_path, model_type, context_len, horizon)
+        sps = measure_one_batch_size(batch_size, model_type, context_len, horizon)
         q.put(("ok", sps))
     except torch.cuda.OutOfMemoryError:
         q.put(("oom", None))
@@ -193,13 +196,13 @@ def _worker(index_path: str, batch_size: int, model_type: str,
         q.put(("error", str(exc)))
 
 
-def _spawn(index_path: str, batch_size: int, model_type: str,
+def _spawn(batch_size: int, model_type: str,
            context_len: int, horizon: int) -> tuple[str, float | None]:
     """Run one measurement in a subprocess; return (outcome, samp/s)."""
     ctx = mp.get_context("spawn")
     q: mp.Queue = ctx.Queue()
     proc = ctx.Process(target=_worker,
-                       args=(index_path, batch_size, model_type, context_len, horizon, q))
+                       args=(batch_size, model_type, context_len, horizon, q))
     proc.start()
     proc.join()
     return q.get() if not q.empty() else ("crash", None)
@@ -209,7 +212,7 @@ def _spawn(index_path: str, batch_size: int, model_type: str,
 # Batch-size sweep
 # --------------------------------------------------------------------------- #
 
-def sweep_batch_sizes(index_path: str, batch_sizes: list[int],
+def sweep_batch_sizes(batch_sizes: list[int],
                       model_type: str, context_len: int, horizon: int) -> dict[int, float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
@@ -222,7 +225,7 @@ def sweep_batch_sizes(index_path: str, batch_sizes: list[int],
     results: dict[int, float] = {}
     for bs in sorted(batch_sizes):
         log.info("  batch=%6d  ...", bs)
-        outcome, value = _spawn(index_path, bs, model_type, context_len, horizon)
+        outcome, value = _spawn(bs, model_type, context_len, horizon)
         if outcome == "ok":
             results[bs] = value  # type: ignore[assignment]
             log.info("  batch=%6d  →  %7.0f samp/s  (%.1f steps/s)",
@@ -241,7 +244,7 @@ def sweep_batch_sizes(index_path: str, batch_sizes: list[int],
 # Pareto sweep
 # --------------------------------------------------------------------------- #
 
-def pareto_sweep(index_path: str, batch_sizes: list[int], context_lens: list[int],
+def pareto_sweep(batch_sizes: list[int], context_lens: list[int],
                  model_type: str, horizon: int) -> None:
     tokens_per_sample = lambda ctx: (ctx + (horizon if model_type == "lom" else 1)) * 120  # noqa: E731
 
@@ -255,7 +258,7 @@ def pareto_sweep(index_path: str, batch_sizes: list[int], context_lens: list[int
         toks = tokens_per_sample(ctx)
         log.info("")
         log.info("  context_len=%d  tokens/sample=%d", ctx, toks)
-        results = sweep_batch_sizes(index_path, batch_sizes, model_type, ctx, horizon)
+        results = sweep_batch_sizes(batch_sizes, model_type, ctx, horizon)
         if results:
             best_bs  = max(results, key=results.__getitem__)
             best_sps = results[best_bs]
@@ -277,7 +280,6 @@ def pareto_sweep(index_path: str, batch_sizes: list[int], context_lens: list[int
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--index",           default=DEFAULT_INDEX)
     parser.add_argument("--model",           choices=["lam", "lom"], default="lam")
     parser.add_argument("--horizon",         type=int, default=DEFAULT_HORIZON)
     parser.add_argument("--context-len",     type=int, default=DEFAULT_CTX)
@@ -292,13 +294,11 @@ def main() -> None:
     log.info("=== profile_memory  model=%s  horizon=%d ===", args.model, args.horizon)
 
     if args.pareto:
-        pareto_sweep(args.index, args.batch_sizes, args.context_lengths,
-                     args.model, args.horizon)
+        pareto_sweep(args.batch_sizes, args.context_lengths, args.model, args.horizon)
     else:
         log.info("Sweeping batch sizes  (model=%s  ctx=%d  horizon=%d)",
                  args.model, args.context_len, args.horizon)
-        results = sweep_batch_sizes(args.index, args.batch_sizes,
-                                    args.model, args.context_len, args.horizon)
+        results = sweep_batch_sizes(args.batch_sizes, args.model, args.context_len, args.horizon)
         if results:
             best_bs = max(results, key=results.__getitem__)
             log.info("")
