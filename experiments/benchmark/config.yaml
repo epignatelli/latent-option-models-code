@@ -14,12 +14,12 @@ data:
   dataset_dir: /scratch/uceeepi/lom/datasets/nle/nao
   context_len: 4
   horizon: 128
+  buffer_size: 100
 
 model:
   latent_dim: 512
   num_options: 256
   patch_size: 4
-  predict_sequence: false
 
 train:
   ckpt_dir: /scratch/uceeepi/lom/checkpoints/benchmark

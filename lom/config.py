@@ -45,9 +45,8 @@ class DataCfg:
     context_len: int = 4
     horizon: int = 8
     val_fraction: float = 0.05
-    buffer_size: int = 1_000
+    buffer_size: int = 100
     steps_per_epoch: int = 10_000
-    max_player_frames: int = 0  # 0 = no limit; set >0 to skip oversized player files
 
 
 @dataclass
@@ -67,7 +66,7 @@ class TrainCfg:
     compile_model: bool = True
     mixed_dtype: str = "bfloat16"
     seed: int = 42
-    ckpt_dir: str = "checkpoints"
+    ckpt_dir: str = "/scratch/uceeepi/lom/checkpoints"
     resume: bool = False
 
     def __post_init__(self) -> None:
@@ -82,7 +81,7 @@ class WandbCfg:
     project: str = "latent-option-models"
     entity: str = "epignatelli_"
     group: str = "default"
-    dir: str = "wandb"
+    dir: str = "/scratch/uceeepi/lom/wandb"
 
 
 @dataclass

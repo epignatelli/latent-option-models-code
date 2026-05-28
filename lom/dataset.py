@@ -25,15 +25,22 @@ SCREEN_W = 80
 class GameBuffer:
     """In-memory pool of loaded game arrays, refreshed by a background thread.
 
-    Uses atomic state replacement so sample() never acquires a lock.
+    Each buffer slot holds one game (T, H, W, 2) uint8 array. A background
+    thread replaces refresh_fraction of slots every refresh_every seconds,
+    loading one random game per sampled player file. State is replaced
+    atomically so sample() never acquires a lock.
+
+    Because each load call only keeps a single game's frames (not the full
+    player file), large players with many games are handled without holding
+    all of their data simultaneously in RAM.
 
     Args:
         paths:             (N,) object array of .npz file paths
-        lengths:           (N,) int32 array of frame counts
-        buffer_size:       number of games to keep in memory
+        lengths:           (N,) int32 array of total frame counts per player
+        buffer_size:       number of game slots to keep in memory
         context_len:       frames of history per sample
         horizon:           look-ahead frames per sample
-        refresh_fraction:  fraction of buffer replaced per refresh cycle
+        refresh_fraction:  fraction of slots replaced per refresh cycle
         refresh_every:     seconds between refresh cycles
         seed:              RNG seed (refresh thread uses seed+1)
     """
@@ -55,39 +62,71 @@ class GameBuffer:
 
         valid = np.maximum(lengths.astype(np.float64) - (context_len + horizon - 1), 0.0)
         total = valid.sum()
-        self._pool_weights = valid / total if total > 0 else np.ones(len(paths)) / len(paths)
+        self._player_weights = valid / total if total > 0 else np.ones(len(paths)) / len(paths)
 
-        n_init = min(buffer_size, len(paths))
-        self._n_refresh = min(max(1, int(n_init * refresh_fraction)), n_init)
+        n_slots = min(buffer_size, len(paths))
+        self._n_refresh = min(max(1, int(n_slots * refresh_fraction)), n_slots)
         self._refresh_every = refresh_every
 
         rng = np.random.default_rng(seed)
         self._refresh_rng = np.random.default_rng(seed + 1)
 
-        init_idxs = rng.choice(len(paths), size=n_init, replace=False, p=self._pool_weights)
-        log.info("Loading initial buffer of %d files ...", n_init)
-        self._players: list = [self.load(i) for i in init_idxs]
-        flat = [g for pg in self._players for g in pg]
-        self._state: tuple = (flat, self.make_weights(flat))
-        log.info("Buffer ready (%d games from %d files).", len(flat), n_init)
+        player_idxs = rng.choice(len(paths), size=n_slots, replace=True, p=self._player_weights)
+        log.info("Loading initial buffer of %d game slots ...", n_slots)
+        games = []
+        log_every = max(1, n_slots // 10)
+        for i, pi in enumerate(player_idxs):
+            g = self._load_game(int(pi), rng)
+            if g is not None:
+                games.append(g)
+            if (i + 1) % log_every == 0 or (i + 1) == n_slots:
+                log.info("  buffer %d/%d slots loaded (%d games ready)",
+                         i + 1, n_slots, len(games))
+        self._state: tuple = (games, self._make_weights(games))
+        log.info("Buffer ready (%d games).", len(games))
 
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self.refresh_loop, daemon=True)
+        self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
         self._thread.start()
 
-    def load(self, idx: int) -> list:
-        """Load one npz file and return a list of (T, H, W, 2) uint8 game arrays."""
-        with np.load(self._paths[idx]) as f:
-            chars = f["tty_chars"].astype(np.uint8)
-            if "tty_colors" in f:
-                colors = f["tty_colors"].clip(0, COLOR_VOCAB - 1).astype(np.uint8)
-            else:
-                colors = np.zeros_like(chars)
-            offsets = f["offsets"] if "offsets" in f else np.array([0, len(chars)], dtype=np.int64)
-        stacked = np.stack([chars, colors], axis=-1)  # (total_T, H, W, 2)
-        return [stacked[offsets[i]:offsets[i + 1]] for i in range(len(offsets) - 1)]
+    def _load_game(self, player_idx: int, rng: np.random.Generator):
+        """Load one random game from a player file. Returns (T, H, W, 2) uint8 or None.
 
-    def make_weights(self, games: list) -> np.ndarray:
+        Loads chars and colors sequentially (with explicit del between) to keep
+        peak RSS to ~one full player array at a time rather than two.
+        """
+        path = str(self._paths[player_idx])
+        try:
+            with np.load(path) as f:
+                chars_full = f["tty_chars"].astype(np.uint8)
+                n_frames = len(chars_full)
+                offsets = (
+                    f["offsets"][:]
+                    if "offsets" in f
+                    else np.array([0, n_frames], dtype=np.int64)
+                )
+                n_games = len(offsets) - 1
+                game_lens = (offsets[1:] - offsets[:-1]).astype(np.float64)
+                valid_lens = np.maximum(game_lens - (self._ctx + self._horizon - 1), 0.0)
+                total_w = valid_lens.sum()
+                if total_w <= 0:
+                    return None
+                gi = int(rng.choice(n_games, p=valid_lens / total_w))
+                a, b = int(offsets[gi]), int(offsets[gi + 1])
+                chars = chars_full[a:b].copy()
+                del chars_full
+                if "tty_colors" in f:
+                    colors_raw = f["tty_colors"]
+                    colors = np.clip(colors_raw[a:b], 0, COLOR_VOCAB - 1).astype(np.uint8)
+                    del colors_raw
+                else:
+                    colors = np.zeros_like(chars)
+        except Exception as exc:
+            log.warning("Failed to load player %s: %s", path, exc)
+            return None
+        return np.stack([chars, colors], axis=-1)
+
+    def _make_weights(self, games: list) -> np.ndarray:
         valid = np.maximum(
             np.array([len(g) for g in games], dtype=np.float64) - (self._ctx + self._horizon - 1),
             0.0,
@@ -95,21 +134,21 @@ class GameBuffer:
         s = valid.sum()
         return valid / s if s > 0 else np.ones(len(games)) / len(games)
 
-    def refresh_loop(self) -> None:
+    def _refresh_loop(self) -> None:
         while not self._stop.wait(self._refresh_every):
-            players = list(self._players)
-
-            new_idxs = self._refresh_rng.choice(
-                len(self._paths), size=self._n_refresh, replace=False, p=self._pool_weights
+            games = list(self._state[0])
+            n = len(games)
+            if n == 0:
+                continue
+            player_idxs = self._refresh_rng.choice(
+                len(self._paths), size=self._n_refresh, replace=True, p=self._player_weights
             )
-            slots = self._refresh_rng.choice(len(players), size=self._n_refresh, replace=False)
-
-            for slot, pool_idx in zip(slots, new_idxs):
-                players[slot] = self.load(pool_idx)
-
-            flat = [g for pg in players for g in pg]
-            self._players = players
-            self._state = (flat, self.make_weights(flat))
+            slots = self._refresh_rng.choice(n, size=self._n_refresh, replace=False)
+            for slot, pi in zip(slots, player_idxs):
+                new_game = self._load_game(int(pi), self._refresh_rng)
+                if new_game is not None:
+                    games[slot] = new_game
+            self._state = (games, self._make_weights(games))
 
     def sample(self, rng: np.random.Generator) -> tuple:
         games, weights = self._state
@@ -192,14 +231,9 @@ class NpzTrajectoryDataset(Dataset):
         index_path: str,
         val_fraction: float = 0.05,
         seed: int = 42,
-        max_player_frames: int = 0,
         **kwargs,
     ) -> Tuple["NpzTrajectoryDataset", "NpzTrajectoryDataset"]:
-        """Split index into train / val datasets (by player for rich index).
-
-        max_player_frames: if > 0, exclude player files with more total frames
-            (prevents OOM when loading outlier files with millions of frames).
-        """
+        """Split index into train / val datasets (by player for rich index)."""
         idx = np.load(index_path)
         if "player_paths" in idx:
             paths   = idx["player_paths"].astype(str)
@@ -207,13 +241,6 @@ class NpzTrajectoryDataset(Dataset):
         else:
             paths   = idx["paths"].astype(str)
             lengths = idx["lengths"].astype(np.int32)
-
-        if max_player_frames > 0:
-            mask  = lengths <= max_player_frames
-            paths   = paths[mask]
-            lengths = lengths[mask]
-            log.info("max_player_frames=%d: %d/%d players retained",
-                     max_player_frames, mask.sum(), len(mask))
 
         rng = np.random.default_rng(seed)
         n_val = max(1, int(len(paths) * val_fraction))
@@ -260,7 +287,6 @@ def build_npz_dataloaders(
     refresh_every: float = 60.0,
     seed: int = 42,
     return_sequence: bool = False,
-    max_player_frames: int = 0,
 ) -> Tuple[DataLoader, DataLoader]:
     """Build train + val DataLoaders from a prepare_data index file.
 
@@ -270,7 +296,6 @@ def build_npz_dataloaders(
         index_path,
         val_fraction=val_fraction,
         seed=seed,
-        max_player_frames=max_player_frames,
         context_len=context_len,
         horizon=horizon,
         buffer_size=buffer_size,

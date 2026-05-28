@@ -85,6 +85,12 @@ class Trainer(ABC):
 
         torch.manual_seed(t.seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        log.info("=== %s  seed=%d  device=%s ===", self.label().upper(), t.seed, self.device)
+        if torch.cuda.is_available():
+            idx = torch.cuda.current_device()
+            log.info("GPU: %s  (%.1f GB total)",
+                     torch.cuda.get_device_name(idx),
+                     torch.cuda.get_device_properties(idx).total_memory / 1e9)
 
         if not d.dataset_dir:
             raise ValueError(
@@ -93,6 +99,8 @@ class Trainer(ABC):
                 "data.dataset_dir in your experiment config."
             )
         index_path = os.path.join(d.dataset_dir, "index.npz")
+        log.info("Loading dataset from %s  (context=%d  horizon=%d  buffer=%d)",
+                 index_path, d.context_len, d.horizon, d.buffer_size)
         self.train_loader, self.val_loader = build_npz_dataloaders(
             index_path=index_path,
             context_len=d.context_len,
@@ -103,13 +111,23 @@ class Trainer(ABC):
             steps_per_epoch=d.steps_per_epoch,
             seed=t.seed,
             return_sequence=isinstance(cfg, LOMCfg),
-            max_player_frames=d.max_player_frames,
         )
+        log.info("Dataloaders ready  (train=%d steps/epoch  val=%d  batch=%d)",
+                 len(self.train_loader), len(self.val_loader), t.batch_size)
 
+        log.info("Building models ...")
         self.models = self.build_models().to(self.device)
+        n_params = sum(p.numel() for p in self.models.parameters())
+        n_trainable = sum(p.numel() for p in self.models.parameters() if p.requires_grad)
+        log.info("Models: %s  |  params=%s  trainable=%s",
+                 ", ".join(self.models.keys()),
+                 f"{n_params:,}", f"{n_trainable:,}")
+
         if t.compile_model:
+            log.info("Compiling models with torch.compile ...")
             for key in list(self.models.keys()):
                 self.models[key] = torch.compile(self.models[key])
+            log.info("Compilation done.")
 
         decay = [p for p in self.models.parameters() if p.requires_grad and p.dim() >= 2]
         nodecay = [p for p in self.models.parameters() if p.requires_grad and p.dim() < 2]
@@ -122,6 +140,8 @@ class Trainer(ABC):
             betas=(t.beta1, t.beta2),
             fused=("cuda" in str(self.device) and hasattr(optim.AdamW, "fused")),
         )
+        log.info("Optimiser: AdamW  lr=%.2e  wd=%.2e  warmup=%d  max_iters=%d",
+                 t.lr, t.weight_decay, t.warmup_iters, t.max_iters)
 
         dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
         amp_dtype = dtype_map.get(t.mixed_dtype, torch.float16)
@@ -133,9 +153,12 @@ class Trainer(ABC):
         self.scaler = torch.amp.GradScaler(
             "cuda", enabled=(amp_dtype == torch.float16 and "cuda" in str(self.device))
         )
+        log.info("AMP dtype=%s  grad_scaler=%s", t.mixed_dtype,
+                 "enabled" if self.scaler.is_enabled() else "disabled")
 
         os.makedirs(t.ckpt_dir, exist_ok=True)
         self.ckpt_path = os.path.join(t.ckpt_dir, f"{self.label()}_pretrain.pt")
+        log.info("Checkpoint path: %s", self.ckpt_path)
 
         self.wandb_run = None
         try:
@@ -156,6 +179,8 @@ class Trainer(ABC):
                 f"_s{t.seed}"
             )
 
+            log.info("Initialising WandB run '%s' (project=%s group=%s) ...",
+                     run_name, cfg.wandb.project, cfg.wandb.group)
             self.wandb_run = wandb.init(
                 project=cfg.wandb.project,
                 entity=cfg.wandb.entity,
@@ -165,10 +190,12 @@ class Trainer(ABC):
                 config=run_cfg,
                 resume="allow" if t.resume else "never",
             )
+            log.info("WandB run URL: %s", self.wandb_run.url)
         except Exception as exc:
             log.warning("WandB init failed: %s", exc)
 
         self.start_step = self.restore_checkpoint() if t.resume else 0
+        log.info("Starting from step %d", self.start_step)
 
     def label(self) -> str:
         return "lam" if isinstance(self.cfg, LAMCfg) else "lom"
@@ -242,9 +269,8 @@ class Trainer(ABC):
 
     def train(self) -> None:
         t = self.cfg.train
-        log.info("Device: %s  |  training: %s", self.device, self.label())
-        log.info("Parameters: %s", f"{sum(p.numel() for p in self.models.parameters()):,}")
-        log.info("Train: %d batches/epoch  Val: %d", len(self.train_loader), len(self.val_loader))
+        log.info("--- training start  steps=%d  log_every=%d  eval_every=%d ---",
+                 t.max_iters, t.log_interval, t.eval_interval)
 
         for mod in self.models.values():
             mod.train()
@@ -275,15 +301,17 @@ class Trainer(ABC):
 
             if (s + 1) % t.log_interval == 0:
                 dt = time.time() - t0
+                sps = t.log_interval * t.batch_size / dt
+                pct = 100.0 * (s + 1) / t.max_iters
                 log.info(
-                    "step %6d | total=%.4f | %s | lr=%.2e | %.2f s/step",
-                    s + 1,
+                    "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | %.0f samp/s",
+                    s + 1, t.max_iters, pct,
                     loss_dict["total_loss"].item(),
                     "  ".join(
                         f"{k}={v.item():.4f}" for k, v in loss_dict.items() if k != "total_loss"
                     ),
                     lr,
-                    dt / t.log_interval,
+                    sps,
                 )
                 t0 = time.time()
                 if self.wandb_run:
@@ -293,13 +321,14 @@ class Trainer(ABC):
                     )
 
             if (s + 1) % t.eval_interval == 0:
+                log.info("  [eval] running %d val batches ...", t.eval_iters)
                 val_metrics = self.eval()
-                log.info("  [val] %s", "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items()))
+                log.info("  [val]  %s", "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items()))
                 if self.wandb_run:
                     self.wandb_run.log({f"val/{k}": v for k, v in val_metrics.items()}, step=s + 1)
                 self.save_checkpoint(s + 1)
 
-        log.info("Training complete.")
+        log.info("=== training complete (%d steps) ===", t.max_iters)
         if self.wandb_run:
             self.wandb_run.finish()
 

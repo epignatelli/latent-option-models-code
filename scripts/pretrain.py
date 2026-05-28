@@ -15,6 +15,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import re
 import sys
 from typing import Annotated, Union
@@ -76,6 +77,13 @@ def _parse_args(argv: list[str]) -> list[str]:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+        force=True,
+    )
     cfg = tyro.cli(
         Union[
             Annotated[LAMCfg, tyro.conf.subcommand("lam")],
