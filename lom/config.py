@@ -64,7 +64,7 @@ class TrainCfg:
     eval_interval: int = 500
     eval_iters: int = 50
     log_interval: int = 50
-    compile_model: bool = True
+    compile_model: bool = True  # default on; set False only for debugging
     mixed_dtype: str = "bfloat16"
     seed: int = 42
     ckpt_dir: str = "/scratch/uceeepi/lom/checkpoints"
