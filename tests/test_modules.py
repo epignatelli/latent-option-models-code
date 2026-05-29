@@ -67,12 +67,14 @@ def stt():
     )
 
 
+@torch.no_grad()
 def test_stt_output_shape(stt):
     x = torch.randn(BATCH, T, S, D_MODEL)
     out = stt(x)
     assert out.shape == (BATCH, T, S, D_MODEL)
 
 
+@torch.no_grad()
 def test_stt_causal():
     model = SpatioTemporalTransformer(
         d_model=D_MODEL,
@@ -90,7 +92,8 @@ def test_stt_causal():
 def test_stt_exceeds_max_len(stt):
     x = torch.randn(BATCH, MAX_T + 1, S, D_MODEL)
     with pytest.raises(AssertionError):
-        stt(x)
+        with torch.no_grad():
+            stt(x)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="BlockMask requires CUDA")

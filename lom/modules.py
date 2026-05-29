@@ -25,7 +25,9 @@ _causal_block_mask_cache: dict[tuple, BlockMask] = {}
 _opt_block_mask_cache: dict[tuple, BlockMask] = {}
 
 
-def _causal_mask_mod(_b: torch.Tensor, _h: torch.Tensor, q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+def _causal_mask_mod(
+    _b: torch.Tensor, _h: torch.Tensor, q: torch.Tensor, kv: torch.Tensor
+) -> torch.Tensor:
     return q >= kv
 
 
@@ -41,8 +43,10 @@ def _get_causal_block_mask(T: int, device: torch.device) -> BlockMask:
 def _get_opt_block_mask(T: int, opt_pos: int, device: torch.device) -> BlockMask:
     key = (T, opt_pos, str(device))
     if key not in _opt_block_mask_cache:
+
         def mask_mod(b, h, q_idx, kv_idx):
             return ~((q_idx == opt_pos) & (kv_idx > opt_pos))
+
         _opt_block_mask_cache[key] = create_block_mask(
             mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device
         )
@@ -141,13 +145,9 @@ class SelfAttention(nn.Module):
         k = k.view(B, T, self.n_heads, head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_heads, head_dim).transpose(1, 2)
 
-        if x.is_cuda:
-            if self.causal and block_mask is None:
-                block_mask = _get_causal_block_mask(T, x.device)
-            y = flex_attention(q, k, v, block_mask=block_mask)
-        else:
-            # CPU fallback for tests — flex_attention requires CUDA
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        if self.causal and block_mask is None:
+            block_mask = _get_causal_block_mask(T, x.device)
+        y = flex_attention(q, k, v, block_mask=block_mask)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.c_proj(y))
@@ -277,7 +277,7 @@ class SpatioTemporalTransformer(nn.Module):
 # --- Screen tokenisation --------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
-CHAR_VOCAB  = 256
+CHAR_VOCAB = 256
 COLOR_VOCAB = 32
 TOKEN_VOCAB = CHAR_VOCAB * COLOR_VOCAB  # 8192
 
@@ -332,9 +332,9 @@ class PatchEmbedding(nn.Module):
         bias: bool = False,
     ):
         super().__init__()
-        assert obs_h % patch_size == 0 and obs_w % patch_size == 0, (
-            f"obs_h={obs_h} and obs_w={obs_w} must both be divisible by patch_size={patch_size}"
-        )
+        assert (
+            obs_h % patch_size == 0 and obs_w % patch_size == 0
+        ), f"obs_h={obs_h} and obs_w={obs_w} must both be divisible by patch_size={patch_size}"
         self.patch_size = patch_size
         self.obs_h = obs_h
         self.obs_w = obs_w
@@ -343,8 +343,7 @@ class PatchEmbedding(nn.Module):
 
         self.char_embed = nn.Embedding(vocab_size, d_model)
         self.patch_proj = (
-            nn.Linear(patch_size ** 2 * d_model, d_model, bias=bias)
-            if patch_size > 1 else None
+            nn.Linear(patch_size**2 * d_model, d_model, bias=bias) if patch_size > 1 else None
         )
 
         self.register_buffer("token_usage", torch.zeros(vocab_size, dtype=torch.long))
@@ -374,207 +373,11 @@ class PatchEmbedding(nn.Module):
             emb = emb.reshape(B, T, H // P, P, W // P, P, D)
             emb = emb.permute(0, 1, 2, 4, 3, 5, 6).contiguous()  # (B, T, H/P, W/P, P, P, D)
             emb = emb.reshape(B, T, self.n_tokens, P * P * D)
-            emb = self.patch_proj(emb)                             # (B, T, n_tokens, D)
+            emb = self.patch_proj(emb)  # (B, T, n_tokens, D)
         else:
             emb = emb.reshape(B, T, self.n_tokens, D)
 
         return emb
-
-
-# --------------------------------------------------------------------------- #
-# --- Latent Encoders ------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
-
-
-class BidirectionalEncoder(nn.Module):
-    """Single-pass bidirectional encoder: (history, future[, condition]) → (B, d_model).
-
-    Concatenates [history, (condition,) OPT, future] and runs a bidirectional
-    SpatioTemporalTransformer. OPT is masked from attending to future frames;
-    its spatial mean is the pooled representation.
-    """
-
-    def __init__(
-        self,
-        vocab_size: int,
-        obs_h: int,
-        obs_w: int,
-        d_model: int,
-        n_layers: int,
-        n_heads: int,
-        context_length: int,
-        horizon: int = 1,
-        patch_size: int = 1,
-        condition_dim: Optional[int] = None,
-        dropout: float = 0.0,
-        bias: bool = False,
-    ):
-        super().__init__()
-        self.d_model = d_model
-        self.context_length = context_length
-        self.horizon = horizon
-        self.has_condition = condition_dim is not None
-
-        self.tokeniser = ScreenTokeniser()
-        self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
-        S = self.S = self.embed.n_tokens
-
-        extra = 1 if self.has_condition else 0
-        self.cond_proj = (
-            nn.Linear(condition_dim, d_model, bias=bias) if self.has_condition else None
-        )
-        self.opt_token = nn.Parameter(torch.randn(1, 1, S, d_model) * 0.02)
-        self.transformer = SpatioTemporalTransformer(
-            d_model=d_model,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            n_spatial_positions=S,
-            max_temporal_len=context_length + extra + 1 + horizon,
-            dropout=dropout,
-            bias=bias,
-            causal_temporal=False,
-        )
-
-    @property
-    def out_dim(self) -> int:
-        return self.d_model
-
-    def _build_block_mask(self, c: int, k: int, device: torch.device) -> BlockMask | None:
-        if device.type != "cuda":
-            return None  # CPU path (tests): skip OPT mask, flex_attention unavailable
-        extra = 1 if self.has_condition else 0
-        T = c + extra + 1 + k
-        opt_pos = c + extra
-        return _get_opt_block_mask(T, opt_pos, device)
-
-    def forward(
-        self,
-        history: torch.Tensor,
-        future: torch.Tensor,
-        condition: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Args:
-            history:   (B, c, H, W, 2) uint8
-            future:    (B, H, W, 2) or (B, k, H, W, 2) uint8
-            condition: (B, condition_dim) optional
-        Returns:
-            (B, d_model)
-        """
-        B, c = history.shape[:2]
-        history = self.tokeniser(history)
-        future  = self.tokeniser(future)
-        if future.ndim == 3:
-            future = future.unsqueeze(1)
-        k = future.shape[1]
-
-        hist_emb = self.embed(history)  # (B, c, S, D)
-        fut_emb  = self.embed(future)   # (B, k, S, D)
-        opt_emb  = self.opt_token.expand(B, 1, self.S, self.d_model)
-
-        parts = [hist_emb]
-        if condition is not None and self.cond_proj is not None:
-            cond_tok = (
-                self.cond_proj(condition)
-                .view(B, 1, 1, self.d_model)
-                .expand(B, 1, self.S, self.d_model)
-            )
-            parts.append(cond_tok)
-        parts += [opt_emb, fut_emb]
-
-        seq    = torch.cat(parts, dim=1)
-        hidden = self.transformer(seq, temporal_mask=self._build_block_mask(c, k, seq.device))
-
-        opt_pos = c + (1 if self.has_condition else 0)
-        return hidden[:, opt_pos, :, :].mean(dim=1)  # (B, D)
-
-
-class TwoPassEncoder(nn.Module):
-    """Two-pass encoder: separate context and target passes → (B, 2 * d_model).
-
-    Context pass: [history, (condition)] → mean over (T, S) → (B, D)
-    Target pass:  [future]               → mean over (T, S) → (B, D)
-    Returns concat of both pooled vectors — no cross-attention leakage between
-    history and future; z_q is the only bridge.
-    """
-
-    def __init__(
-        self,
-        vocab_size: int,
-        obs_h: int,
-        obs_w: int,
-        d_model: int,
-        n_layers: int,
-        n_heads: int,
-        context_length: int,
-        horizon: int = 1,
-        patch_size: int = 1,
-        condition_dim: Optional[int] = None,
-        dropout: float = 0.0,
-        bias: bool = False,
-    ):
-        super().__init__()
-        self.d_model = d_model
-        self.has_condition = condition_dim is not None
-
-        self.tokeniser = ScreenTokeniser()
-        self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
-        S = self.S = self.embed.n_tokens
-
-        extra = 1 if self.has_condition else 0
-        self.cond_proj = (
-            nn.Linear(condition_dim, d_model, bias=bias) if self.has_condition else None
-        )
-        self.transformer = SpatioTemporalTransformer(
-            d_model=d_model,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            n_spatial_positions=S,
-            max_temporal_len=max(context_length + extra, horizon),
-            dropout=dropout,
-            bias=bias,
-            causal_temporal=False,
-        )
-
-    @property
-    def out_dim(self) -> int:
-        return 2 * self.d_model
-
-    def forward(
-        self,
-        history: torch.Tensor,
-        future: torch.Tensor,
-        condition: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Args:
-            history:   (B, c, H, W, 2) uint8
-            future:    (B, H, W, 2) or (B, k, H, W, 2) uint8
-            condition: (B, condition_dim) optional
-        Returns:
-            (B, 2 * d_model)
-        """
-        B = history.shape[0]
-        history = self.tokeniser(history)
-        future  = self.tokeniser(future)
-        if future.ndim == 3:
-            future = future.unsqueeze(1)
-
-        hist_emb = self.embed(history)  # (B, c, S, D)
-        fut_emb  = self.embed(future)   # (B, k, S, D)
-
-        ctx_parts = [hist_emb]
-        if condition is not None and self.cond_proj is not None:
-            cond_tok = (
-                self.cond_proj(condition)
-                .view(B, 1, 1, self.d_model)
-                .expand(B, 1, self.S, self.d_model)
-            )
-            ctx_parts.append(cond_tok)
-        ctx_pooled = self.transformer(torch.cat(ctx_parts, dim=1)).mean(dim=(1, 2))  # (B, D)
-        tgt_pooled = self.transformer(fut_emb).mean(dim=(1, 2))                      # (B, D)
-
-        return torch.cat([ctx_pooled, tgt_pooled], dim=-1)  # (B, 2D)
 
 
 # --------------------------------------------------------------------------- #
@@ -659,7 +462,9 @@ class VectorQuantizer(nn.Module):
                 # EMA update: use float32 to avoid bf16 accumulation under autocast
                 z_norm_f32 = z_norm.float()
                 cluster_size = one_hot.sum(0)
-                self.ema_cluster_size.mul_(self.ema_decay).add_(cluster_size, alpha=1 - self.ema_decay)
+                self.ema_cluster_size.mul_(self.ema_decay).add_(
+                    cluster_size, alpha=1 - self.ema_decay
+                )
                 embed_sum = one_hot.T @ z_norm_f32  # (K, D)
                 self.ema_embed_sum.mul_(self.ema_decay).add_(embed_sum, alpha=1 - self.ema_decay)
 
@@ -676,7 +481,9 @@ class VectorQuantizer(nn.Module):
                     if dead.numel():
                         alive = (self.last_active < self.vq_reset_thresh).nonzero(as_tuple=True)[0]
                         if alive.numel():
-                            src = alive[torch.randint(alive.numel(), (dead.numel(),), device=z.device)]
+                            src = alive[
+                                torch.randint(alive.numel(), (dead.numel(),), device=z.device)
+                            ]
                             self.codebook[dead] = self.codebook[src]
                             self.ema_embed_sum[dead] = self.ema_embed_sum[src]
                             self.ema_cluster_size[dead] = self.ema_cluster_size[src]

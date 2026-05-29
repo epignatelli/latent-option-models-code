@@ -22,6 +22,7 @@ import logging
 import multiprocessing as mp
 import sys
 import time
+import traceback
 
 import torch
 import torch.optim as optim
@@ -44,7 +45,7 @@ _fh.setFormatter(_fmt)
 _root.addHandler(_fh)
 log = logging.getLogger(__name__)
 
-DEFAULT_BATCH_SIZES = [256, 512, 1024, 2048, 4096, 8192, 16384]
+DEFAULT_BATCH_SIZES = [32, 64, 128, 256, 512, 1024]
 DEFAULT_CTX         = 4
 DEFAULT_HORIZON     = 128
 SEED                = 42
@@ -59,7 +60,7 @@ GPU_MEASURE_STEPS   = 50
 def _build_lam_models(device, context_len: int, two_encoder: bool = False):
     e = EnvCfg()
     m = ModelCfg(d_model=256, n_layers=4, n_heads=4, context_length=context_len,
-                 latent_dim=512, num_options=256, patch_size=4)
+                 latent_dim=512, num_options=256, patch_size=8)
     lam = LatentActionModel(
         vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w,
         d_model=m.d_model, n_layers=m.n_layers, n_heads=m.n_heads,
@@ -80,7 +81,7 @@ def _build_lom_models(device, context_len: int, horizon: int, two_encoder: bool 
     from lom.config import LOMModelCfg
     e = EnvCfg()
     m = LOMModelCfg(d_model=256, n_layers=4, n_heads=4, context_length=context_len,
-                    latent_dim=512, num_options=256, patch_size=4)
+                    latent_dim=512, num_options=256, patch_size=8)
     base = dict(vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w,
                 d_model=m.d_model, n_layers=m.n_layers, n_heads=m.n_heads,
                 context_length=m.context_length, latent_dim=m.latent_dim,
@@ -215,13 +216,6 @@ def measure_one_batch_size(batch_size: int, model_type: str,
         log.info("  params  %-14s  %9.3f M", name, m.num_parameters() / 1e6)
     log.info("  params  %-14s  %9.3f M", "total", total_params / 1e6)
 
-    # Warm up block mask caches before compiling so create_block_mask is never called
-    # inside the compiled graph (it's a Triton kernel factory, not graph-traceable).
-    with torch.no_grad(), ctx:
-        _run_step(model_type, models,
-                  _make_dummy_batch(1, model_type, context_len, horizon, e),
-                  device, ctx, e)
-
     if compile_model:
         log.info("  Compiling models ...")
         models = {k: torch.compile(m, dynamic=False) for k, m in models.items()}
@@ -277,8 +271,8 @@ def _worker(batch_size: int, model_type: str,
     except torch.cuda.OutOfMemoryError:
         peak_gb = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
         q.put(("oom", None, peak_gb))
-    except Exception as exc:
-        q.put(("error", str(exc), 0.0))
+    except Exception:
+        q.put(("error", traceback.format_exc(), 0.0))
 
 
 def _spawn(batch_size: int, model_type: str,
@@ -387,7 +381,7 @@ def main() -> None:
     parser.add_argument("--compile", action="store_true",
                         help="apply torch.compile to all models before profiling")
     parser.add_argument("--two-encoder", action="store_true",
-                        help="use TwoPassEncoder instead of BidirectionalEncoder")
+                        help="use IndependentEncoder instead of BidirectionalEncoder")
     args = parser.parse_args()
 
     log.info("=== profile_memory  model=%s  horizon=%d  compile=%s  two_encoder=%s ===",

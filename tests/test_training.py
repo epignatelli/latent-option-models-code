@@ -4,6 +4,10 @@ import pytest
 import torch
 import torch.nn as nn
 
+needs_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="flex_attention backward requires CUDA"
+)
+
 from lom.config import LAMCfg, LOMCfg, LOMModelCfg, ModelCfg, DataCfg, EnvCfg, TrainCfg
 from lom.training import LAMTrainer, LOMTrainer, get_lr, reconstruction_loss
 
@@ -115,18 +119,22 @@ def lom_batch():
     return [_screen(BATCH, CONTEXT), _screen(BATCH), _screen(BATCH), _screen(BATCH, HORIZON)]
 
 
+@torch.no_grad()
 def test_lam_step_keys():
     trainer = lam_trainer_with_models()
     out = trainer.step(lam_batch())
     assert {"recon", "vq_loss", "commit_loss", "entropy", "total_loss"} == set(out.keys())
 
 
+@needs_cuda
 def test_lam_step_backward():
     trainer = lam_trainer_with_models()
-    out = trainer.step(lam_batch())
+    trainer.models = trainer.models.cuda()
+    out = trainer.step([t.cuda() for t in lam_batch()])
     out["total_loss"].backward()
 
 
+@torch.no_grad()
 def test_lom_step_keys():
     trainer = lom_trainer_with_models()
     out = trainer.step(lom_batch())
@@ -135,9 +143,11 @@ def test_lom_step_keys():
             "entropy_option", "entropy_action", "total_loss"} == set(out.keys())
 
 
+@needs_cuda
 def test_lom_step_backward():
     trainer = lom_trainer_with_models()
-    out = trainer.step(lom_batch())
+    trainer.models = trainer.models.cuda()
+    out = trainer.step([t.cuda() for t in lom_batch()])
     out["total_loss"].backward()
 
 

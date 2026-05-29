@@ -1,9 +1,13 @@
 import pytest
 import torch
 from lom.models import DynamicsModel, LatentActionModel
-from lom.modules import BidirectionalEncoder, TwoPassEncoder
+from lom.models import BidirectionalEncoder, IndependentEncoder
 
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
+
+needs_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="flex_attention backward requires CUDA"
+)
 
 
 def make_lam(horizon=1, condition_dim=None, two_encoder=False):
@@ -62,6 +66,7 @@ def frame_sequence(k):
 # --- LatentActionModel ----------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
+@torch.no_grad()
 def test_lam_single_future():
     lam = make_lam()
     z_q, _, indices = lam(history(), single_frame())
@@ -69,6 +74,7 @@ def test_lam_single_future():
     assert indices.shape == (BATCH,)
 
 
+@torch.no_grad()
 def test_lam_sequence_future():
     lam = make_lam(horizon=HORIZON)
     z_q, _, indices = lam(history(), frame_sequence(HORIZON))
@@ -76,6 +82,7 @@ def test_lam_sequence_future():
     assert indices.shape == (BATCH,)
 
 
+@torch.no_grad()
 def test_lam_with_condition():
     lam = make_lam(condition_dim=LATENT_DIM)
     cond = torch.randn(BATCH, LATENT_DIM)
@@ -84,9 +91,10 @@ def test_lam_with_condition():
     assert indices.shape == (BATCH,)
 
 
+@needs_cuda
 def test_lam_backward():
-    lam = make_lam()
-    _, loss_dict, _ = lam(history(), single_frame())
+    lam = make_lam().cuda()
+    _, loss_dict, _ = lam(history().cuda(), single_frame().cuda())
     loss_dict["vq_loss"].backward()
 
 
@@ -102,38 +110,44 @@ def make_encoder(cls, horizon=1, condition_dim=None):
     )
 
 
+@torch.no_grad()
 def test_bidirectional_encoder_shape():
     enc = make_encoder(BidirectionalEncoder)
     out = enc(history(), single_frame())
     assert out.shape == (BATCH, D_MODEL)
 
 
+@torch.no_grad()
 def test_bidirectional_encoder_sequence():
     enc = make_encoder(BidirectionalEncoder, horizon=HORIZON)
     out = enc(history(), frame_sequence(HORIZON))
     assert out.shape == (BATCH, D_MODEL)
 
 
+@torch.no_grad()
 def test_bidirectional_encoder_with_condition():
     enc = make_encoder(BidirectionalEncoder, condition_dim=LATENT_DIM)
     out = enc(history(), single_frame(), condition=torch.randn(BATCH, LATENT_DIM))
     assert out.shape == (BATCH, D_MODEL)
 
 
-def test_twopass_encoder_shape():
-    enc = make_encoder(TwoPassEncoder)
+@torch.no_grad()
+def test_independent_encoder_shape():
+    enc = make_encoder(IndependentEncoder)
     out = enc(history(), single_frame())
     assert out.shape == (BATCH, 2 * D_MODEL)
 
 
-def test_twopass_encoder_sequence():
-    enc = make_encoder(TwoPassEncoder, horizon=HORIZON)
+@torch.no_grad()
+def test_independent_encoder_sequence():
+    enc = make_encoder(IndependentEncoder, horizon=HORIZON)
     out = enc(history(), frame_sequence(HORIZON))
     assert out.shape == (BATCH, 2 * D_MODEL)
 
 
-def test_twopass_encoder_with_condition():
-    enc = make_encoder(TwoPassEncoder, condition_dim=LATENT_DIM)
+@torch.no_grad()
+def test_independent_encoder_with_condition():
+    enc = make_encoder(IndependentEncoder, condition_dim=LATENT_DIM)
     out = enc(history(), single_frame(), condition=torch.randn(BATCH, LATENT_DIM))
     assert out.shape == (BATCH, 2 * D_MODEL)
 
@@ -142,6 +156,7 @@ def test_twopass_encoder_with_condition():
 # --- LatentActionModel two_encoder=True ------------------------------------ #
 # --------------------------------------------------------------------------- #
 
+@torch.no_grad()
 def test_two_encoder_lam_shapes():
     lam = make_lam(two_encoder=True)
     z_q, _, indices = lam(history(), single_frame())
@@ -149,6 +164,7 @@ def test_two_encoder_lam_shapes():
     assert indices.shape == (BATCH,)
 
 
+@torch.no_grad()
 def test_two_encoder_lam_sequence_future():
     lam = make_lam(horizon=HORIZON, two_encoder=True)
     z_q, _, indices = lam(history(), frame_sequence(HORIZON))
@@ -156,6 +172,7 @@ def test_two_encoder_lam_sequence_future():
     assert indices.shape == (BATCH,)
 
 
+@torch.no_grad()
 def test_two_encoder_lam_with_condition():
     lam = make_lam(condition_dim=LATENT_DIM, two_encoder=True)
     cond = torch.randn(BATCH, LATENT_DIM)
@@ -163,9 +180,10 @@ def test_two_encoder_lam_with_condition():
     assert z_q.shape == (BATCH, LATENT_DIM)
 
 
+@needs_cuda
 def test_two_encoder_lam_backward():
-    lam = make_lam(two_encoder=True)
-    _, loss_dict, _ = lam(history(), single_frame())
+    lam = make_lam(two_encoder=True).cuda()
+    _, loss_dict, _ = lam(history().cuda(), single_frame().cuda())
     loss_dict["vq_loss"].backward()
 
 
@@ -201,12 +219,14 @@ def action():
     return torch.randn(BATCH, LATENT_DIM)
 
 
+@torch.no_grad()
 def test_dynamics_single_frame():
     dyn = make_dynamics()
     logits = dyn(history(), action())
     assert logits.shape == (BATCH, S, VOCAB)
 
 
+@torch.no_grad()
 def test_dynamics_sequence_teacher():
     dyn = make_dynamics(predict_sequence=True)
     teacher = frame_sequence(HORIZON)
@@ -214,12 +234,14 @@ def test_dynamics_sequence_teacher():
     assert logits.shape == (BATCH, HORIZON, S, VOCAB)
 
 
+@torch.no_grad()
 def test_dynamics_sequence_autoregressive():
     dyn = make_dynamics(predict_sequence=True)
     logits = dyn(history(), action(), horizon=HORIZON)
     assert logits.shape == (BATCH, HORIZON, S, VOCAB)
 
 
+@torch.no_grad()
 def test_dynamics_with_option_code():
     dyn = make_dynamics(option_dim=LATENT_DIM)
     option_code = torch.randn(BATCH, LATENT_DIM)
@@ -227,10 +249,11 @@ def test_dynamics_with_option_code():
     assert logits.shape == (BATCH, S, VOCAB)
 
 
+@needs_cuda
 def test_dynamics_backward():
-    dyn = make_dynamics()
-    logits = dyn(history(), action())
-    target = torch.randint(0, VOCAB, (BATCH, S))
+    dyn = make_dynamics().cuda()
+    logits = dyn(history().cuda(), action().cuda())
+    target = torch.randint(0, VOCAB, (BATCH, S), device="cuda")
     loss = torch.nn.functional.cross_entropy(logits.reshape(-1, VOCAB), target.reshape(-1))
     loss.backward()
 
@@ -259,6 +282,7 @@ def make_dynamics_patched(predict_sequence=False):
     )
 
 
+@torch.no_grad()
 def test_lam_patch_output_shape():
     lam = make_lam_patched()
     z, _, idx = lam(history(), single_frame())
@@ -266,34 +290,38 @@ def test_lam_patch_output_shape():
     assert idx.shape == (BATCH,)
 
 
+@torch.no_grad()
 def test_lam_patch_sequence_future():
     lam = make_lam_patched(horizon=HORIZON)
     z, _, _ = lam(history(), frame_sequence(HORIZON))
     assert z.shape == (BATCH, LATENT_DIM)
 
 
+@torch.no_grad()
 def test_dynamics_patch_single_frame():
-    # output must be character-level regardless of patch size
     dyn = make_dynamics_patched()
     logits = dyn(history(), action())
     assert logits.shape == (BATCH, S, VOCAB)
 
 
+@torch.no_grad()
 def test_dynamics_patch_sequence_teacher():
     dyn = make_dynamics_patched(predict_sequence=True)
     logits = dyn(history(), action(), horizon=HORIZON, teacher_frames=frame_sequence(HORIZON))
     assert logits.shape == (BATCH, HORIZON, S, VOCAB)
 
 
+@torch.no_grad()
 def test_dynamics_patch_sequence_autoregressive():
     dyn = make_dynamics_patched(predict_sequence=True)
     logits = dyn(history(), action(), horizon=HORIZON)
     assert logits.shape == (BATCH, HORIZON, S, VOCAB)
 
 
+@needs_cuda
 def test_dynamics_patch_backward():
-    dyn = make_dynamics_patched()
-    logits = dyn(history(), action())
-    target = torch.randint(0, VOCAB, (BATCH, S))
+    dyn = make_dynamics_patched().cuda()
+    logits = dyn(history().cuda(), action().cuda())
+    target = torch.randint(0, VOCAB, (BATCH, S), device="cuda")
     loss = torch.nn.functional.cross_entropy(logits.reshape(-1, VOCAB), target.reshape(-1))
     loss.backward()
