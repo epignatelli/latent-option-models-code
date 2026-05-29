@@ -61,10 +61,18 @@ GPU_MEASURE_STEPS   = 50
 
 def _model_cfg(context_len: int, encoder: str = "stt") -> tuple[EnvCfg, ModelCfg]:
     e = EnvCfg()
-    if encoder == "jepa":
+    if encoder == "jepa-params":
         # Parameter-matched to STT (~152M): d_model=512, n_layers=12, n_heads=8 (head_dim=64)
         m = ModelCfg(d_model=512, n_layers=12, n_heads=8, context_length=context_len,
-                     latent_dim=512, num_options=256, patch_size=8)
+                     latent_dim=512, num_options=256, patch_size=8, two_encoder=True)
+    elif encoder == "jepa-medium":
+        # Medium JEPA: ~100M backbone params; d_model=512, n_layers=8, n_heads=8
+        m = ModelCfg(d_model=512, n_layers=8, n_heads=8, context_length=context_len,
+                     latent_dim=512, num_options=256, patch_size=8, two_encoder=True)
+    elif encoder == "jepa":
+        # Compute-matched to STT: same backbone (d_model=256, n_layers=4, n_heads=4, ~21.7M)
+        m = ModelCfg(d_model=256, n_layers=4, n_heads=4, context_length=context_len,
+                     latent_dim=512, num_options=256, patch_size=8, two_encoder=True)
     else:
         m = ModelCfg(d_model=256, n_layers=4, n_heads=4, context_length=context_len,
                      latent_dim=512, num_options=256, patch_size=8)
@@ -74,7 +82,7 @@ def _model_cfg(context_len: int, encoder: str = "stt") -> tuple[EnvCfg, ModelCfg
 def _build_models(device, method: str, encoder: str,
                   context_len: int, horizon: int) -> tuple[EnvCfg, dict]:
     e, m = _model_cfg(context_len, encoder)
-    jepa = encoder == "jepa"
+    jepa = encoder.startswith("jepa")
     base = dict(
         vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w,
         d_model=m.d_model, n_layers=m.n_layers, n_heads=m.n_heads,
@@ -123,7 +131,7 @@ def _run_step(method: str, encoder: str, models: dict,
     if method == "lam":
         history, next_frame = batch[0].to(device), batch[1].to(device)
         z, vq_out, _ = models["lam"](history, next_frame)
-        if encoder == "jepa":
+        if encoder.startswith("jepa"):
             with torch.no_grad():
                 z_target = models["ema_enc"].encode(next_frame)
             z_hat = models["dyn"](history, z)
@@ -182,7 +190,7 @@ def _run_step_traced(method: str, encoder: str, models: dict,
             z, vq_out, _ = models["lam"](history, next_frame)
         log.info("    [trace] after LAM forward:     %.2f GB", _mem(device))
         with ctx:
-            if encoder == "jepa":
+            if encoder.startswith("jepa"):
                 with torch.no_grad():
                     z_target = models["ema_enc"].encode(next_frame)
                 z_hat = models["dyn"](history, z)
@@ -391,6 +399,43 @@ def pareto_sweep(batch_sizes: list[int], context_lens: list[int],
 
 
 # --------------------------------------------------------------------------- #
+# Horizon sweep
+# --------------------------------------------------------------------------- #
+
+def horizon_sweep(batch_sizes: list[int], horizon_lengths: list[int],
+                  method: str, encoder: str, ctx: int,
+                  compile_model: bool = False) -> list[dict]:
+    log.info("")
+    log.info("═" * 70)
+    log.info("  Horizon sweep  method=%s  encoder=%s  ctx=%d  compile=%s",
+             method, encoder, ctx, compile_model)
+    log.info("═" * 70)
+
+    rows = []
+    for h in horizon_lengths:
+        toks = (ctx + h) * 30
+        log.info("")
+        log.info("  horizon=%d  tokens/sample=%d", h, toks)
+        results = sweep_batch_sizes(batch_sizes, method, encoder, ctx, h, compile_model)
+        if results:
+            best_bs  = max(results, key=results.__getitem__)
+            best_sps = results[best_bs]
+        else:
+            best_bs, best_sps = 0, 0.0
+        rows.append({"horizon": h, "tokens_per_sample": toks,
+                     "max_batch": best_bs, "samp_s": best_sps,
+                     "all": {str(bs): sps for bs, sps in results.items()}})
+
+    log.info("")
+    log.info("  %-10s  %-14s  %-12s  %s", "horizon", "tokens/sample", "max_batch", "samp/s")
+    log.info("  " + "-" * 52)
+    for r in rows:
+        log.info("  %-10d  %-14d  %-12d  %.0f",
+                 r["horizon"], r["tokens_per_sample"], r["max_batch"], r["samp_s"])
+    return rows
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 
@@ -398,7 +443,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--method",          choices=["lam", "lom"], default="lam")
-    parser.add_argument("--encoder",         choices=["stt", "jepa"], default="stt")
+    parser.add_argument("--encoder",         choices=["stt", "jepa", "jepa-medium", "jepa-params"], default="stt")
     parser.add_argument("--horizon",         type=int, default=DEFAULT_HORIZON)
     parser.add_argument("--context-len",     type=int, default=DEFAULT_CTX)
     parser.add_argument("--batch-sizes",     type=int, nargs="+", default=DEFAULT_BATCH_SIZES)
@@ -407,10 +452,15 @@ def main() -> None:
     parser.add_argument("--context-lengths", type=int, nargs="+",
                         default=[4, 8, 16, 32, 64, 128, 256],
                         help="context lengths to sweep with --pareto")
+    parser.add_argument("--horizon-sweep",   action="store_true",
+                        help="sweep horizon lengths × batch sizes at fixed context length")
+    parser.add_argument("--horizon-lengths", type=int, nargs="+",
+                        default=[32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
+                        help="horizon lengths to sweep with --horizon-sweep")
     parser.add_argument("--compile",         action="store_true",
                         help="apply torch.compile to all models before profiling")
     parser.add_argument("--json-out",        default=None,
-                        help="write pareto results to this JSON file (--pareto only)")
+                        help="write sweep results to this JSON file")
     args = parser.parse_args()
 
     log.info("=== profile_memory  method=%s  encoder=%s  horizon=%d  compile=%s ===",
@@ -421,10 +471,19 @@ def main() -> None:
                             args.method, args.encoder, args.horizon, args.compile)
         if args.json_out:
             payload = {"method": args.method, "encoder": args.encoder,
-                       "horizon": args.horizon, "rows": rows}
+                       "horizon": args.horizon, "sweep": "ctx", "rows": rows}
             with open(args.json_out, "w") as f:
                 json.dump(payload, f, indent=2)
             log.info("Pareto results written to %s", args.json_out)
+    elif args.horizon_sweep:
+        rows = horizon_sweep(args.batch_sizes, args.horizon_lengths,
+                             args.method, args.encoder, args.context_len, args.compile)
+        if args.json_out:
+            payload = {"method": args.method, "encoder": args.encoder,
+                       "ctx": args.context_len, "sweep": "horizon", "rows": rows}
+            with open(args.json_out, "w") as f:
+                json.dump(payload, f, indent=2)
+            log.info("Horizon sweep results written to %s", args.json_out)
     else:
         log.info("Sweeping batch sizes  (method=%s  encoder=%s  ctx=%d  horizon=%d)",
                  args.method, args.encoder, args.context_len, args.horizon)
