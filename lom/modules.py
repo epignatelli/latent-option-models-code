@@ -147,7 +147,10 @@ class SelfAttention(nn.Module):
 
         if self.causal and block_mask is None:
             block_mask = _get_causal_block_mask(T, x.device)
-        y = flex_attention(q, k, v, block_mask=block_mask)
+        # T < 128 triggers the flex_decoding kernel which fails for H>1 block masks
+        # (pytorch#147267). Force the regular flex_attention kernel unconditionally.
+        y = flex_attention(q, k, v, block_mask=block_mask,
+                           kernel_options={"FORCE_USE_FLEX_ATTENTION": True})
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.c_proj(y))
