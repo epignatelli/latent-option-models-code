@@ -29,6 +29,7 @@ Compose to build LAM or LOM:
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Optional, Tuple
 
 import torch
@@ -51,7 +52,7 @@ from .modules import (
 # --------------------------------------------------------------------------- #
 
 
-class BidirectionalEncoder(nn.Module):
+class STTEncoder(nn.Module):
     """Single-pass bidirectional encoder: (history, future[, condition]) → (B, d_model).
 
     Concatenates [history, (condition,) OPT, future] and runs a bidirectional
@@ -154,13 +155,16 @@ class BidirectionalEncoder(nn.Module):
         return hidden[:, opt_pos, :, :].mean(dim=1)  # (B, D)
 
 
-class IndependentEncoder(nn.Module):
-    """Independent encoder: context and future encoded separately → (B, 2 * d_model).
+class JEPAEncoder(nn.Module):
+    """JEPA encoder: context and future encoded independently → (B, 2 * d_model).
 
     Context pass: [history, (condition)] → mean over (T, S) → (B, D)
     Target pass:  [future]               → mean over (T, S) → (B, D)
     Returns concat of both pooled vectors — no cross-attention between history
     and future at the transformer level; z_q is the only information bridge.
+
+    Also exposes encode(frames) which runs the backbone on an arbitrary frame
+    sequence — used by EMAEncoder to produce JEPA targets without history context.
     """
 
     def __init__(
@@ -172,6 +176,7 @@ class IndependentEncoder(nn.Module):
         n_layers: int,
         n_heads: int,
         context_length: int,
+        latent_dim: int,
         horizon: int = 1,
         patch_size: int = 1,
         condition_dim: Optional[int] = None,
@@ -180,6 +185,7 @@ class IndependentEncoder(nn.Module):
     ):
         super().__init__()
         self.d_model = d_model
+        self.latent_dim = latent_dim
         self.has_condition = condition_dim is not None
 
         self.tokeniser = ScreenTokeniser()
@@ -200,10 +206,25 @@ class IndependentEncoder(nn.Module):
             bias=bias,
             causal_temporal=False,
         )
+        self.proj_target = nn.Linear(d_model, latent_dim, bias=bias)
+        self.ln_target = LayerNorm(latent_dim, bias)
 
     @property
     def out_dim(self) -> int:
         return 2 * self.d_model
+
+    def encode(self, frames: torch.Tensor) -> torch.Tensor:
+        """Encode frames without history context: backbone → mean pool → proj → (B, latent_dim).
+
+        Used by EMAEncoder to produce JEPA targets.
+        frames: (B, H, W, 2) or (B, k, H, W, 2) uint8
+        """
+        tokens = self.tokeniser(frames)
+        if tokens.ndim == 3:          # single frame (B, H, W) → (B, 1, H, W)
+            tokens = tokens.unsqueeze(1)
+        emb = self.embed(tokens)                          # (B, k, S, D)
+        pooled = self.transformer(emb).mean(dim=(1, 2))  # (B, D)
+        return self.ln_target(self.proj_target(pooled))  # (B, latent_dim)
 
     def forward(
         self,
@@ -242,6 +263,29 @@ class IndependentEncoder(nn.Module):
         return torch.cat([ctx_pooled, tgt_pooled], dim=-1)  # (B, 2D)
 
 
+class EMAEncoder(nn.Module):
+    """EMA shadow of a JEPAEncoder used as the JEPA target encoder.
+
+    Parameters are not trained by the optimizer; updated each step via exponential
+    moving average of the online JEPAEncoder.
+    """
+
+    def __init__(self, base: JEPAEncoder, decay: float = 0.996):
+        super().__init__()
+        self.encoder = deepcopy(base)
+        self.decay = decay
+        for p in self.encoder.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, online: JEPAEncoder) -> None:
+        for e, o in zip(self.encoder.parameters(), online.parameters()):
+            e.data.mul_(self.decay).add_(o.data, alpha=1 - self.decay)
+
+    def encode(self, frames: torch.Tensor) -> torch.Tensor:
+        return self.encoder.encode(frames)
+
+
 # --------------------------------------------------------------------------- #
 # --- Latent Action Model --------------------------------------------------- #
 # --------------------------------------------------------------------------- #
@@ -251,8 +295,8 @@ class LatentActionModel(SerialisableModule):
     """Frame encoder + VQ: (history, future[, condition]) → z via VQ.
 
     Encoder is selected by two_encoder:
-      False (default): BidirectionalEncoder — single pass with masked OPT token
-      True:            IndependentEncoder — context/target encoded separately, concat-pooled
+      False (default): STTEncoder   — single pass with masked OPT token
+      True:            JEPAEncoder  — context/target encoded separately, concat-pooled
     """
 
     def __init__(
@@ -300,14 +344,17 @@ class LatentActionModel(SerialisableModule):
         self.dropout = dropout
         self.bias = bias
 
-        encoder_cls = IndependentEncoder if two_encoder else BidirectionalEncoder
-        self.encoder = encoder_cls(
+        encoder_cls = JEPAEncoder if two_encoder else STTEncoder
+        encoder_kwargs: dict = dict(
             vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
             d_model=d_model, n_layers=n_layers, n_heads=n_heads,
             context_length=context_length, horizon=horizon,
             patch_size=patch_size, condition_dim=condition_dim,
             dropout=dropout, bias=bias,
         )
+        if two_encoder:
+            encoder_kwargs["latent_dim"] = latent_dim
+        self.encoder = encoder_cls(**encoder_kwargs)
         self.vq_proj = nn.Linear(self.encoder.out_dim, latent_dim, bias=bias)
         self.ln_vq = LayerNorm(latent_dim, bias)
         self.vq = VectorQuantizer(
@@ -370,12 +417,16 @@ class DynamicsModel(SerialisableModule):
         latent_dim: int,
         option_dim: Optional[int] = None,
         predict_sequence: bool = False,
+        predict_latent: bool = False,
+        target_dim: Optional[int] = None,
         horizon: int = 1,
         patch_size: int = 1,
         dropout: float = 0.0,
         bias: bool = False,
     ):
         super().__init__()
+        assert not (predict_latent and target_dim is None), \
+            "target_dim is required when predict_latent=True"
         self.vocab_size = vocab_size
         self.obs_h = obs_h
         self.obs_w = obs_w
@@ -386,6 +437,8 @@ class DynamicsModel(SerialisableModule):
         self.latent_dim = latent_dim
         self.option_dim = option_dim
         self.predict_sequence = predict_sequence
+        self.predict_latent = predict_latent
+        self.target_dim = target_dim
         self.horizon = horizon
         self.patch_size = patch_size
         self.dropout = dropout
@@ -412,8 +465,13 @@ class DynamicsModel(SerialisableModule):
             causal_temporal=True,
         )
         self.ln_trunk = LayerNorm(d_model, bias)
-        # each patch token predicts all patch_size² characters in its patch
-        self.state_head = nn.Linear(d_model, vocab_size * patch_size ** 2, bias=bias)
+        if predict_latent:
+            # Latent prediction head: mean pool over spatial tokens → target latent
+            self.latent_head = nn.Linear(d_model, target_dim, bias=bias)
+            self.ln_latent = LayerNorm(target_dim, bias)
+        else:
+            # Observable prediction head: each patch token predicts patch_size² characters
+            self.state_head = nn.Linear(d_model, vocab_size * patch_size ** 2, bias=bias)
 
     def _cond(self, action: torch.Tensor, option_code: Optional[torch.Tensor]) -> torch.Tensor:
         c = self.action_proj(action)
@@ -456,8 +514,12 @@ class DynamicsModel(SerialisableModule):
             horizon:        number of frames to predict
             teacher_frames: (B, horizon, H, W, 2) — teacher forcing, training only
         Returns:
-            (B, H*W, vocab_size)            if predict_sequence=False
-            (B, horizon, H*W, vocab_size)   if predict_sequence=True
+            STT mode (predict_latent=False):
+              (B, H*W, vocab_size)            if predict_sequence=False
+              (B, horizon, H*W, vocab_size)   if predict_sequence=True
+            JEPA mode (predict_latent=True):
+              (B, target_dim)                 if predict_sequence=False
+              (B, horizon, target_dim)        if predict_sequence=True
         """
         B, c = history.shape[:2]
         history = self.tokeniser(history)  # (B, c, H, W) long
@@ -469,23 +531,27 @@ class DynamicsModel(SerialisableModule):
             if teacher_frames is not None:
                 inp = torch.cat([history, teacher_frames[:, :-1]], dim=1)  # (B, c+n-1, H, W)
                 emb = self.embed(inp) + cond
-                hid = self.ln_trunk(self.trunk(emb))
-                logits = self.state_head(hid[:, c - 1 : c + horizon - 1])  # (B, n, S, P²V)
-                return self._unpatch_logits(logits)                          # (B, n, H*W, V)
+                hid = self.ln_trunk(self.trunk(emb))           # (B, c+n-1, S, D)
+                hid_seq = hid[:, c - 1 : c + horizon - 1]     # (B, n, S, D)
+                if self.predict_latent:
+                    return self.ln_latent(self.latent_head(hid_seq.mean(dim=2)))  # (B, n, target_dim)
+                return self._unpatch_logits(self.state_head(hid_seq))              # (B, n, H*W, V)
             else:
                 frames, current = [], history
                 for _ in range(horizon):
                     emb = self.embed(current) + cond
                     hid = self.ln_trunk(self.trunk(emb))
-                    logits = self._unpatch_logits(self.state_head(hid[:, -1]))  # (B, H*W, V)
-                    frames.append(logits)
-                    next_f = logits.argmax(dim=-1).reshape(B, 1, self.obs_h, self.obs_w)
-                    current = torch.cat([current[:, 1:], next_f], dim=1)
-                return torch.stack(frames, dim=1)  # (B, n, H*W, V)
+                    if self.predict_latent:
+                        frames.append(self.ln_latent(self.latent_head(hid[:, -1].mean(dim=1))))  # (B, target_dim)
+                    else:
+                        logits = self._unpatch_logits(self.state_head(hid[:, -1]))  # (B, H*W, V)
+                        frames.append(logits)
+                        next_f = logits.argmax(dim=-1).reshape(B, 1, self.obs_h, self.obs_w)
+                        current = torch.cat([current[:, 1:], next_f], dim=1)
+                return torch.stack(frames, dim=1)  # (B, n, H*W, V) or (B, n, target_dim)
 
         emb = self.embed(history) + cond
         hid = self.ln_trunk(self.trunk(emb))
-        return self._unpatch_logits(self.state_head(hid[:, -1]))  # (B, H*W, V)
-
-    def num_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters())
+        if self.predict_latent:
+            return self.ln_latent(self.latent_head(hid[:, -1].mean(dim=1)))  # (B, target_dim)
+        return self._unpatch_logits(self.state_head(hid[:, -1]))              # (B, H*W, V)

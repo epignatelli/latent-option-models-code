@@ -9,7 +9,7 @@ needs_cuda = pytest.mark.skipif(
 )
 
 from lom.config import LAMCfg, LOMCfg, LOMModelCfg, ModelCfg, DataCfg, EnvCfg, TrainCfg
-from lom.training import LAMTrainer, LOMTrainer, get_lr, reconstruction_loss
+from lom.training import JEPALAMTrainer, LAMTrainer, LOMTrainer, get_lr, jepa_loss, reconstruction_loss
 
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 
@@ -185,3 +185,46 @@ def test_restore_checkpoint_missing_returns_zero(tmp_path):
     trainer = make_trainer_for_checkpoint(tmp_path)
     step = trainer.restore_checkpoint()
     assert step == 0
+
+
+# --------------------------------------------------------------------------- #
+# --- jepa_loss ------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+def test_jepa_loss_perfect():
+    x = torch.randn(BATCH, LATENT_DIM)
+    assert jepa_loss(x, x).item() < 1e-5
+
+
+def test_jepa_loss_orthogonal():
+    pred   = torch.zeros(2, 2); pred[0, 0]   = 1.0; pred[1, 1]   = 1.0
+    target = torch.zeros(2, 2); target[0, 1] = 1.0; target[1, 0] = 1.0
+    assert abs(jepa_loss(pred, target).item() - 1.0) < 1e-5
+
+
+# --------------------------------------------------------------------------- #
+# --- JEPALAMTrainer -------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+def jepa_lam_trainer():
+    cfg = LAMCfg(env=make_env_cfg(), model=make_model_cfg(), data=make_data_cfg())
+    cfg.model.two_encoder = True
+    trainer = object.__new__(JEPALAMTrainer)
+    trainer.cfg = cfg
+    trainer.models = trainer.build_models().eval()
+    return trainer
+
+
+@torch.no_grad()
+def test_jepa_lam_step_keys():
+    trainer = jepa_lam_trainer()
+    out = trainer.step(lam_batch())
+    assert {"jepa_loss", "vq_loss", "commit_loss", "entropy", "total_loss"} == set(out.keys())
+
+
+@needs_cuda
+def test_jepa_lam_step_backward():
+    trainer = jepa_lam_trainer()
+    trainer.models = trainer.models.cuda()
+    out = trainer.step([t.cuda() for t in lam_batch()])
+    out["total_loss"].backward()

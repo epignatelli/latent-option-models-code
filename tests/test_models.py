@@ -1,7 +1,7 @@
 import pytest
 import torch
 from lom.models import DynamicsModel, LatentActionModel
-from lom.models import BidirectionalEncoder, IndependentEncoder
+from lom.models import STTEncoder, JEPAEncoder, EMAEncoder
 
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 
@@ -103,51 +103,54 @@ def test_lam_backward():
 # --------------------------------------------------------------------------- #
 
 def make_encoder(cls, horizon=1, condition_dim=None):
-    return cls(
+    kwargs = dict(
         vocab_size=VOCAB, obs_h=OBS_H, obs_w=OBS_W,
         d_model=D_MODEL, n_layers=N_LAYERS, n_heads=N_HEADS,
         context_length=CONTEXT, horizon=horizon, condition_dim=condition_dim,
     )
+    if cls is JEPAEncoder:
+        kwargs["latent_dim"] = LATENT_DIM
+    return cls(**kwargs)
 
 
 @torch.no_grad()
 def test_bidirectional_encoder_shape():
-    enc = make_encoder(BidirectionalEncoder)
+    enc = make_encoder(STTEncoder)
     out = enc(history(), single_frame())
     assert out.shape == (BATCH, D_MODEL)
 
 
 @torch.no_grad()
 def test_bidirectional_encoder_sequence():
-    enc = make_encoder(BidirectionalEncoder, horizon=HORIZON)
+    enc = make_encoder(STTEncoder, horizon=HORIZON)
     out = enc(history(), frame_sequence(HORIZON))
     assert out.shape == (BATCH, D_MODEL)
 
 
 @torch.no_grad()
 def test_bidirectional_encoder_with_condition():
-    enc = make_encoder(BidirectionalEncoder, condition_dim=LATENT_DIM)
+    enc = make_encoder(STTEncoder, condition_dim=LATENT_DIM)
     out = enc(history(), single_frame(), condition=torch.randn(BATCH, LATENT_DIM))
     assert out.shape == (BATCH, D_MODEL)
 
 
 @torch.no_grad()
 def test_independent_encoder_shape():
-    enc = make_encoder(IndependentEncoder)
+    enc = make_encoder(JEPAEncoder)
     out = enc(history(), single_frame())
     assert out.shape == (BATCH, 2 * D_MODEL)
 
 
 @torch.no_grad()
 def test_independent_encoder_sequence():
-    enc = make_encoder(IndependentEncoder, horizon=HORIZON)
+    enc = make_encoder(JEPAEncoder, horizon=HORIZON)
     out = enc(history(), frame_sequence(HORIZON))
     assert out.shape == (BATCH, 2 * D_MODEL)
 
 
 @torch.no_grad()
 def test_independent_encoder_with_condition():
-    enc = make_encoder(IndependentEncoder, condition_dim=LATENT_DIM)
+    enc = make_encoder(JEPAEncoder, condition_dim=LATENT_DIM)
     out = enc(history(), single_frame(), condition=torch.randn(BATCH, LATENT_DIM))
     assert out.shape == (BATCH, 2 * D_MODEL)
 
@@ -325,3 +328,28 @@ def test_dynamics_patch_backward():
     target = torch.randint(0, VOCAB, (BATCH, S), device="cuda")
     loss = torch.nn.functional.cross_entropy(logits.reshape(-1, VOCAB), target.reshape(-1))
     loss.backward()
+
+
+# --------------------------------------------------------------------------- #
+# --- EMAEncoder ------------------------------------------------------------ #
+# --------------------------------------------------------------------------- #
+
+@torch.no_grad()
+def test_ema_encoder_encode_shape():
+    enc = make_encoder(JEPAEncoder)
+    ema = EMAEncoder(enc)
+    out = ema.encode(single_frame())
+    assert out.shape == (BATCH, LATENT_DIM)
+
+
+@torch.no_grad()
+def test_ema_encoder_update_changes_weights():
+    enc = make_encoder(JEPAEncoder)
+    ema = EMAEncoder(enc, decay=0.0)  # decay=0 → EMA params fully replaced by online
+    with torch.no_grad():
+        for p in enc.parameters():
+            p.add_(torch.ones_like(p))
+    before = next(ema.encoder.parameters()).clone()
+    ema.update(enc)
+    after = next(ema.encoder.parameters())
+    assert not torch.allclose(before, after)
