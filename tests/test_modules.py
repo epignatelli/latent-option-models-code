@@ -1,6 +1,7 @@
 import pytest
 import torch
 from lom.modules import PatchEmbedding, VectorQuantizer, SpatioTemporalTransformer
+from torch.nn.attention.flex_attention import create_block_mask
 
 from conftest import BATCH, CONTEXT, D_MODEL, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 
@@ -92,11 +93,19 @@ def test_stt_exceeds_max_len(stt):
         stt(x)
 
 
-def test_stt_temporal_mask(stt):
-    x = torch.randn(BATCH, T, S, D_MODEL)
-    mask = torch.zeros(1, 1, T, T)
-    mask[0, 0, 0, 1:] = float("-inf")
-    out = stt(x, temporal_mask=mask)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="BlockMask requires CUDA")
+def test_stt_temporal_mask():
+    model = SpatioTemporalTransformer(
+        d_model=D_MODEL, n_layers=N_LAYERS, n_heads=N_HEADS,
+        n_spatial_positions=S, max_temporal_len=MAX_T,
+    ).cuda()
+    x = torch.randn(BATCH, T, S, D_MODEL, device="cuda")
+
+    def opt_mask(_b, _h, q_idx, kv_idx):
+        return ~((q_idx == 0) & (kv_idx > 0))
+
+    block_mask = create_block_mask(opt_mask, B=None, H=None, Q_LEN=T, KV_LEN=T, device="cuda")
+    out = model(x, temporal_mask=block_mask)
     assert out.shape == (BATCH, T, S, D_MODEL)
 
 

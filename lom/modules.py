@@ -9,13 +9,45 @@ from __future__ import annotations
 
 import inspect
 import logging
-import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+
+# --------------------------------------------------------------------------- #
+# --- flex_attention helpers ------------------------------------------------ #
+# --------------------------------------------------------------------------- #
+
+_causal_block_mask_cache: dict[tuple, BlockMask] = {}
+_opt_block_mask_cache: dict[tuple, BlockMask] = {}
+
+
+def _causal_mask_mod(_b: torch.Tensor, _h: torch.Tensor, q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+    return q >= kv
+
+
+def _get_causal_block_mask(T: int, device: torch.device) -> BlockMask:
+    key = (T, str(device))
+    if key not in _causal_block_mask_cache:
+        _causal_block_mask_cache[key] = create_block_mask(
+            _causal_mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device
+        )
+    return _causal_block_mask_cache[key]
+
+
+def _get_opt_block_mask(T: int, opt_pos: int, device: torch.device) -> BlockMask:
+    key = (T, opt_pos, str(device))
+    if key not in _opt_block_mask_cache:
+        def mask_mod(b, h, q_idx, kv_idx):
+            return ~((q_idx == opt_pos) & (kv_idx > opt_pos))
+        _opt_block_mask_cache[key] = create_block_mask(
+            mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device
+        )
+    return _opt_block_mask_cache[key]
+
 
 # --------------------------------------------------------------------------- #
 # --- Base ------------------------------------------------------------------ #
@@ -78,10 +110,10 @@ class MLP(nn.Module):
 
 
 class SelfAttention(nn.Module):
-    """Multi-head self-attention with optional causal masking.
+    """Multi-head self-attention using flex_attention on CUDA, SDPA fallback on CPU.
 
-    Supports Flash Attention (PyTorch ≥ 2.0) with graceful fallback.
-    Custom additive masks (e.g. option-token mask) are passed via attn_mask.
+    block_mask: a BlockMask produced by create_block_mask() for structural sparsity
+    (causal, OPT-token masking, etc.).  Pass None for full bidirectional attention.
     """
 
     def __init__(
@@ -96,15 +128,12 @@ class SelfAttention(nn.Module):
         assert d_model % n_heads == 0
         self.c_attn = nn.Linear(d_model, 3 * d_model, bias=bias)
         self.c_proj = nn.Linear(d_model, d_model, bias=bias)
-        self.attn_drop = nn.Dropout(dropout)
         self.resid_drop = nn.Dropout(dropout)
         self.n_heads = n_heads
         self.d_model = d_model
-        self.dropout = dropout
         self.causal = causal
-        self.flash = hasattr(F, "scaled_dot_product_attention")
 
-    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, block_mask: BlockMask | None = None) -> torch.Tensor:
         B, T, C = x.shape
         head_dim = C // self.n_heads
         q, k, v = self.c_attn(x).split(self.d_model, dim=2)
@@ -112,30 +141,13 @@ class SelfAttention(nn.Module):
         k = k.view(B, T, self.n_heads, head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_heads, head_dim).transpose(1, 2)
 
-        # scaled_dot_product_attention cannot combine is_causal=True with an explicit mask;
-        # fold the causal constraint into the mask so both apply correctly.
-        if self.causal and attn_mask is not None:
-            causal_mask = torch.full((T, T), float("-inf"), device=x.device, dtype=x.dtype).triu(diagonal=1)
-            attn_mask = attn_mask + causal_mask
-
-        if self.flash:
-            y = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=attn_mask,
-                dropout_p=self.dropout if self.training else 0.0,
-                is_causal=self.causal and attn_mask is None,
-            )
+        if x.is_cuda:
+            if self.causal and block_mask is None:
+                block_mask = _get_causal_block_mask(T, x.device)
+            y = flex_attention(q, k, v, block_mask=block_mask)
         else:
-            att = (q @ k.transpose(-2, -1)) / math.sqrt(head_dim)
-            if self.causal and attn_mask is None:
-                mask_val = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
-                att = att.masked_fill(mask_val, float("-inf"))
-            if attn_mask is not None:
-                att = att + attn_mask
-            att = self.attn_drop(F.softmax(att, dim=-1))
-            y = att @ v
+            # CPU fallback for tests — flex_attention requires CUDA
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.c_proj(y))
@@ -171,11 +183,11 @@ class SpatioTemporalBlock(nn.Module):
         self.temporal_attn = SelfAttention(d_model, n_heads, dropout, bias, causal=causal_temporal)
         self.mlp = MLP(d_model, dropout, bias)
 
-    def forward(self, x: torch.Tensor, temporal_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, temporal_mask: BlockMask | None = None) -> torch.Tensor:
         """
         Args:
             x: (B, T, S, D)
-            temporal_mask: additive mask of shape (T, T) or (1, 1, T, T)
+            temporal_mask: BlockMask for temporal attention, or None for full attention
         Returns:
             (B, T, S, D)
         """
@@ -188,7 +200,7 @@ class SpatioTemporalBlock(nn.Module):
 
         # --- Temporal attention: (B*S, T, D) ---
         xt = x.permute(0, 2, 1, 3).reshape(B * S, T, D)
-        xt = xt + self.temporal_attn(self.ln_t(xt), attn_mask=temporal_mask)
+        xt = xt + self.temporal_attn(self.ln_t(xt), block_mask=temporal_mask)
         x = xt.reshape(B, S, T, D).permute(0, 2, 1, 3)
 
         # --- MLP ---
@@ -236,11 +248,11 @@ class SpatioTemporalTransformer(nn.Module):
         self.n_spatial_positions = n_spatial_positions
         self.max_temporal_len = max_temporal_len
 
-    def forward(self, x: torch.Tensor, temporal_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, temporal_mask: BlockMask | None = None) -> torch.Tensor:
         """
         Args:
             x: (B, T, S, D) — already char-embedded, without positional info
-            temporal_mask: optional additive mask (T, T)
+            temporal_mask: optional BlockMask for temporal attention (None = full attention)
         Returns:
             (B, T, S, D)
         """
@@ -427,13 +439,13 @@ class BidirectionalEncoder(nn.Module):
     def out_dim(self) -> int:
         return self.d_model
 
-    def _build_mask(self, c: int, k: int, device: torch.device) -> torch.Tensor:
+    def _build_block_mask(self, c: int, k: int, device: torch.device) -> BlockMask | None:
+        if device.type != "cuda":
+            return None  # CPU path (tests): skip OPT mask, flex_attention unavailable
         extra = 1 if self.has_condition else 0
         T = c + extra + 1 + k
         opt_pos = c + extra
-        mask = torch.zeros(T, T, device=device)
-        mask[opt_pos, opt_pos + 1:] = float("-inf")
-        return mask.view(1, 1, T, T)
+        return _get_opt_block_mask(T, opt_pos, device)
 
     def forward(
         self,
@@ -471,7 +483,7 @@ class BidirectionalEncoder(nn.Module):
         parts += [opt_emb, fut_emb]
 
         seq    = torch.cat(parts, dim=1)
-        hidden = self.transformer(seq, temporal_mask=self._build_mask(c, k, seq.device))
+        hidden = self.transformer(seq, temporal_mask=self._build_block_mask(c, k, seq.device))
 
         opt_pos = c + (1 if self.has_condition else 0)
         return hidden[:, opt_pos, :, :].mean(dim=1)  # (B, D)

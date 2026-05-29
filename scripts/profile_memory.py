@@ -210,9 +210,21 @@ def measure_one_batch_size(batch_size: int, model_type: str,
     else:
         e, models = _build_lom_models(device, context_len, horizon, two_encoder)
 
+    total_params = sum(m.num_parameters() for m in models.values())
+    for name, m in models.items():
+        log.info("  params  %-14s  %9.3f M", name, m.num_parameters() / 1e6)
+    log.info("  params  %-14s  %9.3f M", "total", total_params / 1e6)
+
+    # Warm up block mask caches before compiling so create_block_mask is never called
+    # inside the compiled graph (it's a Triton kernel factory, not graph-traceable).
+    with torch.no_grad(), ctx:
+        _run_step(model_type, models,
+                  _make_dummy_batch(1, model_type, context_len, horizon, e),
+                  device, ctx, e)
+
     if compile_model:
         log.info("  Compiling models ...")
-        models = {k: torch.compile(m) for k, m in models.items()}
+        models = {k: torch.compile(m, dynamic=False) for k, m in models.items()}
 
     batch = _make_dummy_batch(batch_size, model_type, context_len, horizon, e)
     optimizer = optim.AdamW([p for m in models.values() for p in m.parameters()], lr=3e-4)
