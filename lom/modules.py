@@ -503,20 +503,18 @@ class SpatioTemporalTransformer(nn.Module):
 class VectorQuantizer(nn.Module):
     """EMA vector quantiser with cosine-distance assignment.
 
-    Extends the EMA VQ-VAE (van den Oord et al., 2017) in three ways not
-    present in the original paper:
+    Extends the EMA VQ-VAE (van den Oord et al., 2017) with two additions
+    not present in the original paper:
 
-    1. **Cosine-distance assignment** — encoder outputs and codebook entries
-       are L2-normalised before computing distances. The original uses L2
-       distance without normalisation.
-    2. **Dead-code reset** — codes inactive for ``vq_reset_thresh`` consecutive
+    1. **Dead-code reset** — codes inactive for ``vq_reset_thresh`` consecutive
        steps are replaced with a randomly chosen live code.
-    3. **Entropy regularisation** — a negative entropy term encourages uniform
+    2. **Entropy regularisation** — a negative entropy term encourages uniform
        codebook usage.
 
-    The EMA codebook update rule and straight-through estimator follow the
-    original paper exactly. Only the commitment loss flows through the
-    optimiser; the codebook is updated in-place.
+    Assignment uses L2 distance, commitment loss uses MSE, and the
+    straight-through estimator all follow the original paper. Only the
+    commitment loss flows through the optimiser; the codebook is updated
+    in-place via EMA.
 
     .. note::
         Dropout is applied to the distance matrix before argmin, acting as
@@ -558,9 +556,7 @@ class VectorQuantizer(nn.Module):
         self.drop = nn.Dropout(dropout)
 
         bound = (3 / latent_dim) ** 0.5
-        codebook_init = F.normalize(
-            torch.empty(num_options, latent_dim).uniform_(-bound, bound), dim=-1
-        )
+        codebook_init = torch.empty(num_options, latent_dim).uniform_(-bound, bound)
         # Codebook is a buffer — updated by EMA, not the optimiser.
         self.register_buffer("codebook", codebook_init)
         self.register_buffer("ema_cluster_size", torch.ones(num_options))
@@ -582,25 +578,28 @@ class VectorQuantizer(nn.Module):
               ``vq_loss``, ``commit_loss``, ``entropy``.
             - ``indices`` ``(N,)``: codebook indices of the assigned codes.
         """
-        z_norm = F.normalize(z, dim=-1)
-        cb_norm = F.normalize(self.codebook, dim=-1)
-        dist = -self.drop(torch.matmul(z_norm, cb_norm.T))  # (N, K)
+        # L2 distance: ||z - e||^2 = ||z||^2 - 2*z·e^T + ||e||^2
+        dist = (
+            (z ** 2).sum(1, keepdim=True)
+            - 2 * self.drop(z @ self.codebook.T)
+            + (self.codebook ** 2).sum(1)
+        )  # (N, K)
 
         indices = dist.argmin(dim=-1)
-        z_hard = cb_norm[indices]  # already normalised above; no second normalize needed
+        z_hard = self.codebook[indices]
 
         if self.training:
             with torch.no_grad():
-                one_hot = torch.zeros(z_norm.shape[0], self.num_options, device=z.device)
+                one_hot = torch.zeros(z.shape[0], self.num_options, device=z.device)
                 one_hot.scatter_(1, indices.unsqueeze(1), 1)
 
                 # EMA update: use float32 to avoid bf16 accumulation under autocast
-                z_norm_f32 = z_norm.float()
+                z_f32 = z.float()
                 cluster_size = one_hot.sum(0)
                 self.ema_cluster_size.mul_(self.ema_decay).add_(
                     cluster_size, alpha=1 - self.ema_decay
                 )
-                embed_sum = one_hot.T @ z_norm_f32  # (K, D)
+                embed_sum = one_hot.T @ z_f32  # (K, D)
                 self.ema_embed_sum.mul_(self.ema_decay).add_(embed_sum, alpha=1 - self.ema_decay)
 
                 # Laplace-smoothed codebook update
@@ -626,7 +625,7 @@ class VectorQuantizer(nn.Module):
 
         z_q = z + (z_hard - z).detach()  # straight-through estimator
 
-        commit_loss = (1 - F.cosine_similarity(z_norm, z_hard.detach(), dim=-1)).mean()
+        commit_loss = F.mse_loss(z, z_hard.detach())
         entropy = self.entropy(dist)
         vq_loss = self.vq_beta * commit_loss - self.entropy_weight * entropy
 
@@ -639,8 +638,7 @@ class VectorQuantizer(nn.Module):
         regularisation signal to discourage codebook collapse.
 
         Args:
-            dist: distance matrix of shape ``(N, K)`` (negative cosine
-                similarities before argmin).
+            dist: L2 distance matrix of shape ``(N, K)``.
             eps: small constant for numerical stability. Default: ``1e-9``.
 
         Returns:
@@ -658,4 +656,4 @@ class VectorQuantizer(nn.Module):
         Returns:
             Normalised code vectors of shape ``(*indices.shape, latent_dim)``.
         """
-        return F.normalize(self.codebook[indices], dim=-1)
+        return self.codebook[indices]
