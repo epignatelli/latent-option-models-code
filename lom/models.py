@@ -52,6 +52,7 @@ from .config import ReconstructionLOMCfg, LatentLOMCfg
 # --- Models ---------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 
+
 class ReconstructionLOM(SerialisableModule):
     """LOM with STT (bidirectional) encoders and pixel-level reconstruction dynamics.
 
@@ -91,46 +92,60 @@ class ReconstructionLOM(SerialisableModule):
         self.horizon = horizon
         self.predict_sequence = predict_sequence
         base = dict(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         vq = dict(
-            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+            vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
+            vq_ema_decay=vq_ema_decay,
         )
-        self.option_lam = LatentActionModel(**base, codebook_size=num_options, horizon=horizon, **vq)
-        self.action_lam = LatentActionModel(**base, codebook_size=n_actions, horizon=1,
-                                            condition_dim=latent_dim, **vq)
+        self.option_lam = LatentActionModel(
+            **base, codebook_size=num_options, horizon=horizon, **vq
+        )
+        self.action_lam = LatentActionModel(
+            **base, codebook_size=n_actions, horizon=1, condition_dim=latent_dim, **vq
+        )
         self.lam_dynamics = DynamicsModel(**base, predict_sequence=False)
-        self.lom_dynamics = DynamicsModel(**base, option_dim=latent_dim,
-                                          predict_sequence=predict_sequence, horizon=horizon)
-
-    def num_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters())
+        self.lom_dynamics = DynamicsModel(
+            **base, option_dim=latent_dim, predict_sequence=predict_sequence, horizon=horizon
+        )
 
     def forward(
         self,
-        history:    torch.Tensor,  # (B, c, H, W, 2)
-        next_frame: torch.Tensor,  # (B, 1, H, W, 2)
-        future:     torch.Tensor,  # (B, 1, H, W, 2)  target for lom_dynamics
-        sequence:   torch.Tensor,  # (B, k, H, W, 2)  full horizon for option_lam
+        history: torch.Tensor,  # (B, c, H, W, 2)
+        future:  torch.Tensor,  # (B, k, H, W, 2)  k=horizon; future[:,0:1] is next frame
     ) -> dict:
-        z_opt, vq_opt, opt_idx = self.option_lam(history, sequence)
+        next_frame = future[:, 0:1]
+        z_opt, vq_opt, opt_idx = self.option_lam(history, future)
         z_act, vq_act, act_idx = self.action_lam(history, next_frame, condition=z_opt.detach())
         lam_logits = self.lam_dynamics(history, z_act)
         if self.predict_sequence:
-            lom_logits = self.lom_dynamics(history, z_act, option_code=z_opt,
-                                           horizon=self.horizon, teacher_frames=sequence)
+            lom_logits = self.lom_dynamics(
+                history, z_act, option_code=z_opt, horizon=self.horizon, teacher_frames=future
+            )
         else:
             lom_logits = self.lom_dynamics(history, z_act, option_code=z_opt, horizon=1)
         return {
             "lam_logits": lam_logits,
             "lom_logits": lom_logits,
-            "z_opt": z_opt, "z_act": z_act,
-            "opt_idx": opt_idx, "act_idx": act_idx,
-            "vq_opt": vq_opt, "vq_act": vq_act,
+            "z_opt": z_opt,
+            "z_act": z_act,
+            "opt_idx": opt_idx,
+            "act_idx": act_idx,
+            "vq_opt": vq_opt,
+            "vq_act": vq_act,
         }
 
 
@@ -174,28 +189,44 @@ class LatentLOM(SerialisableModule):
     ):
         super().__init__()
         base = dict(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         vq = dict(
-            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+            vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
+            vq_ema_decay=vq_ema_decay,
         )
-        self.option_lam = LatentActionModel(**base, codebook_size=num_options, horizon=horizon,
-                                            two_encoder=True, **vq)
-        self.action_lam = LatentActionModel(**base, codebook_size=n_actions, horizon=1,
-                                            option_code_dim=latent_dim, two_encoder=True, **vq)
-        self.lam_dynamics = DynamicsModel(**base, predict_sequence=False,
-                                          predict_latent=True, target_dim=latent_dim)
-        self.lom_dynamics = DynamicsModel(**base, predict_sequence=False,
-                                          predict_latent=True, target_dim=latent_dim)
+        self.option_lam = LatentActionModel(
+            **base, codebook_size=num_options, horizon=horizon, two_encoder=True, **vq
+        )
+        self.action_lam = LatentActionModel(
+            **base,
+            codebook_size=n_actions,
+            horizon=1,
+            option_code_dim=latent_dim,
+            two_encoder=True,
+            **vq,
+        )
+        self.lam_dynamics = DynamicsModel(
+            **base, predict_sequence=False, predict_latent=True, target_dim=latent_dim
+        )
+        self.lom_dynamics = DynamicsModel(
+            **base, predict_sequence=False, predict_latent=True, target_dim=latent_dim
+        )
         self.ema_option_enc = EMAEncoder(self.option_lam.encoder, decay=ema_decay)  # type: ignore[arg-type]
         self.ema_action_enc = EMAEncoder(self.action_lam.encoder, decay=ema_decay)  # type: ignore[arg-type]
-
-    def num_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters())
 
     def update_ema(self) -> None:
         self.ema_option_enc.update(self.option_lam.encoder)  # type: ignore[arg-type]
@@ -203,26 +234,29 @@ class LatentLOM(SerialisableModule):
 
     def forward(
         self,
-        history:    torch.Tensor,  # (B, c, H, W, 2)
-        next_frame: torch.Tensor,  # (B, 1, H, W, 2)
-        sequence:   torch.Tensor,  # (B, k, H, W, 2)  full horizon for option_lam
+        history: torch.Tensor,  # (B, c, H, W, 2)
+        future:  torch.Tensor,  # (B, k, H, W, 2)  k=horizon; future[:,0:1] is next frame
     ) -> dict:
-        z_opt, vq_opt, opt_idx = self.option_lam(history, sequence)
+        next_frame = future[:, 0:1]
+        z_opt, vq_opt, opt_idx = self.option_lam(history, future)
         z_act, vq_act, act_idx = self.action_lam(history, next_frame, option_code=z_opt.detach())
         with torch.no_grad():
             z_act_target = self.ema_action_enc.encode(next_frame)
-            z_opt_target = self.ema_option_enc.encode(sequence)
+            z_opt_target = self.ema_option_enc.encode(future)
         z_act_hat = self.lam_dynamics(history, z_act)
         z_opt_hat = self.lom_dynamics(history, z_opt)
         return {
-            "z_act_hat": z_act_hat, "z_act_target": z_act_target,
-            "z_opt_hat": z_opt_hat, "z_opt_target": z_opt_target,
-            "z_opt": z_opt, "z_act": z_act,
-            "opt_idx": opt_idx, "act_idx": act_idx,
-            "vq_opt": vq_opt, "vq_act": vq_act,
+            "z_act_hat": z_act_hat,
+            "z_act_target": z_act_target,
+            "z_opt_hat": z_opt_hat,
+            "z_opt_target": z_opt_target,
+            "z_opt": z_opt,
+            "z_act": z_act,
+            "opt_idx": opt_idx,
+            "act_idx": act_idx,
+            "vq_opt": vq_opt,
+            "vq_act": vq_act,
         }
-
-
 
 
 # --------------------------------------------------------------------------- #
@@ -313,7 +347,7 @@ class STTEncoder(nn.Module):
         k = future.shape[1]
 
         hist_emb = self.embed(history)  # (B, c, S, D)
-        fut_emb = self.embed(future)    # (B, k, S, D)
+        fut_emb = self.embed(future)  # (B, k, S, D)
         opt_emb = self.opt_token.expand(B, 1, self.S, self.d_model)
 
         parts = [hist_emb]
@@ -372,14 +406,24 @@ class JEPAEncoder(nn.Module):
         S = self.S = self.embed.n_tokens
 
         self.past_encoder = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=context_length,
-            dropout=dropout, bias=bias, causal_temporal=True,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=context_length,
+            dropout=dropout,
+            bias=bias,
+            causal_temporal=True,
         )
         self.future_encoder = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=horizon,
-            dropout=dropout, bias=bias, causal_temporal=True,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=horizon,
+            dropout=dropout,
+            bias=bias,
+            causal_temporal=True,
         )
         self.proj_target = nn.Linear(d_model, latent_dim, bias=bias)
         self.ln_target = LayerNorm(latent_dim, bias)
@@ -397,10 +441,10 @@ class JEPAEncoder(nn.Module):
         tokens = self.tokeniser(frames)
         if tokens.ndim == 3:
             tokens = tokens.unsqueeze(1)
-        emb = self.embed(tokens)                                    # (B, k, S, D)
-        out = self.future_encoder(emb)                              # (B, k, S, D)
-        pooled = out[:, -1, :, :].mean(dim=1)                      # (B, D) last frame
-        return self.ln_target(self.proj_target(pooled))             # (B, latent_dim)
+        emb = self.embed(tokens)  # (B, k, S, D)
+        out = self.future_encoder(emb)  # (B, k, S, D)
+        pooled = out[:, -1, :, :].mean(dim=1)  # (B, D) last frame
+        return self.ln_target(self.proj_target(pooled))  # (B, latent_dim)
 
     def forward(
         self,
@@ -416,17 +460,17 @@ class JEPAEncoder(nn.Module):
             (B, 2 * d_model)
         """
         history = self.tokeniser(history)
-        future  = self.tokeniser(future)
+        future = self.tokeniser(future)
         if future.ndim == 3:
             future = future.unsqueeze(1)
 
-        hist_emb = self.embed(history)                              # (B, c, S, D)
-        ctx_pooled = self.past_encoder(hist_emb)[:, -1, :, :].mean(dim=1)   # (B, D)
+        hist_emb = self.embed(history)  # (B, c, S, D)
+        ctx_pooled = self.past_encoder(hist_emb)[:, -1, :, :].mean(dim=1)  # (B, D)
 
-        fut_emb  = self.embed(future)                               # (B, k, S, D)
+        fut_emb = self.embed(future)  # (B, k, S, D)
         tgt_pooled = self.future_encoder(fut_emb)[:, -1, :, :].mean(dim=1)  # (B, D)
 
-        return torch.cat([ctx_pooled, tgt_pooled], dim=-1)          # (B, 2D)
+        return torch.cat([ctx_pooled, tgt_pooled], dim=-1)  # (B, 2D)
 
 
 class EMAEncoder(nn.Module):
@@ -514,10 +558,17 @@ class LatentActionModel(SerialisableModule):
 
         encoder_cls = JEPAEncoder if two_encoder else STTEncoder
         encoder_kwargs: dict = dict(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, horizon=horizon,
-            patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            horizon=horizon,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         if two_encoder:
             encoder_kwargs["latent_dim"] = latent_dim
@@ -560,7 +611,6 @@ class LatentActionModel(SerialisableModule):
         return self.vq(z)
 
 
-
 # --------------------------------------------------------------------------- #
 # --- Dynamics Model -------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
@@ -599,8 +649,9 @@ class DynamicsModel(SerialisableModule):
         bias: bool = False,
     ):
         super().__init__()
-        assert not (predict_latent and target_dim is None), \
-            "target_dim is required when predict_latent=True"
+        assert not (
+            predict_latent and target_dim is None
+        ), "target_dim is required when predict_latent=True"
         self.vocab_size = vocab_size
         self.obs_h = obs_h
         self.obs_w = obs_w
@@ -645,7 +696,7 @@ class DynamicsModel(SerialisableModule):
             self.ln_latent = LayerNorm(target_dim, bias)
         else:
             # Observable prediction head: each patch token predicts patch_size² characters
-            self.state_head = nn.Linear(d_model, vocab_size * patch_size ** 2, bias=bias)
+            self.state_head = nn.Linear(d_model, vocab_size * patch_size**2, bias=bias)
 
     def _cond(self, action: torch.Tensor, option_code: Optional[torch.Tensor]) -> torch.Tensor:
         c = self.action_proj(action)
@@ -668,7 +719,7 @@ class DynamicsModel(SerialisableModule):
         prefix = logits.shape[:-2]
         # (..., n_tokens, P²*V) → (N, H/P, W/P, P, P, V) → (N, H, W, V) → (..., H*W, V)
         flat = logits.reshape(-1, H // P, W // P, P, P, V)
-        flat = flat.permute(0, 1, 3, 2, 4, 5).contiguous()   # (N, H/P, P, W/P, P, V)
+        flat = flat.permute(0, 1, 3, 2, 4, 5).contiguous()  # (N, H/P, P, W/P, P, V)
         flat = flat.reshape(-1, H * W, V)
         return flat.reshape(*prefix, H * W, V)
 
@@ -705,18 +756,22 @@ class DynamicsModel(SerialisableModule):
             if teacher_frames is not None:
                 inp = torch.cat([history, teacher_frames[:, :-1]], dim=1)  # (B, c+n-1, H, W)
                 emb = self.embed(inp) + cond
-                hid = self.ln_trunk(self.trunk(emb))           # (B, c+n-1, S, D)
-                hid_seq = hid[:, c - 1 : c + horizon - 1]     # (B, n, S, D)
+                hid = self.ln_trunk(self.trunk(emb))  # (B, c+n-1, S, D)
+                hid_seq = hid[:, c - 1 : c + horizon - 1]  # (B, n, S, D)
                 if self.predict_latent:
-                    return self.ln_latent(self.latent_head(hid_seq.mean(dim=2)))  # (B, n, target_dim)
-                return self._unpatch_logits(self.state_head(hid_seq))              # (B, n, H*W, V)
+                    return self.ln_latent(
+                        self.latent_head(hid_seq.mean(dim=2))
+                    )  # (B, n, target_dim)
+                return self._unpatch_logits(self.state_head(hid_seq))  # (B, n, H*W, V)
             else:
                 frames, current = [], history
                 for _ in range(horizon):
                     emb = self.embed(current) + cond
                     hid = self.ln_trunk(self.trunk(emb))
                     if self.predict_latent:
-                        frames.append(self.ln_latent(self.latent_head(hid[:, -1].mean(dim=1))))  # (B, target_dim)
+                        frames.append(
+                            self.ln_latent(self.latent_head(hid[:, -1].mean(dim=1)))
+                        )  # (B, target_dim)
                     else:
                         logits = self._unpatch_logits(self.state_head(hid[:, -1]))  # (B, H*W, V)
                         frames.append(logits)
@@ -728,4 +783,4 @@ class DynamicsModel(SerialisableModule):
         hid = self.ln_trunk(self.trunk(emb))
         if self.predict_latent:
             return self.ln_latent(self.latent_head(hid[:, -1].mean(dim=1)))  # (B, target_dim)
-        return self._unpatch_logits(self.state_head(hid[:, -1]))              # (B, H*W, V)
+        return self._unpatch_logits(self.state_head(hid[:, -1]))  # (B, H*W, V)
