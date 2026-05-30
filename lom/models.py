@@ -88,10 +88,6 @@ class ReconstructionLOM(SerialisableModule):
         self.horizon = horizon
         self.predict_sequence = predict_sequence
 
-        vq_kwargs = dict(
-            bias=bias, vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
-        )
         self.tokeniser = ScreenTokeniser()
 
         # --- Option encoder (LOM): bidirectional over [history | OPT | future] ---
@@ -103,8 +99,11 @@ class ReconstructionLOM(SerialisableModule):
             n_spatial_positions=S, max_temporal_len=context_length + 1 + horizon,
             dropout=dropout, bias=bias, causal=False,
         )
-        self.opt_vq = LatentActionModel(in_dim=d_model, latent_dim=latent_dim,
-                                        num_options=num_options, **vq_kwargs)
+        self.opt_vq = LatentActionModel(
+            in_dim=d_model, latent_dim=latent_dim, num_options=num_options, bias=bias,
+            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+        )
 
         # --- Action encoder (LAM): bidirectional over [history | OPT | next_frame] ---
         # z_opt is broadcast-added to the next_frame embedding before the transformer.
@@ -113,22 +112,28 @@ class ReconstructionLOM(SerialisableModule):
         self.act_cond_proj = nn.Linear(latent_dim, d_model, bias=bias)  # z_opt → d_model
         self.act_transformer = SpatioTemporalTransformer(
             d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=context_length + 1 + 1,
+            n_spatial_positions=S, max_temporal_len=context_length + 2,
             dropout=dropout, bias=bias, causal=False,
         )
-        self.act_vq = LatentActionModel(in_dim=d_model, latent_dim=latent_dim,
-                                        num_options=n_actions, **vq_kwargs)
+        self.act_vq = LatentActionModel(
+            in_dim=d_model, latent_dim=latent_dim, num_options=n_actions, bias=bias,
+            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+        )
 
         # --- Dynamics ---
-        dyn_kwargs = dict(
+        self.lam_dynamics = ObservableTransitionModel(
             vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
             d_model=d_model, n_layers=n_layers, n_heads=n_heads,
             context_length=context_length, latent_dim=latent_dim,
             patch_size=patch_size, dropout=dropout, bias=bias,
         )
-        self.lam_dynamics = ObservableTransitionModel(**dyn_kwargs)
         self.lom_dynamics = ObservableTransitionModel(
-            **dyn_kwargs, predict_sequence=predict_sequence, horizon=horizon,
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            predict_sequence=predict_sequence, horizon=horizon,
+            patch_size=patch_size, dropout=dropout, bias=bias,
         )
 
     def encode_option(self, history: torch.Tensor, future: torch.Tensor) -> torch.Tensor:
@@ -266,10 +271,6 @@ class LatentLOM(SerialisableModule):
         self.context_length = context_length
         self.latent_dim = latent_dim
 
-        vq_kwargs = dict(
-            bias=bias, vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
-        )
         self.tokeniser = ScreenTokeniser()
 
         # --- Option encoder (LOM): separate causal transformers for history and future ---
@@ -287,8 +288,11 @@ class LatentLOM(SerialisableModule):
         )
         self.opt_proj = nn.Linear(d_model, latent_dim, bias=bias)
         self.opt_ln   = LayerNorm(latent_dim, bias)
-        self.opt_vq   = LatentActionModel(in_dim=2 * d_model, latent_dim=latent_dim,
-                                          num_options=num_options, **vq_kwargs)
+        self.opt_vq   = LatentActionModel(
+            in_dim=2 * d_model, latent_dim=latent_dim, num_options=num_options, bias=bias,
+            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+        )
 
         # --- Action encoder (LAM): separate causal transformers for history and next_frame ---
         self.act_embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
@@ -304,8 +308,11 @@ class LatentLOM(SerialisableModule):
         )
         self.act_proj = nn.Linear(d_model, latent_dim, bias=bias)
         self.act_ln   = LayerNorm(latent_dim, bias)
-        self.act_vq   = LatentActionModel(in_dim=2 * d_model + latent_dim, latent_dim=latent_dim,
-                                          num_options=n_actions, **vq_kwargs)
+        self.act_vq   = LatentActionModel(
+            in_dim=2 * d_model + latent_dim, latent_dim=latent_dim, num_options=n_actions,
+            bias=bias, vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+        )
 
         # --- EMA target networks (option path) ---
         self.ema_opt_embed              = EMAEncoder(self.opt_embed,              decay=ema_decay)
@@ -320,14 +327,18 @@ class LatentLOM(SerialisableModule):
         self.ema_act_ln                 = EMAEncoder(self.act_ln,                 decay=ema_decay)
 
         # --- Dynamics ---
-        dyn_kwargs = dict(
+        self.lam_dynamics = LatentTransitionModel(
             vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
             d_model=d_model, n_layers=n_layers, n_heads=n_heads,
             context_length=context_length, latent_dim=latent_dim,
             target_dim=latent_dim, patch_size=patch_size, dropout=dropout, bias=bias,
         )
-        self.lam_dynamics = LatentTransitionModel(**dyn_kwargs)
-        self.lom_dynamics = LatentTransitionModel(**dyn_kwargs)
+        self.lom_dynamics = LatentTransitionModel(
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            target_dim=latent_dim, patch_size=patch_size, dropout=dropout, bias=bias,
+        )
 
     def update_ema(self) -> None:
         """Update all EMA target networks from the current online parameters."""
