@@ -110,7 +110,7 @@ class SelfAttention(nn.Module):
         self.n_heads = n_heads
         self.d_model = d_model
 
-    def _attend(self, x: torch.Tensor, block_mask: BlockMask | None) -> torch.Tensor:
+    def attend(self, x: torch.Tensor, block_mask: BlockMask | None) -> torch.Tensor:
         B, T, C = x.shape
         head_dim = C // self.n_heads
         q, k, v = self.c_attn(x).split(self.d_model, dim=2)
@@ -132,14 +132,14 @@ class CausalAttention(SelfAttention):
     """Self-attention with a causal mask (decoder-only)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self._attend(x, _get_causal_block_mask(x.shape[1], x.device))
+        return self.attend(x, _get_causal_block_mask(x.shape[1], x.device))
 
 
 class BidirectionalAttention(SelfAttention):
     """Full (non-causal) self-attention."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self._attend(x, None)
+        return self.attend(x, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -190,7 +190,7 @@ class SpatioTemporalBlock(nn.Module):
 
         # --- Temporal attention: (B*S, T, D) ---
         xt = x.permute(0, 2, 1, 3).reshape(B * S, T, D)
-        xt = xt + self.temporal_attn._attend(self.ln_t(xt), temporal_mask)
+        xt = xt + self.temporal_attn.attend(self.ln_t(xt), temporal_mask)
         x = xt.reshape(B, S, T, D).permute(0, 2, 1, 3)
 
         # --- MLP ---
