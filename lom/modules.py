@@ -95,7 +95,7 @@ class MLP(nn.Module):
 
 
 class SelfAttention(nn.Module):
-    """Multi-head self-attention base using flex_attention (CUDA) / SDPA (CPU)."""
+    """Multi-head self-attention using flex_attention."""
 
     def __init__(
         self,
@@ -524,12 +524,8 @@ class STTEncoder(nn.Module):
     def out_dim(self) -> int:
         return self.d_model
 
-    def _build_block_mask(self, c: int, k: int, device: torch.device) -> BlockMask | None:
-        if device.type != "cuda":
-            return None
-        T = c + 1 + k
-        opt_pos = c
-        return _get_opt_block_mask(T, opt_pos, device)
+    def _build_block_mask(self, c: int, k: int, device: torch.device) -> BlockMask:
+        return _get_opt_block_mask(c + 1 + k, c, device)
 
     def forward(
         self,
