@@ -4,6 +4,7 @@ from .config import (
 )
 from .modules import LatentActionModel, DynamicsModel
 from .modules import PatchEmbedding, SpatioTemporalTransformer, VectorQuantizer
+from .tokeniser import CHAR_VOCAB, COLOR_VOCAB, TOKEN_VOCAB, ScreenTokeniser, tokenise
 from .dataset import NpzTrajectoryDataset, build_npz_dataloaders
 from .training import Trainer, ReconstructionLOMTrainer, LatentLOMTrainer
 
@@ -12,6 +13,7 @@ __all__ = [
     "LOMCfg",
     "LatentActionModel", "DynamicsModel",
     "PatchEmbedding", "SpatioTemporalTransformer", "VectorQuantizer",
+    "CHAR_VOCAB", "COLOR_VOCAB", "TOKEN_VOCAB", "ScreenTokeniser", "tokenise",
     "NpzTrajectoryDataset", "build_npz_dataloaders",
     "Trainer", "ReconstructionLOMTrainer", "LatentLOMTrainer",
 ]

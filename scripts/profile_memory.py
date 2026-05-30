@@ -31,7 +31,7 @@ import torch.optim as optim
 
 from lom.config import EnvCfg, ModelCfg
 from lom.modules import DynamicsModel, EMAEncoder, JEPAEncoder, LatentActionModel, STTEncoder
-from lom.modules import tokenise
+from lom.tokeniser import tokenise
 from lom.training import NullCtx, jepa_loss, reconstruction_loss
 
 LOG_FILE = "/scratch/uceeepi/lom/profile_memory.log"

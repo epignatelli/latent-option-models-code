@@ -38,7 +38,7 @@ import torch
 import torch.nn as nn
 
 from lom.dataset import NpzTrajectoryDataset, GameBuffer
-from lom.modules import tokenise, COLOR_VOCAB, CHAR_VOCAB, TOKEN_VOCAB
+from lom.tokeniser import tokenise, COLOR_VOCAB, CHAR_VOCAB, TOKEN_VOCAB
 
 # ── tiny geometry used across all tests ──────────────────────────────────────
 CTX     = 4

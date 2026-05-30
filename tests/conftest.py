@@ -1,6 +1,6 @@
 """Shared small-dimension constants for fast CPU tests."""
 
-from lom.modules import TOKEN_VOCAB
+from lom.tokeniser import TOKEN_VOCAB
 
 OBS_H = 4
 OBS_W = 4

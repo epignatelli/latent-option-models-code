@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from .modules import COLOR_VOCAB
+from .tokeniser import COLOR_VOCAB
 
 log = logging.getLogger(__name__)
 

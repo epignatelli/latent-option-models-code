@@ -16,7 +16,7 @@ import torch.optim as optim
 from .config import LOMCfg
 from .models import ReconstructionLOM, LatentLOM
 from .dataset import build_npz_dataloaders
-from .modules import tokenise
+from .tokeniser import tokenise
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def jepa_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
     target is detached so gradients flow only through pred.
     """
-    pred   = torch.nn.functional.normalize(pred,            dim=-1)
+    pred = torch.nn.functional.normalize(pred, dim=-1)
     target = torch.nn.functional.normalize(target.detach(), dim=-1)
     return (1 - (pred * target).sum(dim=-1)).mean()
 
@@ -54,18 +54,22 @@ def get_lr(step: int, lr: float, warmup_iters: int, max_iters: int, eta_min: flo
 
 def _git_commit() -> str:
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode().strip()
+        return (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
     except Exception:
         return "unknown"
 
 
 def _git_dirty() -> bool:
     try:
-        return bool(subprocess.check_output(
-            ["git", "status", "--porcelain"], stderr=subprocess.DEVNULL
-        ).decode().strip())
+        return bool(
+            subprocess.check_output(["git", "status", "--porcelain"], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
     except Exception:
         return False
 
@@ -91,16 +95,20 @@ class Trainer(ABC):
         t, d, m = cfg.train, cfg.data, cfg.model
 
         if d.context_len > m.context_length:
-            raise ValueError(f"context_len={d.context_len} exceeds context_length={m.context_length}")
+            raise ValueError(
+                f"context_len={d.context_len} exceeds context_length={m.context_length}"
+            )
 
         torch.manual_seed(t.seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         log.info("=== %s  seed=%d  device=%s ===", self.label().upper(), t.seed, self.device)
         if torch.cuda.is_available():
             idx = torch.cuda.current_device()
-            log.info("GPU: %s  (%.1f GB total)",
-                     torch.cuda.get_device_name(idx),
-                     torch.cuda.get_device_properties(idx).total_memory / 1e9)
+            log.info(
+                "GPU: %s  (%.1f GB total)",
+                torch.cuda.get_device_name(idx),
+                torch.cuda.get_device_properties(idx).total_memory / 1e9,
+            )
 
         if not d.dataset_dir:
             raise ValueError(
@@ -109,8 +117,13 @@ class Trainer(ABC):
                 "data.dataset_dir in your experiment config."
             )
         index_path = os.path.join(d.dataset_dir, "index.npz")
-        log.info("Loading dataset from %s  (context=%d  horizon=%d  buffer=%d)",
-                 index_path, d.context_len, d.horizon, d.buffer_size)
+        log.info(
+            "Loading dataset from %s  (context=%d  horizon=%d  buffer=%d)",
+            index_path,
+            d.context_len,
+            d.horizon,
+            d.buffer_size,
+        )
         self.train_loader, self.val_loader = build_npz_dataloaders(
             index_path=index_path,
             context_len=d.context_len,
@@ -122,16 +135,23 @@ class Trainer(ABC):
             seed=t.seed,
             return_sequence=True,
         )
-        log.info("Dataloaders ready  (train=%d steps/epoch  val=%d  batch=%d)",
-                 len(self.train_loader), len(self.val_loader), t.batch_size)
+        log.info(
+            "Dataloaders ready  (train=%d steps/epoch  val=%d  batch=%d)",
+            len(self.train_loader),
+            len(self.val_loader),
+            t.batch_size,
+        )
 
         log.info("Building models ...")
         self.models = self.build_models().to(self.device)
         n_params = sum(p.numel() for p in self.models.parameters())
         n_trainable = sum(p.numel() for p in self.models.parameters() if p.requires_grad)
-        log.info("Models: %s  |  params=%s  trainable=%s",
-                 ", ".join(self.models.keys()),
-                 f"{n_params:,}", f"{n_trainable:,}")
+        log.info(
+            "Models: %s  |  params=%s  trainable=%s",
+            ", ".join(self.models.keys()),
+            f"{n_params:,}",
+            f"{n_trainable:,}",
+        )
 
         if t.compile_model:
             log.info("Compiling models with torch.compile ...")
@@ -150,8 +170,13 @@ class Trainer(ABC):
             betas=(t.beta1, t.beta2),
             fused=("cuda" in str(self.device) and hasattr(optim.AdamW, "fused")),
         )
-        log.info("Optimiser: AdamW  lr=%.2e  wd=%.2e  warmup=%d  max_iters=%d",
-                 t.lr, t.weight_decay, t.warmup_iters, t.max_iters)
+        log.info(
+            "Optimiser: AdamW  lr=%.2e  wd=%.2e  warmup=%d  max_iters=%d",
+            t.lr,
+            t.weight_decay,
+            t.warmup_iters,
+            t.max_iters,
+        )
 
         dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
         amp_dtype = dtype_map.get(t.mixed_dtype, torch.float16)
@@ -163,8 +188,11 @@ class Trainer(ABC):
         self.scaler = torch.amp.GradScaler(
             "cuda", enabled=(amp_dtype == torch.float16 and "cuda" in str(self.device))
         )
-        log.info("AMP dtype=%s  grad_scaler=%s", t.mixed_dtype,
-                 "enabled" if self.scaler.is_enabled() else "disabled")
+        log.info(
+            "AMP dtype=%s  grad_scaler=%s",
+            t.mixed_dtype,
+            "enabled" if self.scaler.is_enabled() else "disabled",
+        )
 
         os.makedirs(t.ckpt_dir, exist_ok=True)
         self.ckpt_path = os.path.join(t.ckpt_dir, f"{self.label()}_pretrain.pt")
@@ -178,8 +206,8 @@ class Trainer(ABC):
 
             run_cfg = asdict(cfg)
             run_cfg["_git_commit"] = _git_commit()
-            run_cfg["_git_dirty"]  = _git_dirty()
-            run_cfg["_argv"]       = " ".join(sys.argv)
+            run_cfg["_git_dirty"] = _git_dirty()
+            run_cfg["_argv"] = " ".join(sys.argv)
             run_cfg["_model_type"] = self.label()
 
             run_name = (
@@ -189,8 +217,12 @@ class Trainer(ABC):
                 f"_s{t.seed}"
             )
 
-            log.info("Initialising WandB run '%s' (project=%s group=%s) ...",
-                     run_name, cfg.wandb.project, cfg.wandb.group)
+            log.info(
+                "Initialising WandB run '%s' (project=%s group=%s) ...",
+                run_name,
+                cfg.wandb.project,
+                cfg.wandb.group,
+            )
             self.wandb_run = wandb.init(
                 project=cfg.wandb.project,
                 entity=cfg.wandb.entity,
@@ -223,6 +255,7 @@ class Trainer(ABC):
         log.info("Checkpoint saved to %s", self.ckpt_path)
         if self.wandb_run is not None:
             import wandb
+
             artifact = wandb.Artifact(
                 name=f"{self.label()}_checkpoint",
                 type="checkpoint",
@@ -242,6 +275,7 @@ class Trainer(ABC):
         if self.wandb_run is not None:
             try:
                 import wandb
+
                 artifact = self.wandb_run.use_artifact(f"{self.label()}_checkpoint:latest")
                 artifact_dir = artifact.download()
                 path = os.path.join(artifact_dir, os.path.basename(self.ckpt_path))
@@ -279,8 +313,12 @@ class Trainer(ABC):
 
     def train(self) -> None:
         t = self.cfg.train
-        log.info("--- training start  steps=%d  log_every=%d  eval_every=%d ---",
-                 t.max_iters, t.log_interval, t.eval_interval)
+        log.info(
+            "--- training start  steps=%d  log_every=%d  eval_every=%d ---",
+            t.max_iters,
+            t.log_interval,
+            t.eval_interval,
+        )
 
         for mod in self.models.values():
             mod.train()
@@ -315,7 +353,9 @@ class Trainer(ABC):
                 pct = 100.0 * (s + 1) / t.max_iters
                 log.info(
                     "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | %.0f samp/s",
-                    s + 1, t.max_iters, pct,
+                    s + 1,
+                    t.max_iters,
+                    pct,
                     loss_dict["total_loss"].item(),
                     "  ".join(
                         f"{k}={v.item():.4f}" for k, v in loss_dict.items() if k != "total_loss"
@@ -354,25 +394,43 @@ class ReconstructionLOMTrainer(Trainer):
     def build_models(self) -> nn.ModuleDict:
         e, m, d = self.cfg.env, self.cfg.model, self.cfg.data
         model = ReconstructionLOM(
-            vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w, n_actions=e.n_actions,
-            d_model=m.d_model, n_layers=m.n_layers, n_heads=m.n_heads,
-            context_length=m.context_length, horizon=d.horizon,
-            latent_dim=m.latent_dim, num_options=m.num_options,
-            patch_size=m.patch_size, dropout=m.dropout, bias=m.bias,
+            vocab_size=e.vocab_size,
+            obs_h=e.obs_h,
+            obs_w=e.obs_w,
+            n_actions=e.n_actions,
+            d_model=m.d_model,
+            n_layers=m.n_layers,
+            n_heads=m.n_heads,
+            context_length=m.context_length,
+            horizon=d.horizon,
+            latent_dim=m.latent_dim,
+            num_options=m.num_options,
+            patch_size=m.patch_size,
+            dropout=m.dropout,
+            bias=m.bias,
             predict_sequence=m.predict_sequence,
-            vq_dropout=m.vq_dropout, vq_entropy_weight=m.vq_entropy_weight,
-            vq_beta=m.vq_beta, vq_reset_thresh=m.vq_reset_thresh, vq_ema_decay=m.vq_ema_decay,
+            vq_dropout=m.vq_dropout,
+            vq_entropy_weight=m.vq_entropy_weight,
+            vq_beta=m.vq_beta,
+            vq_reset_thresh=m.vq_reset_thresh,
+            vq_ema_decay=m.vq_ema_decay,
         )
         return nn.ModuleDict({"model": model})
 
     def step(self, batch: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         history, _, _, future = batch[0], batch[1], batch[2], batch[3]
         out = self.models["model"](history, future)
-        lam_recon = reconstruction_loss(out["lam_logits"], tokenise(future[:, 0:1]), self.cfg.env.vocab_size)
+        lam_recon = reconstruction_loss(
+            out["lam_logits"], tokenise(future[:, 0:1]), self.cfg.env.vocab_size
+        )
         if self.cfg.model.predict_sequence:
-            lom_recon = reconstruction_loss(out["lom_logits"], tokenise(future), self.cfg.env.vocab_size)
+            lom_recon = reconstruction_loss(
+                out["lom_logits"], tokenise(future), self.cfg.env.vocab_size
+            )
         else:
-            lom_recon = reconstruction_loss(out["lom_logits"], tokenise(future[:, -1:]), self.cfg.env.vocab_size)
+            lom_recon = reconstruction_loss(
+                out["lom_logits"], tokenise(future[:, -1:]), self.cfg.env.vocab_size
+            )
         vq_loss = out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"]
         total = lam_recon + lom_recon + vq_loss
         return {
@@ -402,14 +460,26 @@ class LatentLOMTrainer(Trainer):
     def build_models(self) -> nn.ModuleDict:
         e, m, d = self.cfg.env, self.cfg.model, self.cfg.data
         model = LatentLOM(
-            vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w, n_actions=e.n_actions,
-            d_model=m.d_model, n_layers=m.n_layers, n_heads=m.n_heads,
-            context_length=m.context_length, horizon=d.horizon,
-            latent_dim=m.latent_dim, num_options=m.num_options,
-            patch_size=m.patch_size, dropout=m.dropout, bias=m.bias,
+            vocab_size=e.vocab_size,
+            obs_h=e.obs_h,
+            obs_w=e.obs_w,
+            n_actions=e.n_actions,
+            d_model=m.d_model,
+            n_layers=m.n_layers,
+            n_heads=m.n_heads,
+            context_length=m.context_length,
+            horizon=d.horizon,
+            latent_dim=m.latent_dim,
+            num_options=m.num_options,
+            patch_size=m.patch_size,
+            dropout=m.dropout,
+            bias=m.bias,
             ema_decay=m.ema_decay,
-            vq_dropout=m.vq_dropout, vq_entropy_weight=m.vq_entropy_weight,
-            vq_beta=m.vq_beta, vq_reset_thresh=m.vq_reset_thresh, vq_ema_decay=m.vq_ema_decay,
+            vq_dropout=m.vq_dropout,
+            vq_entropy_weight=m.vq_entropy_weight,
+            vq_beta=m.vq_beta,
+            vq_reset_thresh=m.vq_reset_thresh,
+            vq_ema_decay=m.vq_ema_decay,
         )
         return nn.ModuleDict({"model": model})
 
@@ -434,8 +504,11 @@ class LatentLOMTrainer(Trainer):
 
     def train(self) -> None:
         t = self.cfg.train
-        log.info("--- LatentLOM training start  steps=%d  ema_decay=%.4f ---",
-                 t.max_iters, self.cfg.model.ema_decay)
+        log.info(
+            "--- LatentLOM training start  steps=%d  ema_decay=%.4f ---",
+            t.max_iters,
+            self.cfg.model.ema_decay,
+        )
 
         for mod in self.models.values():
             mod.train()
@@ -476,10 +549,15 @@ class LatentLOMTrainer(Trainer):
                 pct = 100.0 * (s + 1) / t.max_iters
                 log.info(
                     "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | %.0f samp/s",
-                    s + 1, t.max_iters, pct,
+                    s + 1,
+                    t.max_iters,
+                    pct,
                     loss_dict["total_loss"].item(),
-                    "  ".join(f"{k}={v.item():.4f}" for k, v in loss_dict.items() if k != "total_loss"),
-                    lr, sps,
+                    "  ".join(
+                        f"{k}={v.item():.4f}" for k, v in loss_dict.items() if k != "total_loss"
+                    ),
+                    lr,
+                    sps,
                 )
                 t0 = time.time()
                 if self.wandb_run:
