@@ -721,93 +721,44 @@ class EMAEncoder(nn.Module):
 
 
 class LatentActionModel(SerialisableModule):
-    """Frame encoder + VQ: (history, future[, condition]) → z via VQ.
+    """VQ bottleneck: encoded representation → discrete latent code.
 
-    Encoder is selected by two_encoder:
-      False (default): STTEncoder  — single bidirectional pass with OPT token
-      True:            JEPAEncoder — separate causal past/future encoders
+    Linear(in_dim → latent_dim) + LayerNorm + VectorQuantizer.
+    Takes a pre-computed encoder pooling and returns (z_q, vq_dict, indices).
     """
 
     def __init__(
         self,
-        vocab_size: int,
-        obs_h: int,
-        obs_w: int,
-        d_model: int,
-        n_layers: int,
-        n_heads: int,
-        context_length: int,
+        in_dim: int,
         latent_dim: int,
-        codebook_size: int,
-        horizon: int = 1,
-        patch_size: int = 1,
-        condition_dim: Optional[int] = None,
-        option_code_dim: Optional[int] = None,
-        two_encoder: bool = False,
+        num_options: int,
+        bias: bool = False,
         vq_dropout: float = 0.1,
         vq_entropy_weight: float = 0.01,
         vq_beta: float = 0.25,
         vq_reset_thresh: int = 100,
         vq_ema_decay: float = 0.99,
-        dropout: float = 0.0,
-        bias: bool = False,
     ):
         super().__init__()
-        self.vocab_size = vocab_size
-        self.obs_h = obs_h
-        self.obs_w = obs_w
-        self.d_model = d_model
-        self.n_layers = n_layers
-        self.n_heads = n_heads
-        self.context_length = context_length
+        self.in_dim = in_dim
         self.latent_dim = latent_dim
-        self.codebook_size = codebook_size
-        self.horizon = horizon
-        self.patch_size = patch_size
-        self.condition_dim = condition_dim
-        self.option_code_dim = option_code_dim
-        self.two_encoder = two_encoder
+        self.num_options = num_options
+        self.bias = bias
         self.vq_dropout = vq_dropout
         self.vq_entropy_weight = vq_entropy_weight
         self.vq_beta = vq_beta
         self.vq_reset_thresh = vq_reset_thresh
         self.vq_ema_decay = vq_ema_decay
-        self.dropout = dropout
-        self.bias = bias
-
-        encoder_cls = JEPAEncoder if two_encoder else STTEncoder
-        encoder_kwargs: dict = dict(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, horizon=horizon,
-            patch_size=patch_size, dropout=dropout, bias=bias,
-        )
-        if two_encoder:
-            encoder_kwargs["latent_dim"] = latent_dim
-        else:
-            encoder_kwargs["condition_dim"] = condition_dim
-        self.encoder = encoder_cls(**encoder_kwargs)
-        vq_in_dim = self.encoder.out_dim + (option_code_dim or 0)
-        self.vq_proj = nn.Linear(vq_in_dim, latent_dim, bias=bias)
-        self.ln_vq = LayerNorm(latent_dim, bias)
-        self.vq = VectorQuantizer(
-            latent_dim=latent_dim, num_options=codebook_size,
+        self.proj = nn.Linear(in_dim, latent_dim, bias=bias)
+        self.ln   = LayerNorm(latent_dim, bias)
+        self.vq   = VectorQuantizer(
+            latent_dim=latent_dim, num_options=num_options,
             dropout=vq_dropout, entropy_weight=vq_entropy_weight,
             vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, ema_decay=vq_ema_decay,
         )
 
-    def forward(
-        self,
-        history: torch.Tensor,
-        future: torch.Tensor,
-        condition: Optional[torch.Tensor] = None,
-        option_code: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, dict, torch.Tensor]:
-        pooled = self.encoder(history, future, condition)
-        if option_code is not None:
-            pooled = torch.cat([pooled, option_code], dim=-1)
-        z = self.ln_vq(self.vq_proj(pooled))
-        return self.vq(z)
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, dict, torch.Tensor]:
+        return self.vq(self.ln(self.proj(x)))
 
 
 # --------------------------------------------------------------------------- #

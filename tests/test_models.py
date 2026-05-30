@@ -10,21 +10,8 @@ needs_cuda = pytest.mark.skipif(
 )
 
 
-def make_lam(horizon=1, condition_dim=None, two_encoder=False):
-    return LatentActionModel(
-        vocab_size=VOCAB,
-        obs_h=OBS_H,
-        obs_w=OBS_W,
-        d_model=D_MODEL,
-        n_layers=N_LAYERS,
-        n_heads=N_HEADS,
-        context_length=CONTEXT,
-        latent_dim=LATENT_DIM,
-        codebook_size=32,
-        horizon=horizon,
-        condition_dim=condition_dim,
-        two_encoder=two_encoder,
-    )
+def make_lam(in_dim=D_MODEL):
+    return LatentActionModel(in_dim=in_dim, latent_dim=LATENT_DIM, num_options=32)
 
 
 def make_dynamics(option_dim=None, predict_sequence=False):
@@ -63,30 +50,14 @@ def frame_sequence(k):
 
 
 # --------------------------------------------------------------------------- #
-# --- LatentActionModel ----------------------------------------------------- #
+# --- LatentActionModel (VQ bottleneck) ------------------------------------- #
 # --------------------------------------------------------------------------- #
 
 @torch.no_grad()
-def test_lam_single_future():
+def test_lam_output_shapes():
     lam = make_lam()
-    z_q, _, indices = lam(history(), single_frame())
-    assert z_q.shape == (BATCH, LATENT_DIM)
-    assert indices.shape == (BATCH,)
-
-
-@torch.no_grad()
-def test_lam_sequence_future():
-    lam = make_lam(horizon=HORIZON)
-    z_q, _, indices = lam(history(), frame_sequence(HORIZON))
-    assert z_q.shape == (BATCH, LATENT_DIM)
-    assert indices.shape == (BATCH,)
-
-
-@torch.no_grad()
-def test_lam_with_condition():
-    lam = make_lam(condition_dim=LATENT_DIM)
-    cond = torch.randn(BATCH, LATENT_DIM)
-    z_q, _, indices = lam(history(), single_frame(), condition=cond)
+    x = torch.randn(BATCH, D_MODEL)
+    z_q, _, indices = lam(x)
     assert z_q.shape == (BATCH, LATENT_DIM)
     assert indices.shape == (BATCH,)
 
@@ -94,7 +65,7 @@ def test_lam_with_condition():
 @needs_cuda
 def test_lam_backward():
     lam = make_lam().cuda()
-    _, loss_dict, _ = lam(history().cuda(), single_frame().cuda())
+    _, loss_dict, _ = lam(torch.randn(BATCH, D_MODEL).cuda())
     loss_dict["vq_loss"].backward()
 
 
@@ -155,50 +126,15 @@ def test_independent_encoder_with_condition():
     assert out.shape == (BATCH, 2 * D_MODEL)
 
 
-# --------------------------------------------------------------------------- #
-# --- LatentActionModel two_encoder=True ------------------------------------ #
-# --------------------------------------------------------------------------- #
-
-@torch.no_grad()
-def test_two_encoder_lam_shapes():
-    lam = make_lam(two_encoder=True)
-    z_q, _, indices = lam(history(), single_frame())
-    assert z_q.shape == (BATCH, LATENT_DIM)
-    assert indices.shape == (BATCH,)
-
-
-@torch.no_grad()
-def test_two_encoder_lam_sequence_future():
-    lam = make_lam(horizon=HORIZON, two_encoder=True)
-    z_q, _, indices = lam(history(), frame_sequence(HORIZON))
-    assert z_q.shape == (BATCH, LATENT_DIM)
-    assert indices.shape == (BATCH,)
-
-
-@torch.no_grad()
-def test_two_encoder_lam_with_condition():
-    lam = make_lam(condition_dim=LATENT_DIM, two_encoder=True)
-    cond = torch.randn(BATCH, LATENT_DIM)
-    z_q, _, _ = lam(history(), single_frame(), condition=cond)
-    assert z_q.shape == (BATCH, LATENT_DIM)
-
-
-@needs_cuda
-def test_two_encoder_lam_backward():
-    lam = make_lam(two_encoder=True).cuda()
-    _, loss_dict, _ = lam(history().cuda(), single_frame().cuda())
-    loss_dict["vq_loss"].backward()
-
-
 def test_lam_serialise_roundtrip(tmp_path):
     lam = make_lam().eval()
-    hist, fut = history(), single_frame()
+    x = torch.randn(BATCH, D_MODEL)
     with torch.no_grad():
-        z_before, _, _ = lam(hist, fut)
+        z_before, _, _ = lam(x)
     lam.save(str(tmp_path / "lam.pt"))
     lam2 = LatentActionModel.load(str(tmp_path / "lam.pt")).eval()
     with torch.no_grad():
-        z_after, _, _ = lam2(hist, fut)
+        z_after, _, _ = lam2(x)
     assert torch.allclose(z_before, z_after)
 
 
@@ -268,14 +204,6 @@ def test_dynamics_backward():
 PATCH = 2  # OBS_H=OBS_W=4, so 4//2=2 tokens per dim → 4 tokens/frame
 
 
-def make_lam_patched(horizon=1):
-    return LatentActionModel(
-        vocab_size=VOCAB, obs_h=OBS_H, obs_w=OBS_W, d_model=D_MODEL,
-        n_layers=N_LAYERS, n_heads=N_HEADS, context_length=CONTEXT,
-        latent_dim=LATENT_DIM, codebook_size=32, horizon=horizon, patch_size=PATCH,
-    )
-
-
 def make_dynamics_patched(predict_sequence=False):
     return DynamicsModel(
         vocab_size=VOCAB, obs_h=OBS_H, obs_w=OBS_W, d_model=D_MODEL,
@@ -283,21 +211,6 @@ def make_dynamics_patched(predict_sequence=False):
         latent_dim=LATENT_DIM, predict_sequence=predict_sequence,
         horizon=HORIZON if predict_sequence else 1, patch_size=PATCH,
     )
-
-
-@torch.no_grad()
-def test_lam_patch_output_shape():
-    lam = make_lam_patched()
-    z, _, idx = lam(history(), single_frame())
-    assert z.shape == (BATCH, LATENT_DIM)
-    assert idx.shape == (BATCH,)
-
-
-@torch.no_grad()
-def test_lam_patch_sequence_future():
-    lam = make_lam_patched(horizon=HORIZON)
-    z, _, _ = lam(history(), frame_sequence(HORIZON))
-    assert z.shape == (BATCH, LATENT_DIM)
 
 
 @torch.no_grad()
