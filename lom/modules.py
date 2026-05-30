@@ -503,23 +503,20 @@ class SpatioTemporalTransformer(nn.Module):
 class VectorQuantizer(nn.Module):
     """EMA vector quantiser with cosine-distance assignment.
 
-    Implements the VQ-VAE codebook (van den Oord et al., 2017) with three
-    key extensions:
+    Extends the EMA VQ-VAE (van den Oord et al., 2017) in three ways not
+    present in the original paper:
 
     1. **Cosine-distance assignment** — encoder outputs and codebook entries
-       are L2-normalised before computing distances, keeping the codebook on
-       the unit sphere.
-    2. **EMA codebook updates** — the codebook is a non-trainable buffer
-       updated by exponential moving average, decoupling codebook learning
-       from the choice of optimiser.
-    3. **Dead-code reset** — codes that have not been assigned for
-       ``vq_reset_thresh`` consecutive steps are replaced with a randomly
-       chosen live code, preventing codebook collapse.
-    4. **Entropy regularisation** — a negative entropy term on the soft
-       assignment distribution encourages uniform codebook usage.
+       are L2-normalised before computing distances. The original uses L2
+       distance without normalisation.
+    2. **Dead-code reset** — codes inactive for ``vq_reset_thresh`` consecutive
+       steps are replaced with a randomly chosen live code.
+    3. **Entropy regularisation** — a negative entropy term encourages uniform
+       codebook usage.
 
-    Only the commitment loss (encoder output close to the chosen code) flows
-    through the optimiser; the codebook itself is updated in-place.
+    The EMA codebook update rule and straight-through estimator follow the
+    original paper exactly. Only the commitment loss flows through the
+    optimiser; the codebook is updated in-place.
 
     .. note::
         Dropout is applied to the distance matrix before argmin, acting as
@@ -627,7 +624,7 @@ class VectorQuantizer(nn.Module):
                             self.ema_cluster_size[dead] = self.ema_cluster_size[src]
                             self.last_active[dead] = 0
 
-        z_q = z_norm + (z_hard - z_norm).detach()  # straight-through in normalised space
+        z_q = z + (z_hard - z).detach()  # straight-through estimator
 
         commit_loss = (1 - F.cosine_similarity(z_norm, z_hard.detach(), dim=-1)).mean()
         entropy = self.entropy(dist)
