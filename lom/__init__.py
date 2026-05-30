@@ -3,7 +3,7 @@ from .config import (
     LOMCfg,
 )
 from .lam import LatentActionModel, ObservableTransitionModel, LatentTransitionModel
-from .encoders import STTEncoder, JEPAEncoder, EMAEncoder
+from .encoders import EMAEncoder
 from .modules import PatchEmbedding, SpatioTemporalTransformer, VectorQuantizer
 from .tokeniser import CHAR_VOCAB, COLOR_VOCAB, TOKEN_VOCAB, ScreenTokeniser, tokenise
 from .dataset import NpzTrajectoryDataset, build_npz_dataloaders
@@ -13,7 +13,7 @@ __all__ = [
     "EnvCfg", "ModelCfg", "LOMModelCfg", "DataCfg", "TrainCfg", "WandbCfg",
     "LOMCfg",
     "LatentActionModel", "ObservableTransitionModel", "LatentTransitionModel",
-    "STTEncoder", "JEPAEncoder", "EMAEncoder",
+    "EMAEncoder",
     "PatchEmbedding", "SpatioTemporalTransformer", "VectorQuantizer",
     "CHAR_VOCAB", "COLOR_VOCAB", "TOKEN_VOCAB", "ScreenTokeniser", "tokenise",
     "NpzTrajectoryDataset", "build_npz_dataloaders",

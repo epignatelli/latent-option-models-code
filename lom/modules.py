@@ -58,7 +58,7 @@ def bidirectional_mask_cache(T: int, opt_pos: int, device: torch.device) -> Bloc
     All positions attend bidirectionally except position ``opt_pos`` (the OPT
     token), which is blocked from attending to any position ``kv > opt_pos``.
     This lets OPT summarise history without leaking information from future
-    frames, as required by :class:`STTEncoder`.
+    frames, as required by :class:`ReconstructionLOM`.
 
     Args:
         T: total sequence length (context + 1 OPT token + horizon).
@@ -554,6 +554,12 @@ class VectorQuantizer(nn.Module):
         self.vq_reset_thresh = vq_reset_thresh
         self.ema_decay = ema_decay
         self.drop = nn.Dropout(dropout)
+
+        # buffers stubs
+        self.codebook: torch.Tensor
+        self.ema_cluster_size: torch.Tensor
+        self.ema_embed_sum: torch.Tensor
+        self.last_active: torch.Tensor
 
         bound = (3 / latent_dim) ** 0.5
         codebook_init = torch.empty(num_options, latent_dim).uniform_(-bound, bound)
