@@ -754,7 +754,8 @@ class LatentActionModel(SerialisableModule):
         self.vq   = VectorQuantizer(
             latent_dim=latent_dim, num_options=num_options,
             dropout=vq_dropout, entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, ema_decay=vq_ema_decay,
+            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh,
+            ema_decay=vq_ema_decay,
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, dict, torch.Tensor]:
