@@ -50,7 +50,7 @@ class LatentActionModel(SerialisableModule):
         return self.lam(x)
 
 
-class _TransitionBase(SerialisableModule):
+class TransitionBase(SerialisableModule):
     """Shared trunk for both transition models: embeds history, conditions on action."""
 
     def __init__(
@@ -103,7 +103,7 @@ class _TransitionBase(SerialisableModule):
         return self.ln_trunk(self.trunk(self.embed(history) + cond))
 
 
-class ObservableTransitionModel(_TransitionBase):
+class ObservableTransitionModel(TransitionBase):
     """GENIE-style transition model: predicts next pixel observation(s).
 
     action is broadcast-added to all history embeddings (GENIE-style).
@@ -181,7 +181,7 @@ class ObservableTransitionModel(_TransitionBase):
         return self._to_logits(hid[:, -1])
 
 
-class LatentTransitionModel(_TransitionBase):
+class LatentTransitionModel(TransitionBase):
     """JEPA-style transition model: predicts next latent representation.
 
     action is broadcast-added to all history embeddings.
