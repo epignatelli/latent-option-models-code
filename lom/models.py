@@ -64,32 +64,48 @@ class ReconstructionLOM(SerialisableModule):
     forward() returns raw predictions and VQ info; loss computation is external.
     """
 
-    def __init__(self, cfg: ReconstructionLOMCfg):
+    def __init__(
+        self,
+        vocab_size: int,
+        obs_h: int,
+        obs_w: int,
+        n_actions: int,
+        d_model: int,
+        n_layers: int,
+        n_heads: int,
+        context_length: int,
+        horizon: int,
+        latent_dim: int,
+        num_options: int,
+        patch_size: int = 1,
+        predict_sequence: bool = False,
+        dropout: float = 0.0,
+        bias: bool = False,
+        vq_dropout: float = 0.1,
+        vq_entropy_weight: float = 0.01,
+        vq_beta: float = 0.25,
+        vq_reset_thresh: int = 100,
+        vq_ema_decay: float = 0.99,
+    ):
         super().__init__()
-        self.cfg = cfg
+        self.horizon = horizon
+        self.predict_sequence = predict_sequence
         base = dict(
-            vocab_size=cfg.vocab_size, obs_h=cfg.obs_h, obs_w=cfg.obs_w,
-            d_model=cfg.d_model, n_layers=cfg.n_layers, n_heads=cfg.n_heads,
-            context_length=cfg.context_length, latent_dim=cfg.latent_dim,
-            patch_size=cfg.patch_size, dropout=cfg.dropout, bias=cfg.bias,
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            patch_size=patch_size, dropout=dropout, bias=bias,
         )
         vq = dict(
-            vq_dropout=cfg.vq_dropout, vq_entropy_weight=cfg.vq_entropy_weight,
-            vq_beta=cfg.vq_beta, vq_reset_thresh=cfg.vq_reset_thresh,
-            vq_ema_decay=cfg.vq_ema_decay,
+            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
         )
-        self.option_lam = LatentActionModel(
-            **base, codebook_size=cfg.num_options, horizon=cfg.horizon, **vq,
-        )
-        self.action_lam = LatentActionModel(
-            **base, codebook_size=cfg.n_actions, horizon=1,
-            condition_dim=cfg.latent_dim, **vq,
-        )
+        self.option_lam = LatentActionModel(**base, codebook_size=num_options, horizon=horizon, **vq)
+        self.action_lam = LatentActionModel(**base, codebook_size=n_actions, horizon=1,
+                                            condition_dim=latent_dim, **vq)
         self.lam_dynamics = DynamicsModel(**base, predict_sequence=False)
-        self.lom_dynamics = DynamicsModel(
-            **base, option_dim=cfg.latent_dim,
-            predict_sequence=cfg.predict_sequence, horizon=cfg.horizon,
-        )
+        self.lom_dynamics = DynamicsModel(**base, option_dim=latent_dim,
+                                          predict_sequence=predict_sequence, horizon=horizon)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
@@ -104,11 +120,9 @@ class ReconstructionLOM(SerialisableModule):
         z_opt, vq_opt, opt_idx = self.option_lam(history, sequence)
         z_act, vq_act, act_idx = self.action_lam(history, next_frame, condition=z_opt.detach())
         lam_logits = self.lam_dynamics(history, z_act)
-        if self.cfg.predict_sequence:
-            lom_logits = self.lom_dynamics(
-                history, z_act, option_code=z_opt,
-                horizon=self.cfg.horizon, teacher_frames=sequence,
-            )
+        if self.predict_sequence:
+            lom_logits = self.lom_dynamics(history, z_act, option_code=z_opt,
+                                           horizon=self.horizon, teacher_frames=sequence)
         else:
             lom_logits = self.lom_dynamics(history, z_act, option_code=z_opt, horizon=1)
         return {
@@ -135,38 +149,50 @@ class LatentLOM(SerialisableModule):
     Call update_ema() after each optimiser step.
     """
 
-    def __init__(self, cfg: LatentLOMCfg):
+    def __init__(
+        self,
+        vocab_size: int,
+        obs_h: int,
+        obs_w: int,
+        n_actions: int,
+        d_model: int,
+        n_layers: int,
+        n_heads: int,
+        context_length: int,
+        horizon: int,
+        latent_dim: int,
+        num_options: int,
+        patch_size: int = 1,
+        ema_decay: float = 0.996,
+        dropout: float = 0.0,
+        bias: bool = False,
+        vq_dropout: float = 0.1,
+        vq_entropy_weight: float = 0.01,
+        vq_beta: float = 0.25,
+        vq_reset_thresh: int = 100,
+        vq_ema_decay: float = 0.99,
+    ):
         super().__init__()
-        self.cfg = cfg
         base = dict(
-            vocab_size=cfg.vocab_size, obs_h=cfg.obs_h, obs_w=cfg.obs_w,
-            d_model=cfg.d_model, n_layers=cfg.n_layers, n_heads=cfg.n_heads,
-            context_length=cfg.context_length, latent_dim=cfg.latent_dim,
-            patch_size=cfg.patch_size, dropout=cfg.dropout, bias=cfg.bias,
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            patch_size=patch_size, dropout=dropout, bias=bias,
         )
         vq = dict(
-            vq_dropout=cfg.vq_dropout, vq_entropy_weight=cfg.vq_entropy_weight,
-            vq_beta=cfg.vq_beta, vq_reset_thresh=cfg.vq_reset_thresh,
-            vq_ema_decay=cfg.vq_ema_decay,
+            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
         )
-        self.option_lam = LatentActionModel(
-            **base, codebook_size=cfg.num_options, horizon=cfg.horizon,
-            two_encoder=True, **vq,
-        )
-        self.action_lam = LatentActionModel(
-            **base, codebook_size=cfg.n_actions, horizon=1,
-            option_code_dim=cfg.latent_dim, two_encoder=True, **vq,
-        )
-        self.lam_dynamics = DynamicsModel(
-            **base, predict_sequence=False,
-            predict_latent=True, target_dim=cfg.latent_dim,
-        )
-        self.lom_dynamics = DynamicsModel(
-            **base, predict_sequence=False,
-            predict_latent=True, target_dim=cfg.latent_dim,
-        )
-        self.ema_option_enc = EMAEncoder(self.option_lam.encoder, decay=cfg.ema_decay)  # type: ignore[arg-type]
-        self.ema_action_enc = EMAEncoder(self.action_lam.encoder, decay=cfg.ema_decay)  # type: ignore[arg-type]
+        self.option_lam = LatentActionModel(**base, codebook_size=num_options, horizon=horizon,
+                                            two_encoder=True, **vq)
+        self.action_lam = LatentActionModel(**base, codebook_size=n_actions, horizon=1,
+                                            option_code_dim=latent_dim, two_encoder=True, **vq)
+        self.lam_dynamics = DynamicsModel(**base, predict_sequence=False,
+                                          predict_latent=True, target_dim=latent_dim)
+        self.lom_dynamics = DynamicsModel(**base, predict_sequence=False,
+                                          predict_latent=True, target_dim=latent_dim)
+        self.ema_option_enc = EMAEncoder(self.option_lam.encoder, decay=ema_decay)  # type: ignore[arg-type]
+        self.ema_action_enc = EMAEncoder(self.action_lam.encoder, decay=ema_decay)  # type: ignore[arg-type]
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
