@@ -15,7 +15,6 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-from torch import ones, zeros, randint
 from torch.nn import functional as F
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
@@ -118,7 +117,7 @@ class BidirectionalAttention(nn.Module):
         return self.resid_drop(self.c_proj(y))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        return self.attend(x, None)
 
 
 class CausalAttention(BidirectionalAttention):
@@ -216,7 +215,7 @@ class SpatioTemporalBlock(nn.Module):
         n_heads: int,
         dropout: float = 0.0,
         bias: bool = False,
-        causal_temporal: bool = False,
+        causal: bool = False,
     ):
         super().__init__()
         self.ln_s = LayerNorm(d_model, bias)
@@ -225,7 +224,7 @@ class SpatioTemporalBlock(nn.Module):
         self.spatial_attn = BidirectionalAttention(d_model, n_heads, dropout, bias)
         self.temporal_attn = (
             CausalAttention(d_model, n_heads, dropout, bias)
-            if causal_temporal
+            if causal
             else BidirectionalAttention(d_model, n_heads, dropout, bias)
         )
         self.mlp = MLP(d_model, dropout, bias)
@@ -279,7 +278,7 @@ class SpatioTemporalTransformer(nn.Module):
         max_temporal_len: int,
         dropout: float = 0.0,
         bias: bool = False,
-        causal_temporal: bool = False,
+        causal: bool = False,
     ):
         super().__init__()
         self.spatial_pos = nn.Embedding(n_spatial_positions, d_model)
@@ -287,7 +286,7 @@ class SpatioTemporalTransformer(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.blocks = nn.ModuleList(
             [
-                SpatioTemporalBlock(d_model, n_heads, dropout, bias, causal_temporal)
+                SpatioTemporalBlock(d_model, n_heads, dropout, bias, causal)
                 for _ in range(n_layers)
             ]
         )
@@ -358,9 +357,9 @@ class VectorQuantizer(nn.Module):
         )
         # Codebook is a buffer — updated by EMA, not the optimizer.
         self.register_buffer("codebook", codebook_init)
-        self.register_buffer("ema_cluster_size", ones(num_options))
+        self.register_buffer("ema_cluster_size", torch.ones(num_options))
         self.register_buffer("ema_embed_sum", codebook_init.clone())
-        self.register_buffer("last_active", zeros(num_options, dtype=torch.int64))
+        self.register_buffer("last_active", torch.zeros(num_options, dtype=torch.int64))
 
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, dict, torch.Tensor]:
         """
@@ -380,7 +379,7 @@ class VectorQuantizer(nn.Module):
 
         if self.training:
             with torch.no_grad():
-                one_hot = zeros(z_norm.shape[0], self.num_options, device=z.device)
+                one_hot = torch.zeros(z_norm.shape[0], self.num_options, device=z.device)
                 one_hot.scatter_(1, indices.unsqueeze(1), 1)
 
                 # EMA update: use float32 to avoid bf16 accumulation under autocast
@@ -406,7 +405,7 @@ class VectorQuantizer(nn.Module):
                         alive = (self.last_active < self.vq_reset_thresh).nonzero(as_tuple=True)[0]
                         if alive.numel():
                             src = alive[
-                                randint(alive.numel(), (dead.numel(),), device=z.device)
+                                torch.randint(alive.numel(), (dead.numel(),), device=z.device)
                             ]
                             self.codebook[dead] = self.codebook[src]
                             self.ema_embed_sum[dead] = self.ema_embed_sum[src]
