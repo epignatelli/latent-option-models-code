@@ -92,7 +92,7 @@ class TransitionBase(SerialisableModule):
         )
         self.ln_trunk = LayerNorm(d_model, bias)
 
-    def cond(self, action: torch.Tensor, option_code: Optional[torch.Tensor]) -> torch.Tensor:
+    def build_conditioning(self, action: torch.Tensor, option_code: Optional[torch.Tensor]) -> torch.Tensor:
         c = self.action_proj(action)
         if option_code is not None and self.goal_proj is not None:
             c = c + self.goal_proj(option_code)
@@ -159,7 +159,7 @@ class ObservableTransitionModel(TransitionBase):
     ) -> torch.Tensor:
         B, c = history.shape[:2]
         history = self.tokeniser(history)
-        cond = self.cond(action, option_code)
+        cond = self.build_conditioning(action, option_code)
 
         if self.predict_sequence:
             if teacher_frames is not None:
@@ -214,6 +214,6 @@ class LatentTransitionModel(TransitionBase):
 
     def forward(self, history: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         history = self.tokeniser(history)
-        cond = self.cond(action, None)
+        cond = self.build_conditioning(action, None)
         hid = self.encode(history, cond)
         return self.ln_latent(self.latent_head(hid[:, -1].mean(dim=1)))
