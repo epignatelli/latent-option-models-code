@@ -7,7 +7,6 @@ spatial + temporal attention (TimeSformer-style).
 
 from __future__ import annotations
 
-import inspect
 import logging
 from copy import deepcopy
 from dataclasses import dataclass
@@ -60,29 +59,8 @@ def _get_opt_block_mask(T: int, opt_pos: int, device: torch.device) -> BlockMask
 
 
 class SerialisableModule(nn.Module):
-    """nn.Module with save / load helpers."""
-
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
-
-    def save(self, path: str) -> None:
-        config = {k: v for k, v in vars(self).items() if not isinstance(v, nn.Module)}
-        torch.save(
-            {"config": config, "params": self.state_dict(), "class": self.__class__.__name__}, path
-        )
-        logging.info("Saved %s to %s", self.__class__.__name__, path)
-
-    @classmethod
-    def load(cls, path: str, device: str = "cpu") -> SerialisableModule:
-        dic = torch.load(path, map_location=device, weights_only=False)
-        if dic["class"] != cls.__name__:
-            raise ValueError(f"Checkpoint is {dic['class']}, loading as {cls.__name__}")
-        sig = inspect.signature(cls.__init__).parameters
-        cfg = {k: v for k, v in dic["config"].items() if k in sig}
-        obj = cls(**cfg)
-        obj.load_state_dict(dic["params"])
-        logging.info("Loaded %s from %s", cls.__name__, path)
-        return obj
 
 
 # --------------------------------------------------------------------------- #
@@ -740,15 +718,6 @@ class LatentActionModel(SerialisableModule):
         vq_ema_decay: float = 0.99,
     ):
         super().__init__()
-        self.in_dim = in_dim
-        self.latent_dim = latent_dim
-        self.num_options = num_options
-        self.bias = bias
-        self.vq_dropout = vq_dropout
-        self.vq_entropy_weight = vq_entropy_weight
-        self.vq_beta = vq_beta
-        self.vq_reset_thresh = vq_reset_thresh
-        self.vq_ema_decay = vq_ema_decay
         self.proj = nn.Linear(in_dim, latent_dim, bias=bias)
         self.ln   = LayerNorm(latent_dim, bias)
         self.vq   = VectorQuantizer(

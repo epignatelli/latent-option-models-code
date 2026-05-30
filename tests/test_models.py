@@ -126,29 +126,6 @@ def test_independent_encoder_with_condition():
     assert out.shape == (BATCH, 2 * D_MODEL)
 
 
-def test_lam_serialise_roundtrip(tmp_path):
-    lam = make_lam().eval()
-    x = torch.randn(BATCH, D_MODEL)
-    with torch.no_grad():
-        z_before, _, _ = lam(x)
-    lam.save(str(tmp_path / "lam.pt"))
-    lam2 = LatentActionModel.load(str(tmp_path / "lam.pt")).eval()
-    with torch.no_grad():
-        z_after, _, _ = lam2(x)
-    assert torch.allclose(z_before, z_after)
-
-
-def test_dynamics_serialise_roundtrip(tmp_path):
-    dyn = make_dynamics().eval()
-    hist, act = history(), action()
-    with torch.no_grad():
-        logits_before = dyn(hist, act)
-    dyn.save(str(tmp_path / "dyn.pt"))
-    dyn2 = DynamicsModel.load(str(tmp_path / "dyn.pt")).eval()
-    with torch.no_grad():
-        logits_after = dyn2(hist, act)
-    assert torch.allclose(logits_before, logits_after)
-
 
 # --------------------------------------------------------------------------- #
 # --- DynamicsModel --------------------------------------------------------- #
