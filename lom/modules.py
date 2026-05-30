@@ -534,11 +534,11 @@ class STTEncoder(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,              # (B, context_length + horizon, H, W, 2)
+        sequence: torch.Tensor,       # (B, context_length + horizon, H, W, 2)
         condition: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        B, c = x.shape[0], self.context_length
-        emb = self.embed(self.tokeniser(x))   # (B, c+k, S, D) — one tokenise + embed
+        B, c = sequence.shape[0], self.context_length
+        emb = self.embed(self.tokeniser(sequence))   # (B, c+k, S, D) — one tokenise + embed
         k = emb.shape[1] - c
 
         hist_emb = emb[:, :c]
@@ -626,9 +626,9 @@ class JEPAEncoder(nn.Module):
         pooled = out[:, -1, :, :].mean(dim=1)
         return self.ln_target(self.proj_target(pooled))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, context_length + horizon, H, W, 2) — one tokenise + embed
-        emb = self.embed(self.tokeniser(x))          # (B, c+k, S, D)
+    def forward(self, sequence: torch.Tensor) -> torch.Tensor:
+        # (B, context_length + horizon, H, W, 2) — one tokenise + embed
+        emb = self.embed(self.tokeniser(sequence))   # (B, c+k, S, D)
         c = self.context_length
         ctx_pooled = self.past_encoder(emb[:, :c])[:, -1, :, :].mean(dim=1)
         tgt_pooled = self.future_encoder(emb[:, c:])[:, -1, :, :].mean(dim=1)
