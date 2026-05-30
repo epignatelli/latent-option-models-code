@@ -15,12 +15,10 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+from torch import ones, zeros, randint
 from torch.nn import functional as F
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
-# --------------------------------------------------------------------------- #
-# --- flex_attention helpers ------------------------------------------------ #
-# --------------------------------------------------------------------------- #
 
 causal_block_mask_cache: dict[tuple, BlockMask] = {}
 opt_block_mask_cache: dict[tuple, BlockMask] = {}
@@ -327,11 +325,11 @@ class VectorQuantizer(nn.Module):
     entropy regularisation and dead-code reset.
 
     The codebook is a buffer updated by exponential moving average (not the
-    optimizer), following van den Oord et al. 2017.  This decouples codebook
-    learning from the choice of optimizer and avoids the codebook drifting
+    optimiser), following van den Oord et al. 2017.  This decouples codebook
+    learning from the choice of optimiser and avoids the codebook drifting
     off the unit sphere.
 
-    Only the encoder's commitment loss flows through the optimizer;
+    Only the encoder's commitment loss flows through the optimiser;
     the codebook itself is updated in-place during each forward pass.
     """
 
@@ -360,9 +358,9 @@ class VectorQuantizer(nn.Module):
         )
         # Codebook is a buffer — updated by EMA, not the optimizer.
         self.register_buffer("codebook", codebook_init)
-        self.register_buffer("ema_cluster_size", torch.ones(num_options))
+        self.register_buffer("ema_cluster_size", ones(num_options))
         self.register_buffer("ema_embed_sum", codebook_init.clone())
-        self.register_buffer("last_active", torch.zeros(num_options, dtype=torch.long))
+        self.register_buffer("last_active", zeros(num_options, dtype=torch.int64))
 
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, dict, torch.Tensor]:
         """
@@ -382,7 +380,7 @@ class VectorQuantizer(nn.Module):
 
         if self.training:
             with torch.no_grad():
-                one_hot = torch.zeros(z_norm.shape[0], self.num_options, device=z.device)
+                one_hot = zeros(z_norm.shape[0], self.num_options, device=z.device)
                 one_hot.scatter_(1, indices.unsqueeze(1), 1)
 
                 # EMA update: use float32 to avoid bf16 accumulation under autocast
@@ -408,7 +406,7 @@ class VectorQuantizer(nn.Module):
                         alive = (self.last_active < self.vq_reset_thresh).nonzero(as_tuple=True)[0]
                         if alive.numel():
                             src = alive[
-                                torch.randint(alive.numel(), (dead.numel(),), device=z.device)
+                                randint(alive.numel(), (dead.numel(),), device=z.device)
                             ]
                             self.codebook[dead] = self.codebook[src]
                             self.ema_embed_sum[dead] = self.ema_embed_sum[src]
@@ -418,7 +416,7 @@ class VectorQuantizer(nn.Module):
         z_q = z + (z_hard - z).detach()  # straight-through
 
         commit_loss = (1 - F.cosine_similarity(z, z_hard.detach(), dim=-1)).mean()
-        entropy = self._entropy(dist)
+        entropy = self.compute_entropy(dist)
         vq_loss = self.vq_beta * commit_loss - self.entropy_weight * entropy
 
         return (
@@ -431,7 +429,7 @@ class VectorQuantizer(nn.Module):
             indices,
         )
 
-    def _entropy(self, dist: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
+    def compute_entropy(self, dist: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
         avg_probs = F.softmax(-dist, dim=-1).mean(0)  # (K,) mean soft assignment over batch
         return -(avg_probs * avg_probs.clamp(min=eps).log()).sum()
 
