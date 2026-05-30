@@ -579,9 +579,9 @@ class VectorQuantizer(nn.Module):
             - ``indices`` ``(N,)``: codebook indices of the assigned codes.
         """
         # L2 distance: ||z - e||^2 = ||z||^2 - 2*z·e^T + ||e||^2
-        dist = (
+        dist = self.drop(
             (z ** 2).sum(1, keepdim=True)
-            - 2 * self.drop(z @ self.codebook.T)
+            - 2 * (z @ self.codebook.T)
             + (self.codebook ** 2).sum(1)
         )  # (N, K)
 
