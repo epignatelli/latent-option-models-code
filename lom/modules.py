@@ -3,7 +3,7 @@
 Nothing here is a full model or encoder. Contents:
   - Block mask helpers (causal, OPT-token)
   - SerialisableModule, LayerNorm, MLP
-  - SelfAttention / CausalAttention / BidirectionalAttention
+  - BidirectionalAttention / CausalAttention
   - PatchEmbedding
   - SpatioTemporalBlock / SpatioTemporalTransformer
   - VectorQuantizer
@@ -18,44 +18,99 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
+
+# --------------------------------------------------------------------------- #
+# --- Block mask helpers ---------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
 causal_block_mask_cache: dict[tuple, BlockMask] = {}
 opt_block_mask_cache: dict[tuple, BlockMask] = {}
 
 
 def causal_mask_cache(T: int, device: torch.device) -> BlockMask:
+    """Return a cached causal :class:`BlockMask` of shape ``(T, T)``.
+
+    The mask allows position ``q`` to attend only to positions ``kv <= q``
+    (lower-triangular), implementing standard autoregressive attention.
+    Masks are cached by ``(T, device)`` so repeated calls with the same
+    arguments are free.
+
+    Args:
+        T: sequence length.
+        device: device on which the mask will be used.
+
+    Returns:
+        A :class:`BlockMask` suitable for passing to :func:`flex_attention`.
+    """
     key = (T, str(device))
     if key not in causal_block_mask_cache:
         causal_block_mask_cache[key] = create_block_mask(
-            lambda b, h, q, kv: q>=kv,
-            B=None,
-            H=None,
-            Q_LEN=T,
-            KV_LEN=T,
-            device=device,
+            lambda b, h, q, kv: q >= kv,
+            B=None, H=None, Q_LEN=T, KV_LEN=T, device=device,
         )
     return causal_block_mask_cache[key]
 
 
 def bidirectional_mask_cache(T: int, opt_pos: int, device: torch.device) -> BlockMask:
+    """Return a cached :class:`BlockMask` that prevents the OPT token from
+    attending to future frames.
+
+    All positions attend bidirectionally except position ``opt_pos`` (the OPT
+    token), which is blocked from attending to any position ``kv > opt_pos``.
+    This lets OPT summarise history without leaking information from future
+    frames, as required by :class:`STTEncoder`.
+
+    Args:
+        T: total sequence length (context + 1 OPT token + horizon).
+        opt_pos: temporal index of the OPT token (equals ``context_length``).
+        device: device on which the mask will be used.
+
+    Returns:
+        A :class:`BlockMask` suitable for passing to :func:`flex_attention`.
+    """
     key = (T, opt_pos, str(device))
     if key not in opt_block_mask_cache:
-
         def mask_mod(b, h, q_idx, kv_idx):
             return ~((q_idx == opt_pos) & (kv_idx > opt_pos))
-
         opt_block_mask_cache[key] = create_block_mask(
-            mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device
+            mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device,
         )
     return opt_block_mask_cache[key]
 
 
+# --------------------------------------------------------------------------- #
+# --- Base ------------------------------------------------------------------ #
+# --------------------------------------------------------------------------- #
+
+
 class SerialisableModule(nn.Module):
+    """Base class adding a :meth:`num_parameters` convenience method."""
+
     def num_parameters(self) -> int:
+        """Return the total number of trainable parameters."""
         return sum(p.numel() for p in self.parameters())
 
 
+# --------------------------------------------------------------------------- #
+# --- Primitives ------------------------------------------------------------ #
+# --------------------------------------------------------------------------- #
+
+
 class LayerNorm(nn.Module):
-    """LayerNorm with optional bias (torch built-in doesn't support bias=False)."""
+    """Layer normalisation with optional bias.
+
+    The PyTorch built-in :class:`torch.nn.LayerNorm` requires a bias term;
+    this variant allows ``bias=False`` to reduce parameter count, following
+    the GPT-2 ablation by Biewald 2022.
+
+    Args:
+        ndim: number of features to normalise.
+        bias: if ``True``, adds a learnable bias. Default: ``False``.
+
+    Shape:
+        - Input: ``(*, ndim)``
+        - Output: ``(*, ndim)``
+    """
 
     def __init__(self, ndim: int, bias: bool = False):
         super().__init__()
@@ -67,6 +122,23 @@ class LayerNorm(nn.Module):
 
 
 class MLP(nn.Module):
+    """Position-wise two-layer feed-forward network with GELU activation.
+
+    Expands to ``4 * d_model`` hidden units then projects back, following
+    the standard Transformer MLP block. Dropout is applied after each
+    linear projection.
+
+    Args:
+        d_model: input and output feature dimension.
+        dropout: dropout probability applied after each linear layer.
+            Default: ``0.1``.
+        bias: if ``True``, adds bias to linear layers. Default: ``False``.
+
+    Shape:
+        - Input: ``(*, d_model)``
+        - Output: ``(*, d_model)``
+    """
+
     def __init__(self, d_model: int, dropout: float = 0.1, bias: bool = False):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -81,8 +153,32 @@ class MLP(nn.Module):
         return self.mlp(x)
 
 
+# --------------------------------------------------------------------------- #
+# --- Attention ------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+
 class BidirectionalAttention(nn.Module):
-    """Multi-head self-attention using flex_attention."""
+    """Multi-head self-attention with full (non-causal) visibility.
+
+    Uses :func:`torch.nn.attention.flex_attention.flex_attention` for all
+    sequence lengths. The kernel is forced to the regular flex_attention path
+    (not the decoding path) to avoid a PyTorch bug with multi-block masks on
+    short sequences (pytorch#147267).
+
+    Subclass :class:`CausalAttention` provides a causal variant.
+
+    Args:
+        d_model: total embedding dimension. Must be divisible by ``n_heads``.
+        n_heads: number of attention heads.
+        dropout: dropout probability on the output projection. Default: ``0.1``.
+        bias: if ``True``, adds bias to QKV and output projections.
+            Default: ``False``.
+
+    Shape:
+        - Input: ``(B, T, d_model)``
+        - Output: ``(B, T, d_model)``
+    """
 
     def __init__(
         self,
@@ -100,6 +196,17 @@ class BidirectionalAttention(nn.Module):
         self.d_model = d_model
 
     def attend(self, x: torch.Tensor, block_mask: BlockMask | None = None) -> torch.Tensor:
+        """Run scaled dot-product attention with an optional structural mask.
+
+        Args:
+            x: input tensor of shape ``(B, T, d_model)``.
+            block_mask: optional :class:`BlockMask` for structural sparsity
+                (e.g. causal or OPT-token masking). ``None`` means full
+                bidirectional attention.
+
+        Returns:
+            Output tensor of shape ``(B, T, d_model)``.
+        """
         B, T, C = x.shape
         head_dim = C // self.n_heads
         q, k, v = self.c_attn(x).split(self.d_model, dim=2)
@@ -119,25 +226,59 @@ class BidirectionalAttention(nn.Module):
 
 
 class CausalAttention(BidirectionalAttention):
-    """Self-attention with a causal mask (decoder-only)."""
+    """Multi-head self-attention with an auto-built causal mask (decoder-only).
+
+    Each position attends only to itself and earlier positions.  The causal
+    :class:`BlockMask` is cached by sequence length and device, so the first
+    call for a given ``(T, device)`` pair pays the creation cost; all
+    subsequent calls are free.
+
+    Inherits all constructor arguments from :class:`BidirectionalAttention`.
+    """
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.attend(x, causal_mask_cache(x.shape[1], x.device))
 
 
+# --------------------------------------------------------------------------- #
+# --- Patch Embedding ------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+
 class PatchEmbedding(nn.Module):
-    """Embeds (B, T, H, W) token IDs into (B, T, n_tokens, d_model) patch tokens.
+    """Embeds tokenised NetHack screen observations into patch tokens.
 
-    Expects pre-tokenised integer IDs (e.g. from ScreenTokeniser).
+    Each frame ``(H, W)`` of integer token IDs is divided into non-overlapping
+    ``patch_size × patch_size`` patches. Each patch is embedded via a shared
+    character embedding table and then linearly projected to ``d_model``
+    dimensions, producing ``n_tokens = (H // P) * (W // P)`` tokens per frame.
+    With ``patch_size=1`` the projection is skipped and each screen cell
+    becomes one token.
 
-    patch_size=1  — plain token embedding, no spatial compression.
-    patch_size=P  — each P×P block is embedded and projected into one d_model
-                    token.  n_tokens = (H//P) * (W//P).
+    A ``token_usage`` buffer (shape ``(vocab_size,)``) counts how many times
+    each token ID has been seen across all forward passes.  Use it to identify
+    dead codebook entries after training::
 
-    Registers a `token_usage` buffer (shape: vocab_size,) that counts how many
-    times each token ID has been looked up across all forward passes.  Use it
-    to identify dead tokens after training:
-        dead = (model.embed.token_usage == 0).sum()
+        dead = (model.embed.token_usage == 0).nonzero()
+
+    .. note::
+        :class:`torch.nn.Embedding` is not covered by PyTorch autocast.
+        When autocast is enabled, the embedding output is manually cast to
+        ``bfloat16`` so that downstream layers see a consistent dtype.
+
+    Args:
+        vocab_size: number of distinct token IDs (``CHAR_VOCAB * COLOR_VOCAB``).
+        d_model: output embedding dimension.
+        obs_h: screen height in characters.
+        obs_w: screen width in characters.
+        patch_size: spatial patch size ``P``. Both ``obs_h`` and ``obs_w``
+            must be divisible by ``P``. Default: ``1``.
+        bias: if ``True``, adds bias to the patch projection. Default: ``False``.
+
+    Shape:
+        - Input: ``(B, T, H, W)`` — long tensor of token IDs.
+        - Output: ``(B, T, n_tokens, d_model)`` where
+          ``n_tokens = (H // P) * (W // P)``.
     """
 
     def __init__(
@@ -175,12 +316,6 @@ class PatchEmbedding(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, T, H, W) long — token IDs
-        Returns:
-            (B, T, n_tokens, d_model)
-        """
         B, T, H, W = x.shape
         P, D = self.patch_size, self.d_model
 
@@ -199,13 +334,36 @@ class PatchEmbedding(nn.Module):
         return emb
 
 
-class SpatioTemporalBlock(nn.Module):
-    """Factored space-time attention: spatial first, then temporal, then MLP.
+# --------------------------------------------------------------------------- #
+# --- Spatio-Temporal Transformer ------------------------------------------- #
+# --------------------------------------------------------------------------- #
 
-    Spatial attention attends over the H*W spatial positions within each
-    time step (always bidirectional).  Temporal attention attends over T
-    time steps for each spatial position (causal or bidirectional depending
-    on `causal`).
+
+class SpatioTemporalBlock(nn.Module):
+    """Factored space-time Transformer block.
+
+    Applies three sub-layers in sequence:
+
+    1. **Spatial attention** — each time step attends over its ``S`` spatial
+       positions, always bidirectionally.
+    2. **Temporal attention** — each spatial position attends over the ``T``
+       time steps; causal or bidirectional depending on ``causal``.
+    3. **MLP** — position-wise feed-forward network.
+
+    Each sub-layer is preceded by layer normalisation and followed by a
+    residual connection (Pre-LN formulation).
+
+    Args:
+        d_model: embedding dimension.
+        n_heads: number of attention heads.
+        dropout: dropout probability. Default: ``0.1``.
+        bias: if ``True``, adds bias to all linear layers. Default: ``False``.
+        causal: if ``True``, temporal attention uses a causal mask.
+            Default: ``False``.
+
+    Shape:
+        - Input: ``(B, T, S, D)``
+        - Output: ``(B, T, S, D)``
     """
 
     def __init__(
@@ -231,41 +389,61 @@ class SpatioTemporalBlock(nn.Module):
     def forward(self, x: torch.Tensor, temporal_mask: BlockMask | None = None) -> torch.Tensor:
         """
         Args:
-            x: (B, T, S, D)
-            temporal_mask: BlockMask for temporal attention, or None for full attention
+            x: input tensor of shape ``(B, T, S, D)``.
+            temporal_mask: optional :class:`BlockMask` for temporal attention.
+                ``None`` applies full attention (or the causal mask if
+                ``causal=True`` was set at construction).
+
         Returns:
-            (B, T, S, D)
+            Output tensor of shape ``(B, T, S, D)``.
         """
         B, T, S, D = x.shape
 
-        # --- Spatial attention: (B*T, S, D) ---
         xs = x.reshape(B * T, S, D)
         xs = xs + self.spatial_attn(self.ln_s(xs))
         x = xs.reshape(B, T, S, D)
 
-        # --- Temporal attention: (B*S, T, D) ---
         xt = x.permute(0, 2, 1, 3).reshape(B * S, T, D)
         xt = xt + self.temporal_attn.attend(self.ln_t(xt), temporal_mask)
         x = xt.reshape(B, S, T, D).permute(0, 2, 1, 3)
 
-        # --- MLP ---
         x = x + self.mlp(self.ln_m(x))
         return x
 
 
 class SpatioTemporalTransformer(nn.Module):
-    """Spatio-Temporal Transformer over pre-embedded (B, T, S, D) tensors.
+    """Spatio-Temporal Transformer operating on pre-embedded observation sequences.
 
-    Does not contain a char embedding table — callers embed observations
-    before passing them in.
+    Stacks ``n_layers`` :class:`SpatioTemporalBlock` layers with learned
+    spatial and temporal positional encodings.  The embedding table is
+    intentionally excluded — callers must embed observations first (e.g. via
+    :class:`PatchEmbedding`) so that multiple modules can share embeddings
+    without re-computing them.
 
-    Positional encoding (both learned, following Genie):
-      - Spatial:  nn.Embedding(n_spatial_positions, D) — fixed by the NLE
-                  screen size, never changes.
-      - Temporal: nn.Embedding(max_temporal_len, D) — capacity parameter;
-                  set it to the largest context you will ever need.  The
-                  actual sequence length T at forward time can be anything
-                  up to max_temporal_len.
+    Positional encodings are learned embeddings, following Genie (Bruce et al.,
+    2024):
+
+    - **Spatial**: ``nn.Embedding(n_spatial_positions, d_model)`` — one entry
+      per screen token, fixed by the NetHack screen resolution.
+    - **Temporal**: ``nn.Embedding(max_temporal_len, d_model)`` — one entry
+      per time step; the actual sequence length at forward time may be shorter.
+
+    Args:
+        d_model: embedding dimension.
+        n_layers: number of :class:`SpatioTemporalBlock` layers.
+        n_heads: number of attention heads per block.
+        n_spatial_positions: number of spatial tokens per frame
+            (``(H // patch_size) * (W // patch_size)``).
+        max_temporal_len: maximum sequence length the temporal positional
+            encoding supports.
+        dropout: dropout probability. Default: ``0.1``.
+        bias: if ``True``, adds bias to all linear layers. Default: ``False``.
+        causal: if ``True``, temporal attention in every block is causal.
+            Default: ``False``.
+
+    Shape:
+        - Input: ``(B, T, S, D)`` — pre-embedded, without positional information.
+        - Output: ``(B, T, S, D)``
     """
 
     def __init__(
@@ -293,20 +471,22 @@ class SpatioTemporalTransformer(nn.Module):
     def forward(self, x: torch.Tensor, temporal_mask: BlockMask | None = None) -> torch.Tensor:
         """
         Args:
-            x: (B, T, S, D) — already char-embedded, without positional info
-            temporal_mask: optional BlockMask for temporal attention (None = full attention)
+            x: pre-embedded input of shape ``(B, T, S, D)``.
+            temporal_mask: optional :class:`BlockMask` for temporal attention
+                across all blocks. ``None`` applies full (or causal) attention.
+
         Returns:
-            (B, T, S, D)
+            Output tensor of shape ``(B, T, S, D)``.
         """
         B, T, S, D = x.shape
-        assert (
-            T <= self.max_temporal_len
-        ), f"Sequence length T={T} exceeds max_temporal_len={self.max_temporal_len}"
+        assert T <= self.max_temporal_len, (
+            f"Sequence length T={T} exceeds max_temporal_len={self.max_temporal_len}"
+        )
         s_idx = torch.arange(S, device=x.device)
         t_idx = torch.arange(T, device=x.device)
 
-        x = x + self.spatial_pos(s_idx)[None, None, :, :]  # (1,1,S,D)
-        x = x + self.temporal_pos(t_idx)[None, :, None, :]  # (1,T,1,D)
+        x = x + self.spatial_pos(s_idx)[None, None, :, :]
+        x = x + self.temporal_pos(t_idx)[None, :, None, :]
         x = self.drop(x)
 
         for block in self.blocks:
@@ -315,17 +495,50 @@ class SpatioTemporalTransformer(nn.Module):
         return self.ln_f(x)
 
 
+# --------------------------------------------------------------------------- #
+# --- Vector Quantizer ------------------------------------------------------ #
+# --------------------------------------------------------------------------- #
+
+
 class VectorQuantizer(nn.Module):
-    """EMA VQ with cosine-distance assignment, straight-through estimator,
-    entropy regularisation and dead-code reset.
+    """EMA vector quantiser with cosine-distance assignment.
 
-    The codebook is a buffer updated by exponential moving average (not the
-    optimiser), following van den Oord et al. 2017.  This decouples codebook
-    learning from the choice of optimiser and avoids the codebook drifting
-    off the unit sphere.
+    Implements the VQ-VAE codebook (van den Oord et al., 2017) with three
+    key extensions:
 
-    Only the encoder's commitment loss flows through the optimiser;
-    the codebook itself is updated in-place during each forward pass.
+    1. **Cosine-distance assignment** — encoder outputs and codebook entries
+       are L2-normalised before computing distances, keeping the codebook on
+       the unit sphere.
+    2. **EMA codebook updates** — the codebook is a non-trainable buffer
+       updated by exponential moving average, decoupling codebook learning
+       from the choice of optimiser.
+    3. **Dead-code reset** — codes that have not been assigned for
+       ``vq_reset_thresh`` consecutive steps are replaced with a randomly
+       chosen live code, preventing codebook collapse.
+    4. **Entropy regularisation** — a negative entropy term on the soft
+       assignment distribution encourages uniform codebook usage.
+
+    Only the commitment loss (encoder output close to the chosen code) flows
+    through the optimiser; the codebook itself is updated in-place.
+
+    .. note::
+        Dropout is applied to the distance matrix before argmin, acting as
+        stochastic codebook regularisation during training.
+
+    Args:
+        latent_dim: dimensionality of each code vector.
+        num_options: codebook size ``K``.
+        dropout: dropout probability applied to the distance matrix.
+        entropy_weight: weight of the entropy regularisation term.
+        vq_beta: weight of the commitment loss term.
+        vq_reset_thresh: number of consecutive inactive steps before a dead
+            code is reset. Set to ``0`` to disable. Default: ``100``.
+        ema_decay: EMA decay factor for codebook updates. Default: ``0.99``.
+
+    Shape:
+        - Input ``z``: ``(N, latent_dim)``
+        - Output ``z_q``: ``(N, latent_dim)`` — quantised via straight-through.
+        - Output ``indices``: ``(N,)`` — codebook indices.
     """
 
     def __init__(
@@ -351,20 +564,26 @@ class VectorQuantizer(nn.Module):
         codebook_init = F.normalize(
             torch.empty(num_options, latent_dim).uniform_(-bound, bound), dim=-1
         )
-        # Codebook is a buffer — updated by EMA, not the optimizer.
+        # Codebook is a buffer — updated by EMA, not the optimiser.
         self.register_buffer("codebook", codebook_init)
         self.register_buffer("ema_cluster_size", torch.ones(num_options))
         self.register_buffer("ema_embed_sum", codebook_init.clone())
         self.register_buffer("last_active", torch.zeros(num_options, dtype=torch.int64))
 
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, dict, torch.Tensor]:
-        """
+        """Quantise a batch of continuous vectors.
+
         Args:
-            z: (N, latent_dim) — flat batch of continuous vectors
+            z: continuous encoder output of shape ``(N, latent_dim)``.
+
         Returns:
-            z_q: (N, latent_dim) quantized with STE
-            loss_dict: dict with scalar losses
-            indices: (N,) codebook indices
+            Tuple of:
+
+            - ``z_q`` ``(N, latent_dim)``: quantised vectors with
+              straight-through gradient estimator.
+            - ``loss_dict``: dict containing scalar tensors
+              ``vq_loss``, ``commit_loss``, ``entropy``.
+            - ``indices`` ``(N,)``: codebook indices of the assigned codes.
         """
         z_norm = F.normalize(z, dim=-1)
         cb_norm = F.normalize(self.codebook, dim=-1)
@@ -408,25 +627,38 @@ class VectorQuantizer(nn.Module):
                             self.ema_cluster_size[dead] = self.ema_cluster_size[src]
                             self.last_active[dead] = 0
 
-        z_q = z + (z_hard - z).detach()  # straight-through
+        z_q = z + (z_hard - z).detach()  # straight-through estimator
 
         commit_loss = (1 - F.cosine_similarity(z, z_hard.detach(), dim=-1)).mean()
         entropy = self.compute_entropy(dist)
         vq_loss = self.vq_beta * commit_loss - self.entropy_weight * entropy
 
-        return (
-            z_q,
-            {
-                "vq_loss": vq_loss,
-                "commit_loss": commit_loss,
-                "entropy": entropy,
-            },
-            indices,
-        )
+        return z_q, {"vq_loss": vq_loss, "commit_loss": commit_loss, "entropy": entropy}, indices
 
     def compute_entropy(self, dist: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
+        """Compute the entropy of the mean soft-assignment distribution.
+
+        A higher entropy indicates more uniform codebook usage. Used as a
+        regularisation signal to discourage codebook collapse.
+
+        Args:
+            dist: distance matrix of shape ``(N, K)`` (negative cosine
+                similarities before argmin).
+            eps: small constant for numerical stability. Default: ``1e-9``.
+
+        Returns:
+            Scalar entropy tensor.
+        """
         avg_probs = F.softmax(-dist, dim=-1).mean(0)  # (K,) mean soft assignment over batch
         return -(avg_probs * avg_probs.clamp(min=eps).log()).sum()
 
     def lookup(self, indices: torch.Tensor) -> torch.Tensor:
+        """Return L2-normalised codebook entries for the given indices.
+
+        Args:
+            indices: long tensor of codebook indices, any shape.
+
+        Returns:
+            Normalised code vectors of shape ``(*indices.shape, latent_dim)``.
+        """
         return F.normalize(self.codebook[indices], dim=-1)

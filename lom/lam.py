@@ -13,10 +13,29 @@ from .tokeniser import ScreenTokeniser
 
 
 class LatentActionModel(SerialisableModule):
-    """VQ bottleneck: encoded representation → discrete latent code.
+    """VQ bottleneck that maps encoder output to a discrete latent code.
 
-    Linear(in_dim → latent_dim) + LayerNorm + VectorQuantizer.
-    Takes a pre-computed encoder pooling and returns (z_q, vq_dict, indices).
+    Applies a linear projection, layer normalisation, and vector quantisation
+    in sequence.  Takes a pre-pooled encoder representation and returns the
+    quantised vector, a dictionary of VQ losses, and the codebook index.
+
+    Args:
+        in_dim: dimensionality of the input encoder representation.
+        latent_dim: dimensionality of the quantised code space.
+        num_options: codebook size ``K`` (number of discrete options/actions).
+        bias: if ``True``, adds bias to the linear projection. Default: ``False``.
+        vq_dropout: dropout on the VQ distance matrix. Default: ``0.1``.
+        vq_entropy_weight: weight of the entropy regularisation term.
+            Default: ``0.01``.
+        vq_beta: weight of the commitment loss. Default: ``0.25``.
+        vq_reset_thresh: consecutive inactive steps before a dead code is reset.
+            Default: ``100``.
+        vq_ema_decay: EMA decay for codebook updates. Default: ``0.99``.
+
+    Shape:
+        - Input: ``(N, in_dim)``
+        - Output ``z_q``: ``(N, latent_dim)``
+        - Output ``indices``: ``(N,)``
     """
 
     def __init__(
@@ -47,11 +66,47 @@ class LatentActionModel(SerialisableModule):
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, dict, torch.Tensor]:
+        """
+        Args:
+            x: encoder pooling of shape ``(N, in_dim)``.
+
+        Returns:
+            Tuple of ``(z_q, loss_dict, indices)`` — see
+            :class:`~lom.modules.VectorQuantizer` for details.
+        """
         return self.lam(x)
 
 
 class TransitionBase(SerialisableModule):
-    """Shared trunk for both transition models: embeds history, conditions on action."""
+    """Shared trunk for causal transition models.
+
+    Tokenises and embeds a history of observations, adds a single conditioning
+    code (broadcast over all time steps and spatial positions following the
+    GENIE formulation), and runs a causal :class:`SpatioTemporalTransformer`.
+
+    This class is not used directly — subclass
+    :class:`ObservableTransitionModel` or :class:`LatentTransitionModel`
+    instead.
+
+    Args:
+        vocab_size: size of the token vocabulary.
+        obs_h: observation height in characters.
+        obs_w: observation width in characters.
+        d_model: transformer embedding dimension.
+        n_layers: number of transformer blocks.
+        n_heads: number of attention heads.
+        context_length: number of history frames.
+        latent_dim: dimensionality of the conditioning code vector.
+        horizon: number of future steps the transformer must support.
+            Affects the temporal positional encoding capacity. Default: ``1``.
+        patch_size: spatial patch size. Default: ``1``.
+        dropout: dropout probability. Default: ``0.1``.
+        bias: if ``True``, adds bias to all linear layers. Default: ``False``.
+
+    Shape:
+        - Input ``history``: ``(B, context_length, H, W, 2)``
+        - Output of :meth:`encode`: ``(B, context_length, S, d_model)``
+    """
 
     def __init__(
         self,
@@ -94,17 +149,75 @@ class TransitionBase(SerialisableModule):
         self.ln_trunk = LayerNorm(d_model, bias)
 
     def build_conditioning(self, code: torch.Tensor) -> torch.Tensor:
+        """Project a code vector to a ``(B, 1, 1, d_model)`` conditioning tensor.
+
+        The output is shaped for broadcasting over the full ``(B, T, S, D)``
+        embedding tensor, so the code is added uniformly to all time steps and
+        spatial positions.
+
+        Args:
+            code: latent code of shape ``(B, latent_dim)``.
+
+        Returns:
+            Conditioning tensor of shape ``(B, 1, 1, d_model)``.
+        """
         return self.code_proj(code).view(code.shape[0], 1, 1, self.d_model)
 
     def encode(self, history: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """Embed tokenised history, add conditioning, and run the trunk.
+
+        Args:
+            history: tokenised history of shape
+                ``(B, T, H, W)`` — long token IDs.
+            cond: conditioning tensor of shape ``(B, 1, 1, d_model)``
+                as returned by :meth:`build_conditioning`.
+
+        Returns:
+            Hidden states of shape ``(B, T, S, d_model)``.
+        """
         return self.ln_trunk(self.trunk(self.patch_embedding(history) + cond))
 
 
 class ObservableTransitionModel(TransitionBase):
-    """GENIE-style transition model: predicts next pixel observation(s).
+    """GENIE-style transition model that predicts next pixel observations.
 
-    action is broadcast-added to all history embeddings (GENIE-style).
-    Supports single-step and multi-step (teacher-forced or autoregressive) prediction.
+    Conditions the causal :class:`TransitionBase` trunk on a single latent
+    code (action ``z_act`` for LAM, or option ``z_opt`` for LOM), then
+    decodes the last hidden state to per-token logits over the vocabulary.
+
+    Supports three prediction modes:
+
+    - **Single-step** (``predict_sequence=False``): predicts the next frame
+      from the current context.
+    - **Teacher-forced sequence** (``predict_sequence=True``,
+      ``teacher_frames`` provided): predicts all ``horizon`` frames in a
+      single forward pass using ground-truth frames as decoder input.
+    - **Autoregressive sequence** (``predict_sequence=True``,
+      no ``teacher_frames``): generates frames one at a time by feeding
+      the argmax of each step back as the next input.
+
+    Args:
+        vocab_size: size of the token vocabulary.
+        obs_h: observation height in characters.
+        obs_w: observation width in characters.
+        d_model: transformer embedding dimension.
+        n_layers: number of transformer blocks.
+        n_heads: number of attention heads.
+        context_length: number of history frames.
+        latent_dim: dimensionality of the conditioning code.
+        predict_sequence: if ``True``, enables multi-step prediction.
+            Default: ``False``.
+        horizon: number of steps to predict when ``predict_sequence=True``.
+            Default: ``1``.
+        patch_size: spatial patch size. Default: ``1``.
+        dropout: dropout probability. Default: ``0.1``.
+        bias: if ``True``, adds bias to all linear layers. Default: ``False``.
+
+    Shape:
+        - Input ``history``: ``(B, context_length, H, W, 2)``
+        - Input ``code``: ``(B, latent_dim)``
+        - Output (single-step): ``(B, S, vocab_size)``
+        - Output (sequence): ``(B, horizon, S, vocab_size)``
     """
 
     def __init__(
@@ -124,24 +237,29 @@ class ObservableTransitionModel(TransitionBase):
         bias: bool = False,
     ):
         super().__init__(
-            vocab_size=vocab_size,
-            obs_h=obs_h,
-            obs_w=obs_w,
-            d_model=d_model,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            context_length=context_length,
-            latent_dim=latent_dim,
-            horizon=horizon,
-            patch_size=patch_size,
-            dropout=dropout,
-            bias=bias,
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            horizon=horizon, patch_size=patch_size, dropout=dropout, bias=bias,
         )
         self.predict_sequence = predict_sequence
         self.horizon = horizon
         self.state_head = nn.Linear(d_model, vocab_size * patch_size**2, bias=bias)
 
     def to_logits(self, hid: torch.Tensor) -> torch.Tensor:
+        """Project hidden states to per-token vocabulary logits.
+
+        When ``patch_size > 1``, the patch logits are unpacked back to the
+        original ``(H, W)`` token grid.
+
+        Args:
+            hid: hidden states of shape ``(B, S, d_model)`` or
+                ``(B, horizon, S, d_model)``.
+
+        Returns:
+            Logits of shape ``(B, S, vocab_size)`` or
+            ``(B, horizon, S, vocab_size)``.
+        """
         P = self.patch_size
         logits = self.state_head(hid)
         if P == 1:
@@ -159,6 +277,21 @@ class ObservableTransitionModel(TransitionBase):
         horizon: int = 1,
         teacher_frames: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """
+        Args:
+            history: observation history of shape
+                ``(B, context_length, H, W, 2)``.
+            code: latent conditioning code of shape ``(B, latent_dim)``.
+            horizon: number of steps to predict. Ignored when
+                ``predict_sequence=False``. Default: ``1``.
+            teacher_frames: ground-truth future frames of shape
+                ``(B, horizon, H, W, 2)`` for teacher-forced decoding.
+                ``None`` uses autoregressive decoding.
+
+        Returns:
+            Predicted logits. Shape ``(B, S, vocab_size)`` for single-step
+            prediction; ``(B, horizon, S, vocab_size)`` for sequence prediction.
+        """
         B, c = history.shape[:2]
         history = self.tokeniser(history)
         cond = self.build_conditioning(code)
@@ -184,10 +317,35 @@ class ObservableTransitionModel(TransitionBase):
 
 
 class LatentTransitionModel(TransitionBase):
-    """JEPA-style transition model: predicts next latent representation.
+    """JEPA-style transition model that predicts the next latent representation.
 
-    action is broadcast-added to all history embeddings.
-    Predicts a single target latent vector (no sequence unrolling).
+    Conditions the causal :class:`TransitionBase` trunk on a single latent
+    code (action ``z_act`` for LAM, or option ``z_opt`` for LOM), then
+    projects the last hidden state to a target latent vector.  The prediction
+    is trained against the EMA encoder output via cosine distance (JEPA loss),
+    so no pixel reconstruction is required.
+
+    Single-step only — sequence unrolling is not needed because the target is
+    a single latent vector, not a pixel sequence.
+
+    Args:
+        vocab_size: size of the token vocabulary (needed to tokenise history).
+        obs_h: observation height in characters.
+        obs_w: observation width in characters.
+        d_model: transformer embedding dimension.
+        n_layers: number of transformer blocks.
+        n_heads: number of attention heads.
+        context_length: number of history frames.
+        latent_dim: dimensionality of the conditioning code.
+        target_dim: dimensionality of the predicted latent target.
+        patch_size: spatial patch size. Default: ``1``.
+        dropout: dropout probability. Default: ``0.1``.
+        bias: if ``True``, adds bias to all linear layers. Default: ``False``.
+
+    Shape:
+        - Input ``history``: ``(B, context_length, H, W, 2)``
+        - Input ``code``: ``(B, latent_dim)``
+        - Output: ``(B, target_dim)``
     """
 
     def __init__(
@@ -206,23 +364,24 @@ class LatentTransitionModel(TransitionBase):
         bias: bool = False,
     ):
         super().__init__(
-            vocab_size=vocab_size,
-            obs_h=obs_h,
-            obs_w=obs_w,
-            d_model=d_model,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            context_length=context_length,
-            latent_dim=latent_dim,
-            horizon=1,
-            patch_size=patch_size,
-            dropout=dropout,
-            bias=bias,
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            horizon=1, patch_size=patch_size, dropout=dropout, bias=bias,
         )
         self.latent_head = nn.Linear(d_model, target_dim, bias=bias)
         self.ln_latent = LayerNorm(target_dim, bias)
 
     def forward(self, history: torch.Tensor, code: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            history: observation history of shape
+                ``(B, context_length, H, W, 2)``.
+            code: latent conditioning code of shape ``(B, latent_dim)``.
+
+        Returns:
+            Predicted latent representation of shape ``(B, target_dim)``.
+        """
         history = self.tokeniser(history)
         cond = self.build_conditioning(code)
         hid = self.encode(history, cond)
