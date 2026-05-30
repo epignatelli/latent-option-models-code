@@ -7,10 +7,7 @@ spatial + temporal attention (TimeSformer-style).
 
 from __future__ import annotations
 
-import logging
-from copy import deepcopy
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -55,20 +52,10 @@ def _get_opt_block_mask(T: int, opt_pos: int, device: torch.device) -> BlockMask
     return _opt_block_mask_cache[key]
 
 
-# --------------------------------------------------------------------------- #
-# --- Base ------------------------------------------------------------------ #
-# --------------------------------------------------------------------------- #
-
-
 class SerialisableModule(nn.Module):
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
-
-
-# --------------------------------------------------------------------------- #
-# --- Primitives ------------------------------------------------------------ #
-# --------------------------------------------------------------------------- #
-
+    
 
 class LayerNorm(nn.Module):
     """LayerNorm with optional bias (torch built-in doesn't support bias=False)."""
@@ -218,11 +205,6 @@ class PatchEmbedding(nn.Module):
         return emb
 
 
-# --------------------------------------------------------------------------- #
-# --- Spatio-Temporal Transformer ------------------------------------------- #
-# --------------------------------------------------------------------------- #
-
-
 class SpatioTemporalBlock(nn.Module):
     """Factored space-time attention: spatial first, then temporal, then MLP.
 
@@ -342,21 +324,6 @@ class SpatioTemporalTransformer(nn.Module):
         return self.ln_f(x)
 
 
-# --------------------------------------------------------------------------- #
-# --- Vector Quantizer ------------------------------------------------------ #
-# --------------------------------------------------------------------------- #
-
-
-@dataclass
-class VQConfig:
-    latent_dim: int = 64
-    num_options: int = 256
-    dropout: float = 0.1
-    entropy_weight: float = 0.01
-    vq_beta: float = 0.25
-    vq_reset_thresh: int = 100
-    ema_decay: float = 0.99
-
 
 class VectorQuantizer(nn.Module):
     """EMA VQ with cosine-distance assignment, straight-through estimator,
@@ -473,9 +440,3 @@ class VectorQuantizer(nn.Module):
 
     def lookup(self, indices: torch.Tensor) -> torch.Tensor:
         return F.normalize(self.codebook[indices], dim=-1)
-
-
-# --------------------------------------------------------------------------- #
-# --- Encoders -------------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
-
