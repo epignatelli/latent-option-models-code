@@ -65,67 +65,114 @@ class ReconstructionLOM(SerialisableModule):
         self.predict_sequence = predict_sequence
 
         self.opt_encoder = STTEncoder(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, horizon=horizon,
-            patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            horizon=horizon,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         self.opt_vq = LatentActionModel(
-            in_dim=d_model, latent_dim=latent_dim, num_options=num_options,
-            bias=bias, vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+            in_dim=d_model,
+            latent_dim=latent_dim,
+            num_options=num_options,
+            bias=bias,
+            vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
+            vq_ema_decay=vq_ema_decay,
         )
         self.act_encoder = STTEncoder(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, horizon=1, condition_dim=latent_dim,
-            patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            horizon=1,
+            condition_dim=latent_dim,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         self.act_vq = LatentActionModel(
-            in_dim=d_model, latent_dim=latent_dim, num_options=n_actions,
-            bias=bias, vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+            in_dim=d_model,
+            latent_dim=latent_dim,
+            num_options=n_actions,
+            bias=bias,
+            vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
+            vq_ema_decay=vq_ema_decay,
         )
         self.lam_dynamics = DynamicsModel(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
             predict_sequence=False,
         )
         self.lom_dynamics = DynamicsModel(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            patch_size=patch_size, dropout=dropout, bias=bias,
-            option_dim=latent_dim, predict_sequence=predict_sequence, horizon=horizon,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
+            option_dim=latent_dim,
+            predict_sequence=predict_sequence,
+            horizon=horizon,
         )
 
     def forward(
         self,
         history: torch.Tensor,  # (B, c, H, W, 2)
-        future:  torch.Tensor,  # (B, k, H, W, 2)  k=horizon; future[:,0:1] is next frame
+        future: torch.Tensor,  # (B, k, H, W, 2)  k=horizon; future[:,0:1] is next frame
     ) -> dict:
-        z_opt, vq_opt, opt_idx = self.opt_vq(self.opt_encoder(history, future))
+        z_opt, vq_opt, opt_idx = self.opt_vq(self.opt_encoder(torch.cat([history, future], dim=1)))
 
         next_frame = future[:, 0:1]
         z_act, vq_act, act_idx = self.act_vq(
-            self.act_encoder(history, next_frame, condition=z_opt.detach())
+            self.act_encoder(torch.cat([history, next_frame], dim=1), condition=z_opt.detach())
         )
 
         lam_logits = self.lam_dynamics(history, z_act)
         if self.predict_sequence:
-            lom_logits = self.lom_dynamics(history, z_act, option_code=z_opt,
-                                           horizon=self.horizon, teacher_frames=future)
+            lom_logits = self.lom_dynamics(
+                history, z_act, option_code=z_opt, horizon=self.horizon, teacher_frames=future
+            )
         else:
             lom_logits = self.lom_dynamics(history, z_act, option_code=z_opt, horizon=1)
 
         return {
             "lam_logits": lam_logits,
             "lom_logits": lom_logits,
-            "z_opt": z_opt, "z_act": z_act,
-            "opt_idx": opt_idx, "act_idx": act_idx,
-            "vq_opt": vq_opt, "vq_act": vq_act,
+            "z_opt": z_opt,
+            "z_act": z_act,
+            "opt_idx": opt_idx,
+            "act_idx": act_idx,
+            "vq_opt": vq_opt,
+            "vq_act": vq_act,
         }
 
 
@@ -171,41 +218,86 @@ class LatentLOM(SerialisableModule):
     ):
         super().__init__()
         self.opt_encoder = JEPAEncoder(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            horizon=horizon, patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            horizon=horizon,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         self.opt_vq = LatentActionModel(
-            in_dim=self.opt_encoder.out_dim, latent_dim=latent_dim, num_options=num_options,
-            bias=bias, vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+            in_dim=self.opt_encoder.out_dim,
+            latent_dim=latent_dim,
+            num_options=num_options,
+            bias=bias,
+            vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
+            vq_ema_decay=vq_ema_decay,
         )
         self.act_encoder = JEPAEncoder(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            horizon=1, patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            horizon=1,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         self.act_vq = LatentActionModel(
-            in_dim=self.act_encoder.out_dim + latent_dim, latent_dim=latent_dim,
+            in_dim=self.act_encoder.out_dim + latent_dim,
+            latent_dim=latent_dim,
             num_options=n_actions,
-            bias=bias, vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+            bias=bias,
+            vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
+            vq_ema_decay=vq_ema_decay,
         )
         self.lam_dynamics = DynamicsModel(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            patch_size=patch_size, dropout=dropout, bias=bias,
-            predict_sequence=False, predict_latent=True, target_dim=latent_dim,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
+            predict_sequence=False,
+            predict_latent=True,
+            target_dim=latent_dim,
         )
         self.lom_dynamics = DynamicsModel(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            patch_size=patch_size, dropout=dropout, bias=bias,
-            predict_sequence=False, predict_latent=True, target_dim=latent_dim,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
+            predict_sequence=False,
+            predict_latent=True,
+            target_dim=latent_dim,
         )
         self.ema_opt_enc = EMAEncoder(self.opt_encoder, decay=ema_decay)
         self.ema_act_enc = EMAEncoder(self.act_encoder, decay=ema_decay)
@@ -217,12 +309,12 @@ class LatentLOM(SerialisableModule):
     def forward(
         self,
         history: torch.Tensor,  # (B, c, H, W, 2)
-        future:  torch.Tensor,  # (B, k, H, W, 2)  k=horizon; future[:,0:1] is next frame
+        future: torch.Tensor,  # (B, k, H, W, 2)  k=horizon; future[:,0:1] is next frame
     ) -> dict:
-        z_opt, vq_opt, opt_idx = self.opt_vq(self.opt_encoder(history, future))
+        z_opt, vq_opt, opt_idx = self.opt_vq(self.opt_encoder(torch.cat([history, future], dim=1)))
 
         next_frame = future[:, 0:1]
-        act_in = torch.cat([self.act_encoder(history, next_frame), z_opt.detach()], dim=-1)
+        act_in = torch.cat([self.act_encoder(torch.cat([history, next_frame], dim=1)), z_opt.detach()], dim=-1)
         z_act, vq_act, act_idx = self.act_vq(act_in)
 
         with torch.no_grad():
@@ -233,9 +325,14 @@ class LatentLOM(SerialisableModule):
         z_opt_hat = self.lom_dynamics(history, z_opt)
 
         return {
-            "z_act_hat": z_act_hat, "z_act_target": z_act_target,
-            "z_opt_hat": z_opt_hat, "z_opt_target": z_opt_target,
-            "z_opt": z_opt, "z_act": z_act,
-            "opt_idx": opt_idx, "act_idx": act_idx,
-            "vq_opt": vq_opt, "vq_act": vq_act,
+            "z_act_hat": z_act_hat,
+            "z_act_target": z_act_target,
+            "z_opt_hat": z_opt_hat,
+            "z_opt_target": z_opt_target,
+            "z_opt": z_opt,
+            "z_act": z_act,
+            "opt_idx": opt_idx,
+            "act_idx": act_idx,
+            "vq_opt": vq_opt,
+            "vq_act": vq_act,
         }

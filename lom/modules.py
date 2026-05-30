@@ -121,8 +121,9 @@ class SelfAttention(nn.Module):
         v = v.view(B, T, self.n_heads, head_dim).transpose(1, 2)
         # T < 128 triggers the flex_decoding kernel which fails for H>1 block masks
         # (pytorch#147267). Force the regular flex_attention kernel unconditionally.
-        y = flex_attention(q, k, v, block_mask=block_mask,
-                           kernel_options={"FORCE_USE_FLEX_ATTENTION": True})
+        y = flex_attention(
+            q, k, v, block_mask=block_mask, kernel_options={"FORCE_USE_FLEX_ATTENTION": True}
+        )
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.c_proj(y))
 
@@ -243,9 +244,12 @@ class SpatioTemporalBlock(nn.Module):
         self.ln_s = LayerNorm(d_model, bias)
         self.ln_t = LayerNorm(d_model, bias)
         self.ln_m = LayerNorm(d_model, bias)
-        self.spatial_attn  = BidirectionalAttention(d_model, n_heads, dropout, bias)
-        self.temporal_attn = CausalAttention(d_model, n_heads, dropout, bias) if causal_temporal \
+        self.spatial_attn = BidirectionalAttention(d_model, n_heads, dropout, bias)
+        self.temporal_attn = (
+            CausalAttention(d_model, n_heads, dropout, bias)
+            if causal_temporal
             else BidirectionalAttention(d_model, n_heads, dropout, bias)
+        )
         self.mlp = MLP(d_model, dropout, bias)
 
     def forward(self, x: torch.Tensor, temporal_mask: BlockMask | None = None) -> torch.Tensor:
@@ -514,42 +518,39 @@ class STTEncoder(nn.Module):
         )
         self.opt_token = nn.Parameter(torch.randn(1, 1, S, d_model) * 0.02)
         self.transformer = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
             n_spatial_positions=S,
             max_temporal_len=context_length + 1 + horizon,
-            dropout=dropout, bias=bias, causal_temporal=False,
+            dropout=dropout,
+            bias=bias,
+            causal_temporal=False,
         )
 
     @property
     def out_dim(self) -> int:
         return self.d_model
 
-    def _build_block_mask(self, c: int, k: int, device: torch.device) -> BlockMask:
-        return _get_opt_block_mask(c + 1 + k, c, device)
-
     def forward(
         self,
-        history: torch.Tensor,
-        future: torch.Tensor,
+        x: torch.Tensor,              # (B, context_length + horizon, H, W, 2)
         condition: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        B, c = history.shape[:2]
-        history = self.tokeniser(history)
-        future = self.tokeniser(future)
-        if future.ndim == 3:
-            future = future.unsqueeze(1)
-        k = future.shape[1]
+        B, c = x.shape[0], self.context_length
+        emb = self.embed(self.tokeniser(x))   # (B, c+k, S, D) — one tokenise + embed
+        k = emb.shape[1] - c
 
-        hist_emb = self.embed(history)
-        fut_emb = self.embed(future)
-        opt_emb = self.opt_token.expand(B, 1, self.S, self.d_model)
+        hist_emb = emb[:, :c]
+        fut_emb  = emb[:, c:]
+        opt_emb  = self.opt_token.expand(B, 1, self.S, self.d_model)
 
         if condition is not None and self.cond_proj is not None:
             fut_emb = fut_emb + self.cond_proj(condition).view(B, 1, 1, self.d_model)
         seq = torch.cat([hist_emb, opt_emb, fut_emb], dim=1)
 
-        hidden = self.transformer(seq, temporal_mask=self._build_block_mask(c, k, seq.device))
-        return hidden[:, c, :, :].mean(dim=1)  # (B, D) — OPT is always at position c
+        hidden = self.transformer(seq, temporal_mask=_get_opt_block_mask(c + 1 + k, c, seq.device))
+        return hidden[:, c, :, :].mean(dim=1)  # (B, D)
 
 
 class JEPAEncoder(nn.Module):
@@ -583,20 +584,31 @@ class JEPAEncoder(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.latent_dim = latent_dim
+        self.context_length = context_length
 
         self.tokeniser = ScreenTokeniser()
         self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
         S = self.S = self.embed.n_tokens
 
         self.past_encoder = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=context_length,
-            dropout=dropout, bias=bias, causal_temporal=True,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=context_length,
+            dropout=dropout,
+            bias=bias,
+            causal_temporal=True,
         )
         self.future_encoder = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=horizon,
-            dropout=dropout, bias=bias, causal_temporal=True,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=horizon,
+            dropout=dropout,
+            bias=bias,
+            causal_temporal=True,
         )
         self.proj_target = nn.Linear(d_model, latent_dim, bias=bias)
         self.ln_target = LayerNorm(latent_dim, bias)
@@ -614,21 +626,12 @@ class JEPAEncoder(nn.Module):
         pooled = out[:, -1, :, :].mean(dim=1)
         return self.ln_target(self.proj_target(pooled))
 
-    def forward(
-        self,
-        history: torch.Tensor,
-        future: torch.Tensor,
-        condition: Optional[torch.Tensor] = None,  # unused; kept for API compat
-    ) -> torch.Tensor:
-        history = self.tokeniser(history)
-        future = self.tokeniser(future)
-        if future.ndim == 3:
-            future = future.unsqueeze(1)
-
-        hist_emb = self.embed(history)
-        ctx_pooled = self.past_encoder(hist_emb)[:, -1, :, :].mean(dim=1)
-        fut_emb = self.embed(future)
-        tgt_pooled = self.future_encoder(fut_emb)[:, -1, :, :].mean(dim=1)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, context_length + horizon, H, W, 2) — one tokenise + embed
+        emb = self.embed(self.tokeniser(x))          # (B, c+k, S, D)
+        c = self.context_length
+        ctx_pooled = self.past_encoder(emb[:, :c])[:, -1, :, :].mean(dim=1)
+        tgt_pooled = self.future_encoder(emb[:, c:])[:, -1, :, :].mean(dim=1)
         return torch.cat([ctx_pooled, tgt_pooled], dim=-1)
 
 
@@ -684,11 +687,14 @@ class LatentActionModel(SerialisableModule):
     ):
         super().__init__()
         self.proj = nn.Linear(in_dim, latent_dim, bias=bias)
-        self.ln   = LayerNorm(latent_dim, bias)
-        self.vq   = VectorQuantizer(
-            latent_dim=latent_dim, num_options=num_options,
-            dropout=vq_dropout, entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh,
+        self.ln = LayerNorm(latent_dim, bias)
+        self.vq = VectorQuantizer(
+            latent_dim=latent_dim,
+            num_options=num_options,
+            dropout=vq_dropout,
+            entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
             ema_decay=vq_ema_decay,
         )
 
@@ -728,8 +734,9 @@ class DynamicsModel(SerialisableModule):
         bias: bool = False,
     ):
         super().__init__()
-        assert not (predict_latent and target_dim is None), \
-            "target_dim is required when predict_latent=True"
+        assert not (
+            predict_latent and target_dim is None
+        ), "target_dim is required when predict_latent=True"
         self.vocab_size = vocab_size
         self.obs_h = obs_h
         self.obs_w = obs_w
@@ -758,9 +765,14 @@ class DynamicsModel(SerialisableModule):
             nn.Linear(option_dim, d_model, bias=bias) if option_dim is not None else None
         )
         self.trunk = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=max_temporal_len,
-            dropout=dropout, bias=bias, causal_temporal=True,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=max_temporal_len,
+            dropout=dropout,
+            bias=bias,
+            causal_temporal=True,
         )
         self.ln_trunk = LayerNorm(d_model, bias)
         if predict_latent:

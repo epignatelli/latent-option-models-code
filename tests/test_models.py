@@ -84,46 +84,38 @@ def make_encoder(cls, horizon=1, condition_dim=None):
     return cls(**kwargs)
 
 
+def sequence(k=1):
+    return _screen(BATCH, CONTEXT + k)
+
+
 @torch.no_grad()
 def test_bidirectional_encoder_shape():
     enc = make_encoder(STTEncoder)
-    out = enc(history(), single_frame())
-    assert out.shape == (BATCH, D_MODEL)
+    assert enc(sequence()).shape == (BATCH, D_MODEL)
 
 
 @torch.no_grad()
 def test_bidirectional_encoder_sequence():
     enc = make_encoder(STTEncoder, horizon=HORIZON)
-    out = enc(history(), frame_sequence(HORIZON))
-    assert out.shape == (BATCH, D_MODEL)
+    assert enc(sequence(HORIZON)).shape == (BATCH, D_MODEL)
 
 
 @torch.no_grad()
 def test_bidirectional_encoder_with_condition():
     enc = make_encoder(STTEncoder, condition_dim=LATENT_DIM)
-    out = enc(history(), single_frame(), condition=torch.randn(BATCH, LATENT_DIM))
-    assert out.shape == (BATCH, D_MODEL)
+    assert enc(sequence(), condition=torch.randn(BATCH, LATENT_DIM)).shape == (BATCH, D_MODEL)
 
 
 @torch.no_grad()
 def test_independent_encoder_shape():
     enc = make_encoder(JEPAEncoder)
-    out = enc(history(), single_frame())
-    assert out.shape == (BATCH, 2 * D_MODEL)
+    assert enc(sequence()).shape == (BATCH, 2 * D_MODEL)
 
 
 @torch.no_grad()
 def test_independent_encoder_sequence():
     enc = make_encoder(JEPAEncoder, horizon=HORIZON)
-    out = enc(history(), frame_sequence(HORIZON))
-    assert out.shape == (BATCH, 2 * D_MODEL)
-
-
-@torch.no_grad()
-def test_independent_encoder_with_condition():
-    enc = make_encoder(JEPAEncoder, condition_dim=LATENT_DIM)
-    out = enc(history(), single_frame(), condition=torch.randn(BATCH, LATENT_DIM))
-    assert out.shape == (BATCH, 2 * D_MODEL)
+    assert enc(sequence(HORIZON)).shape == (BATCH, 2 * D_MODEL)
 
 
 
