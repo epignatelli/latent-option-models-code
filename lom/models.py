@@ -99,9 +99,6 @@ class ReconstructionLOM(SerialisableModule):
         self.lom_dynamics = DynamicsModel(**dyn_base, option_dim=latent_dim,
                                           predict_sequence=predict_sequence, horizon=horizon)
 
-    def num_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters())
-
     def forward(
         self,
         history: torch.Tensor,  # (B, c, H, W, 2)
@@ -212,9 +209,6 @@ class LatentLOM(SerialisableModule):
         # EMA target encoders
         self.ema_opt_enc  = EMAEncoder(self.opt_encoder, decay=ema_decay)
         self.ema_act_enc  = EMAEncoder(self.act_encoder, decay=ema_decay)
-
-    def num_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters())
 
     def update_ema(self) -> None:
         self.ema_opt_enc.update(self.opt_encoder)
