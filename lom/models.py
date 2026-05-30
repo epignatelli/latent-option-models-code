@@ -6,21 +6,16 @@ Two concrete model variants, each self-contained:
   LatentLOM         — JEPA encoders + latent-space dynamics (EMA targets)
 
 Both take (history, future) and return a dict of predictions and VQ info.
-All building blocks (encoders, VQ, dynamics) live in lom.modules.
+All building blocks live in lom.encoders and lom.lam.
 """
 
 from __future__ import annotations
 
 import torch
 
-from .modules import (
-    DynamicsModel,
-    EMAEncoder,
-    JEPAEncoder,
-    LatentActionModel,
-    SerialisableModule,
-    STTEncoder,
-)
+from .encoders import EMAEncoder, JEPAEncoder, STTEncoder
+from .lam import DynamicsModel, LatentActionModel
+from .modules import SerialisableModule
 
 
 class ReconstructionLOM(SerialisableModule):
