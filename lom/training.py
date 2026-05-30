@@ -626,3 +626,173 @@ class JEPALAMTrainer(Trainer):
         log.info("=== JEPA training complete (%d steps) ===", t.max_iters)
         if self.wandb_run:
             self.wandb_run.finish()
+
+
+# --------------------------------------------------------------------------- #
+# --- JEPA LOM Trainer ------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+
+class JEPALOMTrainer(Trainer):
+    """LOM trainer with JEPA latent prediction for both dynamics models.
+
+    Both lam_dynamics and lom_dynamics predict in latent space (cosine distance
+    to EMA target encoder outputs) instead of doing pixel-level reconstruction.
+    This eliminates the two 144M pixel prediction heads, cutting total params
+    from ~311M to ~50M for the JEPA-compute backbone.
+
+    - option_lam:      JEPAEncoder; encodes (history, sequence) → z_opt
+    - action_lam:      JEPAEncoder; encodes (history, next_frame, z_opt) → z_act
+    - ema_option_enc:  EMA of option_lam.encoder; encodes sequence → z_opt_target
+    - ema_action_enc:  EMA of action_lam.encoder; encodes next_frame → z_act_target
+    - lam_dynamics:    predict z_act_target from (history, z_act)
+    - lom_dynamics:    predict z_opt_target from (history, z_act, option_code=z_opt)
+    """
+
+    def build_models(self) -> nn.ModuleDict:
+        e, m, d = self.cfg.env, self.cfg.model, self.cfg.data
+        base = dict(
+            vocab_size=e.vocab_size,
+            obs_h=e.obs_h,
+            obs_w=e.obs_w,
+            d_model=m.d_model,
+            n_layers=m.n_layers,
+            n_heads=m.n_heads,
+            context_length=m.context_length,
+            latent_dim=m.latent_dim,
+            patch_size=m.patch_size,
+            dropout=m.dropout,
+            bias=m.bias,
+        )
+        vq = dict(
+            vq_dropout=m.vq_dropout,
+            vq_entropy_weight=m.vq_entropy_weight,
+            vq_beta=m.vq_beta,
+            vq_reset_thresh=m.vq_reset_thresh,
+            vq_ema_decay=m.vq_ema_decay,
+        )
+        option_lam = LatentActionModel(
+            **base, codebook_size=m.num_options, horizon=d.horizon,
+            two_encoder=True, **vq,
+        )
+        action_lam = LatentActionModel(
+            **base, codebook_size=e.n_actions, horizon=1,
+            condition_dim=m.latent_dim, two_encoder=True, **vq,
+        )
+        lam_dynamics = DynamicsModel(
+            **base, predict_sequence=False,
+            predict_latent=True, target_dim=m.latent_dim,
+        )
+        lom_dynamics = DynamicsModel(
+            **base, option_dim=m.latent_dim,
+            predict_sequence=m.predict_sequence, horizon=d.horizon,
+            predict_latent=True, target_dim=m.latent_dim,
+        )
+        return nn.ModuleDict({
+            "option_lam":     option_lam,
+            "action_lam":     action_lam,
+            "lam_dynamics":   lam_dynamics,
+            "lom_dynamics":   lom_dynamics,
+            "ema_action_enc": EMAEncoder(action_lam.encoder, decay=m.ema_decay),  # type: ignore[arg-type]
+            "ema_option_enc": EMAEncoder(option_lam.encoder, decay=m.ema_decay),  # type: ignore[arg-type]
+        })
+
+    def step(self, batch: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+        history, next_frame, _, sequence = batch[0], batch[1], batch[2], batch[3]
+
+        z_opt, vq_opt, _ = self.models["option_lam"](history, sequence)
+        z_act, vq_act, _ = self.models["action_lam"](history, next_frame, z_opt.detach())
+
+        with torch.no_grad():
+            z_act_target = self.models["ema_action_enc"].encode(next_frame)
+            z_opt_target = self.models["ema_option_enc"].encode(sequence)
+
+        z_act_hat = self.models["lam_dynamics"](history, z_act)
+        z_opt_hat = self.models["lom_dynamics"](history, z_act, option_code=z_opt)
+
+        lam_jepa = jepa_loss(z_act_hat, z_act_target)
+        lom_jepa = jepa_loss(z_opt_hat, z_opt_target)
+        total = lam_jepa + lom_jepa + vq_opt["vq_loss"] + vq_act["vq_loss"]
+        return {
+            "lam_jepa_loss":      lam_jepa,
+            "lom_jepa_loss":      lom_jepa,
+            "vq_loss_option":     vq_opt["vq_loss"],
+            "vq_loss_action":     vq_act["vq_loss"],
+            "commit_loss_option": vq_opt["commit_loss"],
+            "commit_loss_action": vq_act["commit_loss"],
+            "entropy_option":     vq_opt["entropy"],
+            "entropy_action":     vq_act["entropy"],
+            "total_loss":         total,
+        }
+
+    def train(self) -> None:
+        """Extends base train loop with EMA updates for both encoders."""
+        t = self.cfg.train
+        log.info("--- JEPA-LOM training start  steps=%d  ema_decay=%.4f ---",
+                 t.max_iters, self.cfg.model.ema_decay)
+
+        for mod in self.models.values():
+            mod.train()
+        self.models["ema_action_enc"].eval()
+        self.models["ema_option_enc"].eval()
+
+        data_iter = iter(self.train_loader)
+        t0 = time.time()
+
+        for s in range(self.start_step, t.max_iters):
+            try:
+                batch = next(data_iter)
+            except StopIteration:
+                data_iter = iter(self.train_loader)
+                batch = next(data_iter)
+
+            batch = [x.to(self.device) for x in batch]
+            lr = get_lr(s, t.lr, t.warmup_iters, t.max_iters, t.eta_min)
+            for pg in self.optimizer.param_groups:
+                pg["lr"] = lr
+
+            with self.ctx:
+                loss_dict = self.step(batch)
+
+            self.scaler.scale(loss_dict["total_loss"]).backward()
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.models.parameters(), t.grad_clip)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad(set_to_none=True)
+
+            self.models["ema_action_enc"].update(self.models["action_lam"].encoder)
+            self.models["ema_option_enc"].update(self.models["option_lam"].encoder)
+
+            if (s + 1) % t.log_interval == 0:
+                dt = time.time() - t0
+                sps = t.log_interval * t.batch_size / dt
+                pct = 100.0 * (s + 1) / t.max_iters
+                log.info(
+                    "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | %.0f samp/s",
+                    s + 1, t.max_iters, pct,
+                    loss_dict["total_loss"].item(),
+                    "  ".join(
+                        f"{k}={v.item():.4f}" for k, v in loss_dict.items() if k != "total_loss"
+                    ),
+                    lr,
+                    sps,
+                )
+                t0 = time.time()
+                if self.wandb_run:
+                    self.wandb_run.log(
+                        {f"train/{k}": v.item() for k, v in loss_dict.items()} | {"lr": lr},
+                        step=s + 1,
+                    )
+
+            if (s + 1) % t.eval_interval == 0:
+                log.info("  [eval] running %d val batches ...", t.eval_iters)
+                val_metrics = self.eval()
+                log.info("  [val]  %s", "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items()))
+                if self.wandb_run:
+                    self.wandb_run.log({f"val/{k}": v for k, v in val_metrics.items()}, step=s + 1)
+                self.save_checkpoint(s + 1)
+
+        log.info("=== JEPA-LOM training complete (%d steps) ===", t.max_iters)
+        if self.wandb_run:
+            self.wandb_run.finish()

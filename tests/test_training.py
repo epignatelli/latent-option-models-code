@@ -9,7 +9,7 @@ needs_cuda = pytest.mark.skipif(
 )
 
 from lom.config import LAMCfg, LOMCfg, LOMModelCfg, ModelCfg, DataCfg, EnvCfg, TrainCfg
-from lom.training import JEPALAMTrainer, LAMTrainer, LOMTrainer, get_lr, jepa_loss, reconstruction_loss
+from lom.training import JEPALAMTrainer, JEPALOMTrainer, LAMTrainer, LOMTrainer, get_lr, jepa_loss, reconstruction_loss
 
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 
@@ -227,4 +227,41 @@ def test_jepa_lam_step_backward():
     trainer = jepa_lam_trainer()
     trainer.models = trainer.models.cuda()
     out = trainer.step([t.cuda() for t in lam_batch()])
+    out["total_loss"].backward()
+
+
+# --------------------------------------------------------------------------- #
+# --- JEPALOMTrainer -------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+
+def jepa_lom_trainer():
+    cfg = LOMCfg(env=make_env_cfg(), model=make_lom_model_cfg(), data=make_data_cfg())
+    cfg.model.two_encoder = True
+    trainer = object.__new__(JEPALOMTrainer)
+    trainer.cfg = cfg
+    trainer.models = trainer.build_models().eval()
+    return trainer
+
+
+@torch.no_grad()
+def test_jepa_lom_step_keys():
+    trainer = jepa_lom_trainer()
+    out = trainer.step(lom_batch())
+    assert {"lam_jepa_loss", "lom_jepa_loss", "vq_loss_option", "vq_loss_action",
+            "commit_loss_option", "commit_loss_action",
+            "entropy_option", "entropy_action", "total_loss"} == set(out.keys())
+
+
+@torch.no_grad()
+def test_jepa_lom_step_loss_finite():
+    trainer = jepa_lom_trainer()
+    out = trainer.step(lom_batch())
+    assert out["total_loss"].isfinite()
+
+
+@needs_cuda
+def test_jepa_lom_step_backward():
+    trainer = jepa_lom_trainer()
+    trainer.models = trainer.models.cuda()
+    out = trainer.step([t.cuda() for t in lom_batch()])
     out["total_loss"].backward()
