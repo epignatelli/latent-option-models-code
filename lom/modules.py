@@ -1,8 +1,12 @@
-"""Core building blocks: Spatio-Temporal Transformer and Vector Quantizer.
+"""Primitives only: low-level building blocks shared across encoders and transition models.
 
-Architecture mirrors the latent-molecule-generation codebase, extended to
-handle spatiotemporal observation sequences (T, H, W) via factored
-spatial + temporal attention (TimeSformer-style).
+Nothing here is a full model or encoder. Contents:
+  - Block mask helpers (causal, OPT-token)
+  - SerialisableModule, LayerNorm, MLP
+  - SelfAttention / CausalAttention / BidirectionalAttention
+  - PatchEmbedding
+  - SpatioTemporalBlock / SpatioTemporalTransformer
+  - VectorQuantizer
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ def causal_mask_mod(
     return q >= kv
 
 
-def get_causal_block_mask(T: int, device: torch.device) -> BlockMask:
+def causal_mask_cache(T: int, device: torch.device) -> BlockMask:
     key = (T, str(device))
     if key not in causal_block_mask_cache:
         causal_block_mask_cache[key] = create_block_mask(
@@ -37,7 +41,7 @@ def get_causal_block_mask(T: int, device: torch.device) -> BlockMask:
     return causal_block_mask_cache[key]
 
 
-def get_opt_block_mask(T: int, opt_pos: int, device: torch.device) -> BlockMask:
+def bidirectional_mask_cache(T: int, opt_pos: int, device: torch.device) -> BlockMask:
     key = (T, opt_pos, str(device))
     if key not in opt_block_mask_cache:
 
@@ -70,16 +74,19 @@ class LayerNorm(nn.Module):
 class MLP(nn.Module):
     def __init__(self, d_model: int, dropout: float = 0.0, bias: bool = False):
         super().__init__()
-        self.fc1 = nn.Linear(d_model, 4 * d_model, bias=bias)
-        self.act = nn.GELU()
-        self.fc2 = nn.Linear(4 * d_model, d_model, bias=bias)
-        self.drop = nn.Dropout(dropout)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model, bias=bias),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * d_model, d_model, bias=bias),
+            nn.Dropout(dropout),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.drop(self.fc2(self.act(self.fc1(x))))
+        return self.mlp(x)
 
 
-class SelfAttention(nn.Module):
+class BidirectionalAttention(nn.Module):
     """Multi-head self-attention using flex_attention."""
 
     def __init__(
@@ -97,7 +104,7 @@ class SelfAttention(nn.Module):
         self.n_heads = n_heads
         self.d_model = d_model
 
-    def attend(self, x: torch.Tensor, block_mask: BlockMask | None) -> torch.Tensor:
+    def attend(self, x: torch.Tensor, block_mask: BlockMask | None = None) -> torch.Tensor:
         B, T, C = x.shape
         head_dim = C // self.n_heads
         q, k, v = self.c_attn(x).split(self.d_model, dim=2)
@@ -116,18 +123,11 @@ class SelfAttention(nn.Module):
         raise NotImplementedError
 
 
-class CausalAttention(SelfAttention):
+class CausalAttention(BidirectionalAttention):
     """Self-attention with a causal mask (decoder-only)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.attend(x, get_causal_block_mask(x.shape[1], x.device))
-
-
-class BidirectionalAttention(SelfAttention):
-    """Full (non-causal) self-attention."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.attend(x, None)
+        return self.attend(x, causal_mask_cache(x.shape[1], x.device))
 
 
 class PatchEmbedding(nn.Module):
