@@ -93,11 +93,7 @@ class MLP(nn.Module):
 
 
 class SelfAttention(nn.Module):
-    """Multi-head self-attention using flex_attention on CUDA, SDPA fallback on CPU.
-
-    block_mask: a BlockMask produced by create_block_mask() for structural sparsity
-    (causal, OPT-token masking, etc.).  Pass None for full bidirectional attention.
-    """
+    """Multi-head self-attention base using flex_attention (CUDA) / SDPA (CPU)."""
 
     def __init__(
         self,
@@ -105,7 +101,6 @@ class SelfAttention(nn.Module):
         n_heads: int,
         dropout: float = 0.0,
         bias: bool = False,
-        causal: bool = False,
     ):
         super().__init__()
         assert d_model % n_heads == 0
@@ -114,25 +109,39 @@ class SelfAttention(nn.Module):
         self.resid_drop = nn.Dropout(dropout)
         self.n_heads = n_heads
         self.d_model = d_model
-        self.causal = causal
 
-    def forward(self, x: torch.Tensor, block_mask: BlockMask | None = None) -> torch.Tensor:
+    def _attend(self, x: torch.Tensor, block_mask: BlockMask | None) -> torch.Tensor:
         B, T, C = x.shape
         head_dim = C // self.n_heads
         q, k, v = self.c_attn(x).split(self.d_model, dim=2)
         q = q.view(B, T, self.n_heads, head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_heads, head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_heads, head_dim).transpose(1, 2)
-
-        if self.causal and block_mask is None:
-            block_mask = _get_causal_block_mask(T, x.device)
         # T < 128 triggers the flex_decoding kernel which fails for H>1 block masks
         # (pytorch#147267). Force the regular flex_attention kernel unconditionally.
         y = flex_attention(q, k, v, block_mask=block_mask,
                            kernel_options={"FORCE_USE_FLEX_ATTENTION": True})
-
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.c_proj(y))
+
+    def forward(self, x: torch.Tensor, block_mask: BlockMask | None = None) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class CausalAttention(SelfAttention):
+    """Self-attention with an auto-built causal mask (decoder-only)."""
+
+    def forward(self, x: torch.Tensor, block_mask: BlockMask | None = None) -> torch.Tensor:
+        if block_mask is None:
+            block_mask = _get_causal_block_mask(x.shape[1], x.device)
+        return self._attend(x, block_mask)
+
+
+class BidirectionalAttention(SelfAttention):
+    """Full (non-causal) self-attention; block_mask for structural sparsity."""
+
+    def forward(self, x: torch.Tensor, block_mask: BlockMask | None = None) -> torch.Tensor:
+        return self._attend(x, block_mask)
 
 
 # --------------------------------------------------------------------------- #
@@ -161,8 +170,9 @@ class SpatioTemporalBlock(nn.Module):
         self.ln_s = LayerNorm(d_model, bias)
         self.ln_t = LayerNorm(d_model, bias)
         self.ln_m = LayerNorm(d_model, bias)
-        self.spatial_attn = SelfAttention(d_model, n_heads, dropout, bias, causal=False)
-        self.temporal_attn = SelfAttention(d_model, n_heads, dropout, bias, causal=causal_temporal)
+        self.spatial_attn  = BidirectionalAttention(d_model, n_heads, dropout, bias)
+        self.temporal_attn = CausalAttention(d_model, n_heads, dropout, bias) if causal_temporal \
+            else BidirectionalAttention(d_model, n_heads, dropout, bias)
         self.mlp = MLP(d_model, dropout, bias)
 
     def forward(self, x: torch.Tensor, temporal_mask: BlockMask | None = None) -> torch.Tensor:
