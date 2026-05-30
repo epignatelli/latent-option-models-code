@@ -503,21 +503,20 @@ class STTEncoder(nn.Module):
         self.d_model = d_model
         self.context_length = context_length
         self.horizon = horizon
-        self.has_condition = condition_dim is not None
 
         self.tokeniser = ScreenTokeniser()
         self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
         S = self.S = self.embed.n_tokens
 
-        extra = 1 if self.has_condition else 0
+        # bridges latent_dim → d_model when the two differ (e.g. 512 → 256)
         self.cond_proj = (
-            nn.Linear(condition_dim, d_model, bias=bias) if self.has_condition else None
+            nn.Linear(condition_dim, d_model, bias=bias) if condition_dim is not None else None
         )
         self.opt_token = nn.Parameter(torch.randn(1, 1, S, d_model) * 0.02)
         self.transformer = SpatioTemporalTransformer(
             d_model=d_model, n_layers=n_layers, n_heads=n_heads,
             n_spatial_positions=S,
-            max_temporal_len=context_length + extra + 1 + horizon,
+            max_temporal_len=context_length + 1 + horizon,
             dropout=dropout, bias=bias, causal_temporal=False,
         )
 
@@ -528,9 +527,8 @@ class STTEncoder(nn.Module):
     def _build_block_mask(self, c: int, k: int, device: torch.device) -> BlockMask | None:
         if device.type != "cuda":
             return None
-        extra = 1 if self.has_condition else 0
-        T = c + extra + 1 + k
-        opt_pos = c + extra
+        T = c + 1 + k
+        opt_pos = c
         return _get_opt_block_mask(T, opt_pos, device)
 
     def forward(
@@ -550,20 +548,12 @@ class STTEncoder(nn.Module):
         fut_emb = self.embed(future)
         opt_emb = self.opt_token.expand(B, 1, self.S, self.d_model)
 
-        parts = [hist_emb]
+        seq = torch.cat([hist_emb, opt_emb, fut_emb], dim=1)
         if condition is not None and self.cond_proj is not None:
-            cond_tok = (
-                self.cond_proj(condition)
-                .view(B, 1, 1, self.d_model)
-                .expand(B, 1, self.S, self.d_model)
-            )
-            parts.append(cond_tok)
-        parts += [opt_emb, fut_emb]
+            seq = seq + self.cond_proj(condition).view(B, 1, 1, self.d_model)
 
-        seq = torch.cat(parts, dim=1)
         hidden = self.transformer(seq, temporal_mask=self._build_block_mask(c, k, seq.device))
-        opt_pos = c + (1 if self.has_condition else 0)
-        return hidden[:, opt_pos, :, :].mean(dim=1)  # (B, D)
+        return hidden[:, c, :, :].mean(dim=1)  # (B, D) — OPT is always at position c
 
 
 class JEPAEncoder(nn.Module):
