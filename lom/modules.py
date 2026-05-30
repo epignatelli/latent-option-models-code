@@ -69,7 +69,7 @@ class LayerNorm(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, d_model: int, dropout: float = 0.0, bias: bool = False):
+    def __init__(self, d_model: int, dropout: float = 0.1, bias: bool = False):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(d_model, 4 * d_model, bias=bias),
@@ -90,7 +90,7 @@ class BidirectionalAttention(nn.Module):
         self,
         d_model: int,
         n_heads: int,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
         bias: bool = False,
     ):
         super().__init__()
@@ -206,14 +206,14 @@ class SpatioTemporalBlock(nn.Module):
     Spatial attention attends over the H*W spatial positions within each
     time step (always bidirectional).  Temporal attention attends over T
     time steps for each spatial position (causal or bidirectional depending
-    on `causal_temporal`).
+    on `causal`).
     """
 
     def __init__(
         self,
         d_model: int,
         n_heads: int,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
         bias: bool = False,
         causal: bool = False,
     ):
@@ -276,7 +276,7 @@ class SpatioTemporalTransformer(nn.Module):
         n_heads: int,
         n_spatial_positions: int,
         max_temporal_len: int,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
         bias: bool = False,
         causal: bool = False,
     ):

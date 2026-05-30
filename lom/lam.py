@@ -66,7 +66,7 @@ class TransitionBase(SerialisableModule):
         option_dim: Optional[int] = None,
         horizon: int = 1,
         patch_size: int = 1,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
         bias: bool = False,
     ):
         super().__init__()
@@ -78,21 +78,28 @@ class TransitionBase(SerialisableModule):
         self.patch_size = patch_size
 
         self.tokeniser = ScreenTokeniser()
-        self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
-        self.S = self.embed.n_tokens
+        self.patch_embedding = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
+        self.S = self.patch_embedding.n_tokens
 
         self.action_proj = nn.Linear(latent_dim, d_model, bias=bias)
         self.goal_proj = (
             nn.Linear(option_dim, d_model, bias=bias) if option_dim is not None else None
         )
         self.trunk = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=self.S, max_temporal_len=context_length + horizon - 1,
-            dropout=dropout, bias=bias, causal_temporal=True,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=self.S,
+            max_temporal_len=context_length + horizon - 1,
+            dropout=dropout,
+            bias=bias,
+            causal=True,
         )
         self.ln_trunk = LayerNorm(d_model, bias)
 
-    def build_conditioning(self, action: torch.Tensor, option_code: Optional[torch.Tensor]) -> torch.Tensor:
+    def build_conditioning(
+        self, action: torch.Tensor, option_code: Optional[torch.Tensor]
+    ) -> torch.Tensor:
         c = self.action_proj(action)
         if option_code is not None and self.goal_proj is not None:
             c = c + self.goal_proj(option_code)
@@ -100,7 +107,7 @@ class TransitionBase(SerialisableModule):
 
     def encode(self, history: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         """Embed tokenised history and add action conditioning."""
-        return self.ln_trunk(self.trunk(self.embed(history) + cond))
+        return self.ln_trunk(self.trunk(self.patch_embedding(history) + cond))
 
 
 class ObservableTransitionModel(TransitionBase):
@@ -124,15 +131,23 @@ class ObservableTransitionModel(TransitionBase):
         predict_sequence: bool = False,
         horizon: int = 1,
         patch_size: int = 1,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
         bias: bool = False,
     ):
         super().__init__(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            option_dim=option_dim, horizon=horizon,
-            patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            option_dim=option_dim,
+            horizon=horizon,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         self.predict_sequence = predict_sequence
         self.horizon = horizon
@@ -200,14 +215,22 @@ class LatentTransitionModel(TransitionBase):
         latent_dim: int,
         target_dim: int,
         patch_size: int = 1,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
         bias: bool = False,
     ):
         super().__init__(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            horizon=1, patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            horizon=1,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         self.latent_head = nn.Linear(d_model, target_dim, bias=bias)
         self.ln_latent = LayerNorm(target_dim, bias)

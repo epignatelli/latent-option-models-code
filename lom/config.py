@@ -27,7 +27,7 @@ class ModelCfg:
     two_encoder: bool = False  # True: JEPAEncoder (separate context/target passes)
     ema_decay: float = 0.996   # EMA decay for the target encoder in JEPA training
     patch_size: int = 1
-    dropout: float = 0.0
+    dropout: float = 0.1
     bias: bool = False
 
     def __post_init__(self) -> None:

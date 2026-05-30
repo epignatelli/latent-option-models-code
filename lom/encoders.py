@@ -12,7 +12,7 @@ from .modules import (
     LayerNorm,
     PatchEmbedding,
     SpatioTemporalTransformer,
-    get_opt_block_mask,
+    bidirectional_mask_cache,
 )
 from .tokeniser import ScreenTokeniser
 
@@ -38,7 +38,7 @@ class STTEncoder(nn.Module):
         horizon: int = 1,
         patch_size: int = 1,
         condition_dim: Optional[int] = None,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
         bias: bool = False,
     ):
         super().__init__()
@@ -63,7 +63,7 @@ class STTEncoder(nn.Module):
             max_temporal_len=context_length + 1 + horizon,
             dropout=dropout,
             bias=bias,
-            causal_temporal=False,
+            causal=False,
         )
 
     @property
@@ -87,7 +87,7 @@ class STTEncoder(nn.Module):
             fut_emb = fut_emb + self.cond_proj(condition).view(B, 1, 1, self.d_model)
         seq = torch.cat([hist_emb, opt_emb, fut_emb], dim=1)
 
-        hidden = self.transformer(seq, temporal_mask=get_opt_block_mask(c + 1 + k, c, seq.device))
+        hidden = self.transformer(seq, temporal_mask=bidirectional_mask_cache(c + 1 + k, c, seq.device))
         return hidden[:, c, :, :].mean(dim=1)  # (B, D)
 
 
@@ -115,7 +115,7 @@ class JEPAEncoder(nn.Module):
         latent_dim: int,
         horizon: int = 1,
         patch_size: int = 1,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
         bias: bool = False,
         **_kwargs,
     ):
@@ -136,7 +136,7 @@ class JEPAEncoder(nn.Module):
             max_temporal_len=context_length,
             dropout=dropout,
             bias=bias,
-            causal_temporal=True,
+            causal=True,
         )
         self.future_encoder = SpatioTemporalTransformer(
             d_model=d_model,
@@ -146,7 +146,7 @@ class JEPAEncoder(nn.Module):
             max_temporal_len=horizon,
             dropout=dropout,
             bias=bias,
-            causal_temporal=True,
+            causal=True,
         )
         self.proj_target = nn.Linear(d_model, latent_dim, bias=bias)
         self.ln_target = LayerNorm(latent_dim, bias)
