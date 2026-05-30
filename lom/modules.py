@@ -590,7 +590,7 @@ class VectorQuantizer(nn.Module):
         dist = -self.drop(torch.matmul(z_norm, cb_norm.T))  # (N, K)
 
         indices = dist.argmin(dim=-1)
-        z_hard = F.normalize(self.codebook[indices], dim=-1)
+        z_hard = cb_norm[indices]  # already normalised above; no second normalize needed
 
         if self.training:
             with torch.no_grad():
@@ -627,15 +627,15 @@ class VectorQuantizer(nn.Module):
                             self.ema_cluster_size[dead] = self.ema_cluster_size[src]
                             self.last_active[dead] = 0
 
-        z_q = z + (z_hard - z).detach()  # straight-through estimator
+        z_q = z_norm + (z_hard - z_norm).detach()  # straight-through in normalised space
 
-        commit_loss = (1 - F.cosine_similarity(z, z_hard.detach(), dim=-1)).mean()
-        entropy = self.compute_entropy(dist)
+        commit_loss = (1 - F.cosine_similarity(z_norm, z_hard.detach(), dim=-1)).mean()
+        entropy = self.entropy(dist)
         vq_loss = self.vq_beta * commit_loss - self.entropy_weight * entropy
 
         return z_q, {"vq_loss": vq_loss, "commit_loss": commit_loss, "entropy": entropy}, indices
 
-    def compute_entropy(self, dist: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
+    def entropy(self, dist: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
         """Compute the entropy of the mean soft-assignment distribution.
 
         A higher entropy indicates more uniform codebook usage. Used as a
