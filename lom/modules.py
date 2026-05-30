@@ -578,15 +578,15 @@ class VectorQuantizer(nn.Module):
               ``vq_loss``, ``commit_loss``, ``entropy``.
             - ``indices`` ``(N,)``: codebook indices of the assigned codes.
         """
-        # L2 distance: ||z - e||^2 = ||z||^2 - 2*z·e^T + ||e||^2
-        dist = self.drop(
-            (z ** 2).sum(1, keepdim=True)
-            - 2 * (z @ self.codebook.T)
-            + (self.codebook ** 2).sum(1)
-        )  # (N, K)
-
-        indices = dist.argmin(dim=-1)
-        z_hard = self.codebook[indices]
+        # Assignment is not differentiable — compute distances without autograd.
+        with torch.no_grad():
+            dist = self.drop(
+                (z ** 2).sum(1, keepdim=True)
+                - 2 * (z @ self.codebook.T)
+                + (self.codebook ** 2).sum(1)
+            )  # (N, K) L2 distances
+            indices = dist.argmin(dim=-1)
+            z_hard = self.codebook[indices]
 
         if self.training:
             with torch.no_grad():
