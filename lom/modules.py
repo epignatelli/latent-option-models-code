@@ -170,9 +170,9 @@ class PatchEmbedding(nn.Module):
         )
 
         self.register_buffer("token_usage", torch.zeros(vocab_size, dtype=torch.long))
-        self.char_embed.register_forward_hook(self._usage_hook)
+        self.char_embed.register_forward_hook(self.usage_hook)
 
-    def _usage_hook(self, _module, inputs, _output) -> None:
+    def usage_hook(self, _module, inputs, _output) -> None:
         ids = inputs[0].detach().reshape(-1)
         self.token_usage.index_add_(
             0, ids, torch.ones(ids.numel(), dtype=torch.long, device=ids.device)

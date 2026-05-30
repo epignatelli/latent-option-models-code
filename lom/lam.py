@@ -92,13 +92,13 @@ class TransitionBase(SerialisableModule):
         )
         self.ln_trunk = LayerNorm(d_model, bias)
 
-    def _cond(self, action: torch.Tensor, option_code: Optional[torch.Tensor]) -> torch.Tensor:
+    def cond(self, action: torch.Tensor, option_code: Optional[torch.Tensor]) -> torch.Tensor:
         c = self.action_proj(action)
         if option_code is not None and self.goal_proj is not None:
             c = c + self.goal_proj(option_code)
         return c.view(action.shape[0], 1, 1, self.d_model)
 
-    def _encode(self, history: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+    def encode(self, history: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         """Embed tokenised history and add action conditioning."""
         return self.ln_trunk(self.trunk(self.embed(history) + cond))
 
@@ -138,7 +138,7 @@ class ObservableTransitionModel(TransitionBase):
         self.horizon = horizon
         self.state_head = nn.Linear(d_model, vocab_size * patch_size**2, bias=bias)
 
-    def _to_logits(self, hid: torch.Tensor) -> torch.Tensor:
+    def to_logits(self, hid: torch.Tensor) -> torch.Tensor:
         P = self.patch_size
         logits = self.state_head(hid)
         if P == 1:
@@ -159,26 +159,26 @@ class ObservableTransitionModel(TransitionBase):
     ) -> torch.Tensor:
         B, c = history.shape[:2]
         history = self.tokeniser(history)
-        cond = self._cond(action, option_code)
+        cond = self.cond(action, option_code)
 
         if self.predict_sequence:
             if teacher_frames is not None:
                 teacher_frames = self.tokeniser(teacher_frames)
                 inp = torch.cat([history, teacher_frames[:, :-1]], dim=1)
-                hid = self._encode(inp, cond)
-                return self._to_logits(hid[:, c - 1 : c + horizon - 1])
+                hid = self.encode(inp, cond)
+                return self.to_logits(hid[:, c - 1 : c + horizon - 1])
             else:
                 frames, current = [], history
                 for _ in range(horizon):
-                    hid = self._encode(current, cond)
-                    logits = self._to_logits(hid[:, -1])
+                    hid = self.encode(current, cond)
+                    logits = self.to_logits(hid[:, -1])
                     frames.append(logits)
                     next_f = logits.argmax(dim=-1).reshape(B, 1, self.obs_h, self.obs_w)
                     current = torch.cat([current[:, 1:], next_f], dim=1)
                 return torch.stack(frames, dim=1)
 
-        hid = self._encode(history, cond)
-        return self._to_logits(hid[:, -1])
+        hid = self.encode(history, cond)
+        return self.to_logits(hid[:, -1])
 
 
 class LatentTransitionModel(TransitionBase):
@@ -214,6 +214,6 @@ class LatentTransitionModel(TransitionBase):
 
     def forward(self, history: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         history = self.tokeniser(history)
-        cond = self._cond(action, None)
-        hid = self._encode(history, cond)
+        cond = self.cond(action, None)
+        hid = self.encode(history, cond)
         return self.ln_latent(self.latent_head(hid[:, -1].mean(dim=1)))
