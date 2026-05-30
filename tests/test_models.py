@@ -1,7 +1,7 @@
 import pytest
 import torch
-from lom.models import DynamicsModel, LatentActionModel
-from lom.models import STTEncoder, JEPAEncoder, EMAEncoder
+from lom.modules import DynamicsModel, LatentActionModel
+from lom.modules import STTEncoder, JEPAEncoder, EMAEncoder
 
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 

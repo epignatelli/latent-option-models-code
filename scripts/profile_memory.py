@@ -30,7 +30,7 @@ import torch
 import torch.optim as optim
 
 from lom.config import EnvCfg, ModelCfg
-from lom.models import DynamicsModel, EMAEncoder, LatentActionModel
+from lom.modules import DynamicsModel, EMAEncoder, LatentActionModel
 from lom.modules import tokenise
 from lom.training import NullCtx, jepa_loss, reconstruction_loss
 

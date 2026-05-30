@@ -2,7 +2,7 @@ from .config import (
     EnvCfg, ModelCfg, LOMModelCfg, DataCfg, TrainCfg, WandbCfg,
     LAMCfg, LOMCfg,
 )
-from .models import LatentActionModel, DynamicsModel
+from .modules import LatentActionModel, DynamicsModel
 from .modules import PatchEmbedding, SpatioTemporalTransformer, VectorQuantizer
 from .dataset import NpzTrajectoryDataset, build_npz_dataloaders
 from .training import Trainer, LAMTrainer, LOMTrainer

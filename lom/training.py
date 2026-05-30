@@ -15,7 +15,7 @@ import torch.optim as optim
 
 from .config import LAMCfg, LOMCfg
 from .dataset import build_npz_dataloaders
-from .models import DynamicsModel, EMAEncoder, LatentActionModel
+from .modules import DynamicsModel, EMAEncoder, LatentActionModel
 from .modules import tokenise
 
 log = logging.getLogger(__name__)
