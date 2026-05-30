@@ -14,45 +14,46 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
-
 # --------------------------------------------------------------------------- #
 # --- flex_attention helpers ------------------------------------------------ #
 # --------------------------------------------------------------------------- #
 
-_causal_block_mask_cache: dict[tuple, BlockMask] = {}
-_opt_block_mask_cache: dict[tuple, BlockMask] = {}
+causal_block_mask_cache: dict[tuple, BlockMask] = {}
+opt_block_mask_cache: dict[tuple, BlockMask] = {}
 
 
-def _causal_mask_mod(
+def causal_mask_mod(
     _b: torch.Tensor, _h: torch.Tensor, q: torch.Tensor, kv: torch.Tensor
 ) -> torch.Tensor:
     return q >= kv
 
 
-def _get_causal_block_mask(T: int, device: torch.device) -> BlockMask:
+def get_causal_block_mask(T: int, device: torch.device) -> BlockMask:
     key = (T, str(device))
-    if key not in _causal_block_mask_cache:
-        _causal_block_mask_cache[key] = create_block_mask(
-            _causal_mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device
+    if key not in causal_block_mask_cache:
+        causal_block_mask_cache[key] = create_block_mask(
+            causal_mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device
         )
-    return _causal_block_mask_cache[key]
+    return causal_block_mask_cache[key]
 
 
-def _get_opt_block_mask(T: int, opt_pos: int, device: torch.device) -> BlockMask:
+def get_opt_block_mask(T: int, opt_pos: int, device: torch.device) -> BlockMask:
     key = (T, opt_pos, str(device))
-    if key not in _opt_block_mask_cache:
+    if key not in opt_block_mask_cache:
+
         def mask_mod(b, h, q_idx, kv_idx):
             return ~((q_idx == opt_pos) & (kv_idx > opt_pos))
-        _opt_block_mask_cache[key] = create_block_mask(
+
+        opt_block_mask_cache[key] = create_block_mask(
             mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device
         )
-    return _opt_block_mask_cache[key]
+    return opt_block_mask_cache[key]
 
 
 class SerialisableModule(nn.Module):
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
-    
+
 
 class LayerNorm(nn.Module):
     """LayerNorm with optional bias (torch built-in doesn't support bias=False)."""
@@ -96,7 +97,6 @@ class SelfAttention(nn.Module):
         self.n_heads = n_heads
         self.d_model = d_model
 
-
     def attend(self, x: torch.Tensor, block_mask: BlockMask | None) -> torch.Tensor:
         B, T, C = x.shape
         head_dim = C // self.n_heads
@@ -120,7 +120,7 @@ class CausalAttention(SelfAttention):
     """Self-attention with a causal mask (decoder-only)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.attend(x, _get_causal_block_mask(x.shape[1], x.device))
+        return self.attend(x, get_causal_block_mask(x.shape[1], x.device))
 
 
 class BidirectionalAttention(SelfAttention):
@@ -320,7 +320,6 @@ class SpatioTemporalTransformer(nn.Module):
             x = block(x, temporal_mask=temporal_mask)
 
         return self.ln_f(x)
-
 
 
 class VectorQuantizer(nn.Module):

@@ -12,7 +12,7 @@ from .modules import (
     LayerNorm,
     PatchEmbedding,
     SpatioTemporalTransformer,
-    _get_opt_block_mask,
+    get_opt_block_mask,
 )
 from .tokeniser import ScreenTokeniser
 
@@ -87,7 +87,7 @@ class STTEncoder(nn.Module):
             fut_emb = fut_emb + self.cond_proj(condition).view(B, 1, 1, self.d_model)
         seq = torch.cat([hist_emb, opt_emb, fut_emb], dim=1)
 
-        hidden = self.transformer(seq, temporal_mask=_get_opt_block_mask(c + 1 + k, c, seq.device))
+        hidden = self.transformer(seq, temporal_mask=get_opt_block_mask(c + 1 + k, c, seq.device))
         return hidden[:, c, :, :].mean(dim=1)  # (B, D)
 
 
