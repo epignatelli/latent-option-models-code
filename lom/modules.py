@@ -144,6 +144,79 @@ class BidirectionalAttention(SelfAttention):
         return self.attend(x, None)
 
 
+class PatchEmbedding(nn.Module):
+    """Embeds (B, T, H, W) token IDs into (B, T, n_tokens, d_model) patch tokens.
+
+    Expects pre-tokenised integer IDs (e.g. from ScreenTokeniser).
+
+    patch_size=1  — plain token embedding, no spatial compression.
+    patch_size=P  — each P×P block is embedded and projected into one d_model
+                    token.  n_tokens = (H//P) * (W//P).
+
+    Registers a `token_usage` buffer (shape: vocab_size,) that counts how many
+    times each token ID has been looked up across all forward passes.  Use it
+    to identify dead tokens after training:
+        dead = (model.embed.token_usage == 0).sum()
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        obs_h: int,
+        obs_w: int,
+        patch_size: int = 1,
+        bias: bool = False,
+    ):
+        super().__init__()
+        assert (
+            obs_h % patch_size == 0 and obs_w % patch_size == 0
+        ), f"obs_h={obs_h} and obs_w={obs_w} must both be divisible by patch_size={patch_size}"
+        self.patch_size = patch_size
+        self.obs_h = obs_h
+        self.obs_w = obs_w
+        self.d_model = d_model
+        self.n_tokens = (obs_h // patch_size) * (obs_w // patch_size)
+
+        self.char_embed = nn.Embedding(vocab_size, d_model)
+        self.patch_proj = (
+            nn.Linear(patch_size**2 * d_model, d_model, bias=bias) if patch_size > 1 else None
+        )
+
+        self.register_buffer("token_usage", torch.zeros(vocab_size, dtype=torch.long))
+        self.char_embed.register_forward_hook(self._usage_hook)
+
+    def _usage_hook(self, _module, inputs, _output) -> None:
+        ids = inputs[0].detach().reshape(-1)
+        self.token_usage.index_add_(
+            0, ids, torch.ones(ids.numel(), dtype=torch.long, device=ids.device)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, T, H, W) long — token IDs
+        Returns:
+            (B, T, n_tokens, d_model)
+        """
+        B, T, H, W = x.shape
+        P, D = self.patch_size, self.d_model
+
+        emb = self.char_embed(x)
+        if torch.is_autocast_enabled():
+            emb = emb.to(torch.bfloat16)  # nn.Embedding is not autocasted; cast manually
+
+        if self.patch_proj is not None:
+            emb = emb.reshape(B, T, H // P, P, W // P, P, D)
+            emb = emb.permute(0, 1, 2, 4, 3, 5, 6).contiguous()  # (B, T, H/P, W/P, P, P, D)
+            emb = emb.reshape(B, T, self.n_tokens, P * P * D)
+            emb = self.patch_proj(emb)  # (B, T, n_tokens, D)
+        else:
+            emb = emb.reshape(B, T, self.n_tokens, D)
+
+        return emb
+
+
 # --------------------------------------------------------------------------- #
 # --- Spatio-Temporal Transformer ------------------------------------------- #
 # --------------------------------------------------------------------------- #
@@ -263,89 +336,6 @@ class SpatioTemporalTransformer(nn.Module):
             x = block(x, temporal_mask=temporal_mask)
 
         return self.ln_f(x)
-
-
-# --------------------------------------------------------------------------- #
-# --- Screen tokenisation --------------------------------------------------- #
-# --------------------------------------------------------------------------- #
-
-
-# --------------------------------------------------------------------------- #
-# --- Patch Embedding ------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
-
-
-class PatchEmbedding(nn.Module):
-    """Embeds (B, T, H, W) token IDs into (B, T, n_tokens, d_model) patch tokens.
-
-    Expects pre-tokenised integer IDs (e.g. from ScreenTokeniser).
-
-    patch_size=1  — plain token embedding, no spatial compression.
-    patch_size=P  — each P×P block is embedded and projected into one d_model
-                    token.  n_tokens = (H//P) * (W//P).
-
-    Registers a `token_usage` buffer (shape: vocab_size,) that counts how many
-    times each token ID has been looked up across all forward passes.  Use it
-    to identify dead tokens after training:
-        dead = (model.embed.token_usage == 0).sum()
-    """
-
-    def __init__(
-        self,
-        vocab_size: int,
-        d_model: int,
-        obs_h: int,
-        obs_w: int,
-        patch_size: int = 1,
-        bias: bool = False,
-    ):
-        super().__init__()
-        assert (
-            obs_h % patch_size == 0 and obs_w % patch_size == 0
-        ), f"obs_h={obs_h} and obs_w={obs_w} must both be divisible by patch_size={patch_size}"
-        self.patch_size = patch_size
-        self.obs_h = obs_h
-        self.obs_w = obs_w
-        self.d_model = d_model
-        self.n_tokens = (obs_h // patch_size) * (obs_w // patch_size)
-
-        self.char_embed = nn.Embedding(vocab_size, d_model)
-        self.patch_proj = (
-            nn.Linear(patch_size**2 * d_model, d_model, bias=bias) if patch_size > 1 else None
-        )
-
-        self.register_buffer("token_usage", torch.zeros(vocab_size, dtype=torch.long))
-        self.char_embed.register_forward_hook(self._usage_hook)
-
-    def _usage_hook(self, _module, inputs, _output) -> None:
-        ids = inputs[0].detach().reshape(-1)
-        self.token_usage.index_add_(
-            0, ids, torch.ones(ids.numel(), dtype=torch.long, device=ids.device)
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, T, H, W) long — token IDs
-        Returns:
-            (B, T, n_tokens, d_model)
-        """
-        B, T, H, W = x.shape
-        P, D = self.patch_size, self.d_model
-
-        emb = self.char_embed(x)
-        if torch.is_autocast_enabled():
-            emb = emb.to(torch.bfloat16)  # nn.Embedding is not autocasted; cast manually
-
-        if self.patch_proj is not None:
-            emb = emb.reshape(B, T, H // P, P, W // P, P, D)
-            emb = emb.permute(0, 1, 2, 4, 3, 5, 6).contiguous()  # (B, T, H/P, W/P, P, P, D)
-            emb = emb.reshape(B, T, self.n_tokens, P * P * D)
-            emb = self.patch_proj(emb)  # (B, T, n_tokens, D)
-        else:
-            emb = emb.reshape(B, T, self.n_tokens, D)
-
-        return emb
 
 
 # --------------------------------------------------------------------------- #
@@ -657,13 +647,13 @@ class JEPAEncoder(nn.Module):
 
 
 class EMAEncoder(nn.Module):
-    """EMA shadow of a JEPAEncoder; provides stable JEPA targets.
+    """EMA shadow of any encoder module; provides stable prediction targets.
 
     Parameters are not trained; updated each step via momentum average of the
-    online JEPAEncoder.
+    online encoder.
     """
 
-    def __init__(self, base: JEPAEncoder, decay: float = 0.996):
+    def __init__(self, base: nn.Module, decay: float = 0.996):
         super().__init__()
         self.encoder = deepcopy(base)
         self.decay = decay
@@ -671,12 +661,15 @@ class EMAEncoder(nn.Module):
             p.requires_grad_(False)
 
     @torch.no_grad()
-    def update(self, online: JEPAEncoder) -> None:
+    def update(self, online: nn.Module) -> None:
         for e, o in zip(self.encoder.parameters(), online.parameters()):
             e.data.mul_(self.decay).add_(o.data, alpha=1 - self.decay)
 
-    def encode(self, frames: torch.Tensor) -> torch.Tensor:
-        return self.encoder.encode(frames)
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        return self.encoder(*args, **kwargs)
+
+    def encode(self, *args, **kwargs) -> torch.Tensor:
+        return self.encoder.encode(*args, **kwargs)
 
 
 # --------------------------------------------------------------------------- #
