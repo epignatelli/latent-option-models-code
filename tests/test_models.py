@@ -1,7 +1,7 @@
 import pytest
 import torch
 from lom.lam import LatentActionModel, ObservableTransitionModel
-from lom.encoders import EMAEncoder
+from lom.modules import EMAEncoder
 
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 

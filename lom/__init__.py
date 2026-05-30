@@ -3,7 +3,7 @@ from .config import (
     LOMCfg,
 )
 from .lam import LatentActionModel, ObservableTransitionModel, LatentTransitionModel
-from .encoders import EMAEncoder
+from .modules import EMAEncoder
 from .modules import PatchEmbedding, SpatioTemporalTransformer, VectorQuantizer
 from .tokeniser import CHAR_VOCAB, COLOR_VOCAB, TOKEN_VOCAB, ScreenTokeniser, tokenise
 from .dataset import NpzTrajectoryDataset, build_npz_dataloaders

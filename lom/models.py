@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .encoders import EMAEncoder
+from .modules import EMAEncoder
 from .lam import LatentActionModel, ObservableTransitionModel, LatentTransitionModel
 from .modules import (
     LayerNorm,
