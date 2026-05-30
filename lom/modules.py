@@ -129,12 +129,10 @@ class SelfAttention(nn.Module):
 
 
 class CausalAttention(SelfAttention):
-    """Self-attention with an auto-built causal mask (decoder-only)."""
+    """Self-attention with a causal mask (decoder-only)."""
 
     def forward(self, x: torch.Tensor, block_mask: BlockMask | None = None) -> torch.Tensor:
-        if block_mask is None:
-            block_mask = _get_causal_block_mask(x.shape[1], x.device)
-        return self._attend(x, block_mask)
+        return self._attend(x, _get_causal_block_mask(x.shape[1], x.device))
 
 
 class BidirectionalAttention(SelfAttention):
