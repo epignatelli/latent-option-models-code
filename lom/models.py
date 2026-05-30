@@ -118,7 +118,7 @@ class ReconstructionLOM(SerialisableModule):
             vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
             d_model=d_model, n_layers=n_layers, n_heads=n_heads,
             context_length=context_length, latent_dim=latent_dim,
-            option_dim=latent_dim, predict_sequence=predict_sequence, horizon=horizon,
+            predict_sequence=predict_sequence, horizon=horizon,
             patch_size=patch_size, dropout=dropout, bias=bias,
         )
 
@@ -137,10 +137,10 @@ class ReconstructionLOM(SerialisableModule):
         lam_logits = self.lam_dynamics(history, z_act)
         if self.predict_sequence:
             lom_logits = self.lom_dynamics(
-                history, z_act, option_code=z_opt, horizon=self.horizon, teacher_frames=future
+                history, z_opt, horizon=self.horizon, teacher_frames=future
             )
         else:
-            lom_logits = self.lom_dynamics(history, z_act, option_code=z_opt, horizon=1)
+            lom_logits = self.lom_dynamics(history, z_opt)
 
         return {
             "lam_logits": lam_logits,

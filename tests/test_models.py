@@ -14,12 +14,12 @@ def make_lam(in_dim=D_MODEL):
     return LatentActionModel(in_dim=in_dim, latent_dim=LATENT_DIM, num_options=32)
 
 
-def make_dynamics(option_dim=None, predict_sequence=False):
+def make_dynamics(predict_sequence=False):
     return ObservableTransitionModel(
         vocab_size=VOCAB, obs_h=OBS_H, obs_w=OBS_W,
         d_model=D_MODEL, n_layers=N_LAYERS, n_heads=N_HEADS,
         context_length=CONTEXT, latent_dim=LATENT_DIM,
-        option_dim=option_dim, predict_sequence=predict_sequence,
+        predict_sequence=predict_sequence,
         horizon=HORIZON if predict_sequence else 1,
     )
 
@@ -142,13 +142,6 @@ def test_dynamics_sequence_autoregressive():
     logits = dyn(history(), action(), horizon=HORIZON)
     assert logits.shape == (BATCH, HORIZON, S, VOCAB)
 
-
-@torch.no_grad()
-def test_dynamics_with_option_code():
-    dyn = make_dynamics(option_dim=LATENT_DIM)
-    option_code = torch.randn(BATCH, LATENT_DIM)
-    logits = dyn(history(), action(), option_code=option_code)
-    assert logits.shape == (BATCH, S, VOCAB)
 
 
 @needs_cuda

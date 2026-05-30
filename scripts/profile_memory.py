@@ -122,7 +122,7 @@ def _build_models(device, method: str, encoder: str,
         lam_dyn = ObservableTransitionModel(**base, predict_sequence=False,
                                 predict_latent=jepa,
                                 target_dim=m.latent_dim if jepa else None).to(device)
-        lom_dyn = ObservableTransitionModel(**base, option_dim=m.latent_dim,
+        lom_dyn = ObservableTransitionModel(**base, 
                                 predict_sequence=False, horizon=horizon,
                                 predict_latent=jepa,
                                 target_dim=m.latent_dim if jepa else None).to(device)
@@ -175,7 +175,7 @@ def _run_step(method: str, encoder: str, models: dict,
                     + vq_opt["vq_loss"] + vq_act["vq_loss"])
         else:
             lam_logits = models["lam_dynamics"](history, z_act)
-            lom_logits = models["lom_dynamics"](history, z_act, option_code=z_opt, horizon=1)
+            lom_logits = models["lom_dynamics"](history, z_opt)
             lam_recon  = reconstruction_loss(lam_logits, tokenise(next_frame), e.vocab_size)
             lom_recon  = reconstruction_loss(lom_logits, tokenise(future), e.vocab_size)
             return lam_recon + lom_recon + vq_opt["vq_loss"] + vq_act["vq_loss"]
@@ -259,7 +259,7 @@ def _run_step_traced(method: str, encoder: str, models: dict,
                         + vq_opt["vq_loss"] + vq_act["vq_loss"])
             else:
                 lam_logits = models["lam_dynamics"](history, z_act)
-                lom_logits = models["lom_dynamics"](history, z_act, option_code=z_opt, horizon=1)
+                lom_logits = models["lom_dynamics"](history, z_opt)
                 loss = (reconstruction_loss(lam_logits, tokenise(next_frame), e.vocab_size)
                         + reconstruction_loss(lom_logits, tokenise(future), e.vocab_size)
                         + vq_opt["vq_loss"] + vq_act["vq_loss"])

@@ -63,7 +63,6 @@ class TransitionBase(SerialisableModule):
         n_heads: int,
         context_length: int,
         latent_dim: int,
-        option_dim: Optional[int] = None,
         horizon: int = 1,
         patch_size: int = 1,
         dropout: float = 0.1,
@@ -81,10 +80,7 @@ class TransitionBase(SerialisableModule):
         self.patch_embedding = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
         self.S = self.patch_embedding.n_tokens
 
-        self.action_proj = nn.Linear(latent_dim, d_model, bias=bias)
-        self.goal_proj = (
-            nn.Linear(option_dim, d_model, bias=bias) if option_dim is not None else None
-        )
+        self.code_proj = nn.Linear(latent_dim, d_model, bias=bias)
         self.trunk = SpatioTemporalTransformer(
             d_model=d_model,
             n_layers=n_layers,
@@ -97,16 +93,10 @@ class TransitionBase(SerialisableModule):
         )
         self.ln_trunk = LayerNorm(d_model, bias)
 
-    def build_conditioning(
-        self, action: torch.Tensor, option_code: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        c = self.action_proj(action)
-        if option_code is not None and self.goal_proj is not None:
-            c = c + self.goal_proj(option_code)
-        return c.view(action.shape[0], 1, 1, self.d_model)
+    def build_conditioning(self, code: torch.Tensor) -> torch.Tensor:
+        return self.code_proj(code).view(code.shape[0], 1, 1, self.d_model)
 
     def encode(self, history: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        """Embed tokenised history and add action conditioning."""
         return self.ln_trunk(self.trunk(self.patch_embedding(history) + cond))
 
 
@@ -127,7 +117,6 @@ class ObservableTransitionModel(TransitionBase):
         n_heads: int,
         context_length: int,
         latent_dim: int,
-        option_dim: Optional[int] = None,
         predict_sequence: bool = False,
         horizon: int = 1,
         patch_size: int = 1,
@@ -143,7 +132,6 @@ class ObservableTransitionModel(TransitionBase):
             n_heads=n_heads,
             context_length=context_length,
             latent_dim=latent_dim,
-            option_dim=option_dim,
             horizon=horizon,
             patch_size=patch_size,
             dropout=dropout,
@@ -167,14 +155,13 @@ class ObservableTransitionModel(TransitionBase):
     def forward(
         self,
         history: torch.Tensor,
-        action: torch.Tensor,
-        option_code: Optional[torch.Tensor] = None,
+        code: torch.Tensor,
         horizon: int = 1,
         teacher_frames: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, c = history.shape[:2]
         history = self.tokeniser(history)
-        cond = self.build_conditioning(action, option_code)
+        cond = self.build_conditioning(code)
 
         if self.predict_sequence:
             if teacher_frames is not None:
@@ -235,8 +222,8 @@ class LatentTransitionModel(TransitionBase):
         self.latent_head = nn.Linear(d_model, target_dim, bias=bias)
         self.ln_latent = LayerNorm(target_dim, bias)
 
-    def forward(self, history: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def forward(self, history: torch.Tensor, code: torch.Tensor) -> torch.Tensor:
         history = self.tokeniser(history)
-        cond = self.build_conditioning(action, None)
+        cond = self.build_conditioning(code)
         hid = self.encode(history, cond)
         return self.ln_latent(self.latent_head(hid[:, -1].mean(dim=1)))
