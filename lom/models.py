@@ -11,8 +11,6 @@ All building blocks (encoders, VQ, dynamics) live in lom.modules.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
@@ -20,9 +18,10 @@ from .modules import (
     DynamicsModel,
     EMAEncoder,
     JEPAEncoder,
-    LatentActionModel,
+    LayerNorm,
     SerialisableModule,
     STTEncoder,
+    VectorQuantizer,
 )
 
 
@@ -30,10 +29,12 @@ class ReconstructionLOM(SerialisableModule):
     """LOM with STT (bidirectional) encoders and pixel-level reconstruction dynamics.
 
     Architecture:
-      option_lam   — STTEncoder: (history, future)           → z_opt via VQ
-      action_lam   — STTEncoder: (history, future[:,0:1], z_opt) → z_act via VQ
-      lam_dynamics — causal transformer: (history, z_act)      → next_frame logits
-      lom_dynamics — causal transformer: (history, z_act, z_opt) → future logits
+      opt_encoder  — STTEncoder: (history, future)                 → (B, d_model)
+      opt_vq_proj  — Linear + LayerNorm → VectorQuantizer          → z_opt
+      act_encoder  — STTEncoder: (history, next_frame, z_opt)      → (B, d_model)
+      act_vq_proj  — Linear + LayerNorm → VectorQuantizer          → z_act
+      lam_dynamics — causal transformer: (history, z_act)          → next_frame logits
+      lom_dynamics — causal transformer: (history, z_act, z_opt)   → future logits
 
     forward() returns raw predictions and VQ info; loss computation is external.
     """
@@ -64,21 +65,38 @@ class ReconstructionLOM(SerialisableModule):
         super().__init__()
         self.horizon = horizon
         self.predict_sequence = predict_sequence
-        base = dict(
+        enc_base = dict(
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, patch_size=patch_size,
+            dropout=dropout, bias=bias,
+        )
+        vq_kw = dict(
+            dropout=vq_dropout, entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, ema_decay=vq_ema_decay,
+        )
+        dyn_base = dict(
             vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
             d_model=d_model, n_layers=n_layers, n_heads=n_heads,
             context_length=context_length, latent_dim=latent_dim,
             patch_size=patch_size, dropout=dropout, bias=bias,
         )
-        vq = dict(
-            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
-        )
-        self.option_lam = LatentActionModel(**base, codebook_size=num_options, horizon=horizon, **vq)
-        self.action_lam = LatentActionModel(**base, codebook_size=n_actions, horizon=1,
-                                            condition_dim=latent_dim, **vq)
-        self.lam_dynamics = DynamicsModel(**base, predict_sequence=False)
-        self.lom_dynamics = DynamicsModel(**base, option_dim=latent_dim,
+
+        # Option branch
+        self.opt_encoder  = STTEncoder(**enc_base, horizon=horizon)
+        self.opt_vq_proj  = nn.Linear(d_model, latent_dim, bias=bias)
+        self.opt_ln_vq    = LayerNorm(latent_dim, bias)
+        self.opt_vq       = VectorQuantizer(latent_dim=latent_dim, num_options=num_options, **vq_kw)
+
+        # Action branch (condition = z_opt passed as token inside STTEncoder)
+        self.act_encoder  = STTEncoder(**enc_base, horizon=1, condition_dim=latent_dim)
+        self.act_vq_proj  = nn.Linear(d_model, latent_dim, bias=bias)
+        self.act_ln_vq    = LayerNorm(latent_dim, bias)
+        self.act_vq       = VectorQuantizer(latent_dim=latent_dim, num_options=n_actions, **vq_kw)
+
+        # Dynamics
+        self.lam_dynamics = DynamicsModel(**dyn_base, predict_sequence=False)
+        self.lom_dynamics = DynamicsModel(**dyn_base, option_dim=latent_dim,
                                           predict_sequence=predict_sequence, horizon=horizon)
 
     def num_parameters(self) -> int:
@@ -89,15 +107,23 @@ class ReconstructionLOM(SerialisableModule):
         history: torch.Tensor,  # (B, c, H, W, 2)
         future:  torch.Tensor,  # (B, k, H, W, 2)  k=horizon; future[:,0:1] is next frame
     ) -> dict:
+        # Option code
+        opt_pooled = self.opt_encoder(history, future)                     # (B, D)
+        z_opt, vq_opt, opt_idx = self.opt_vq(self.opt_ln_vq(self.opt_vq_proj(opt_pooled)))
+
+        # Action code (z_opt injected as condition token inside STTEncoder)
         next_frame = future[:, 0:1]
-        z_opt, vq_opt, opt_idx = self.option_lam(history, future)
-        z_act, vq_act, act_idx = self.action_lam(history, next_frame, condition=z_opt.detach())
+        act_pooled = self.act_encoder(history, next_frame, condition=z_opt.detach())  # (B, D)
+        z_act, vq_act, act_idx = self.act_vq(self.act_ln_vq(self.act_vq_proj(act_pooled)))
+
+        # Dynamics predictions
         lam_logits = self.lam_dynamics(history, z_act)
         if self.predict_sequence:
             lom_logits = self.lom_dynamics(history, z_act, option_code=z_opt,
                                            horizon=self.horizon, teacher_frames=future)
         else:
             lom_logits = self.lom_dynamics(history, z_act, option_code=z_opt, horizon=1)
+
         return {
             "lam_logits": lam_logits,
             "lom_logits": lom_logits,
@@ -111,12 +137,14 @@ class LatentLOM(SerialisableModule):
     """LOM with JEPA encoders (separate causal past/future) and latent-space dynamics.
 
     Architecture:
-      option_lam      — JEPAEncoder: (history, future)              → z_opt via LOM VQ
-      action_lam      — JEPAEncoder: (history, future[:,0:1]) + z_opt → z_act via LAM VQ
-      lam_dynamics    — causal transformer: (history, z_act)          → z_act_hat
-      lom_dynamics    — causal transformer: (history, z_opt)          → z_opt_hat
-      ema_action_enc  — EMA of action_lam.encoder.future_encoder      → z_act_target
-      ema_option_enc  — EMA of option_lam.encoder.future_encoder      → z_opt_target
+      opt_encoder  — JEPAEncoder: (history, future)                → (B, 2*d_model)
+      opt_vq_proj  — Linear + LayerNorm → VectorQuantizer          → z_opt
+      act_encoder  — JEPAEncoder: (history, next_frame)            → (B, 2*d_model)
+      act_vq_proj  — Linear(2D+latent_dim) + LayerNorm → VQ       → z_act  [z_opt concat]
+      lam_dynamics — causal transformer: (history, z_act)          → z_act_hat
+      lom_dynamics — causal transformer: (history, z_opt)          → z_opt_hat
+      ema_opt_enc  — EMA of opt_encoder                            → z_opt_target
+      ema_act_enc  — EMA of act_encoder                            → z_act_target
 
     forward() returns predictions and EMA targets; losses are external.
     Call update_ema() after each optimiser step.
@@ -146,47 +174,76 @@ class LatentLOM(SerialisableModule):
         vq_ema_decay: float = 0.99,
     ):
         super().__init__()
-        base = dict(
+        enc_base = dict(
             vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
             d_model=d_model, n_layers=n_layers, n_heads=n_heads,
             context_length=context_length, latent_dim=latent_dim,
             patch_size=patch_size, dropout=dropout, bias=bias,
         )
-        vq = dict(
-            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+        vq_kw = dict(
+            dropout=vq_dropout, entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, ema_decay=vq_ema_decay,
         )
-        self.option_lam = LatentActionModel(**base, codebook_size=num_options, horizon=horizon,
-                                            two_encoder=True, **vq)
-        self.action_lam = LatentActionModel(**base, codebook_size=n_actions, horizon=1,
-                                            option_code_dim=latent_dim, two_encoder=True, **vq)
-        self.lam_dynamics = DynamicsModel(**base, predict_sequence=False,
+        dyn_base = dict(
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            patch_size=patch_size, dropout=dropout, bias=bias,
+        )
+
+        # Option branch
+        self.opt_encoder  = JEPAEncoder(**enc_base, horizon=horizon)
+        self.opt_vq_proj  = nn.Linear(self.opt_encoder.out_dim, latent_dim, bias=bias)
+        self.opt_ln_vq    = LayerNorm(latent_dim, bias)
+        self.opt_vq       = VectorQuantizer(latent_dim=latent_dim, num_options=num_options, **vq_kw)
+
+        # Action branch (z_opt concatenated before projection)
+        self.act_encoder  = JEPAEncoder(**enc_base, horizon=1)
+        self.act_vq_proj  = nn.Linear(self.act_encoder.out_dim + latent_dim, latent_dim, bias=bias)
+        self.act_ln_vq    = LayerNorm(latent_dim, bias)
+        self.act_vq       = VectorQuantizer(latent_dim=latent_dim, num_options=n_actions, **vq_kw)
+
+        # Dynamics
+        self.lam_dynamics = DynamicsModel(**dyn_base, predict_sequence=False,
                                           predict_latent=True, target_dim=latent_dim)
-        self.lom_dynamics = DynamicsModel(**base, predict_sequence=False,
+        self.lom_dynamics = DynamicsModel(**dyn_base, predict_sequence=False,
                                           predict_latent=True, target_dim=latent_dim)
-        self.ema_option_enc = EMAEncoder(self.option_lam.encoder, decay=ema_decay)  # type: ignore[arg-type]
-        self.ema_action_enc = EMAEncoder(self.action_lam.encoder, decay=ema_decay)  # type: ignore[arg-type]
+
+        # EMA target encoders
+        self.ema_opt_enc  = EMAEncoder(self.opt_encoder, decay=ema_decay)
+        self.ema_act_enc  = EMAEncoder(self.act_encoder, decay=ema_decay)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
     def update_ema(self) -> None:
-        self.ema_option_enc.update(self.option_lam.encoder)  # type: ignore[arg-type]
-        self.ema_action_enc.update(self.action_lam.encoder)  # type: ignore[arg-type]
+        self.ema_opt_enc.update(self.opt_encoder)
+        self.ema_act_enc.update(self.act_encoder)
 
     def forward(
         self,
         history: torch.Tensor,  # (B, c, H, W, 2)
         future:  torch.Tensor,  # (B, k, H, W, 2)  k=horizon; future[:,0:1] is next frame
     ) -> dict:
+        # Option code
+        opt_pooled = self.opt_encoder(history, future)                     # (B, 2D)
+        z_opt, vq_opt, opt_idx = self.opt_vq(self.opt_ln_vq(self.opt_vq_proj(opt_pooled)))
+
+        # Action code (z_opt concatenated at projection input)
         next_frame = future[:, 0:1]
-        z_opt, vq_opt, opt_idx = self.option_lam(history, future)
-        z_act, vq_act, act_idx = self.action_lam(history, next_frame, option_code=z_opt.detach())
+        act_pooled = self.act_encoder(history, next_frame)                 # (B, 2D)
+        act_in = torch.cat([act_pooled, z_opt.detach()], dim=-1)           # (B, 2D + latent_dim)
+        z_act, vq_act, act_idx = self.act_vq(self.act_ln_vq(self.act_vq_proj(act_in)))
+
+        # EMA targets (no grad)
         with torch.no_grad():
-            z_act_target = self.ema_action_enc.encode(next_frame)
-            z_opt_target = self.ema_option_enc.encode(future)
+            z_act_target = self.ema_act_enc.encode(next_frame)
+            z_opt_target = self.ema_opt_enc.encode(future)
+
+        # Dynamics predictions
         z_act_hat = self.lam_dynamics(history, z_act)
         z_opt_hat = self.lom_dynamics(history, z_opt)
+
         return {
             "z_act_hat": z_act_hat, "z_act_target": z_act_target,
             "z_opt_hat": z_opt_hat, "z_opt_target": z_opt_target,
