@@ -18,22 +18,20 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
-
 causal_block_mask_cache: dict[tuple, BlockMask] = {}
 opt_block_mask_cache: dict[tuple, BlockMask] = {}
-
-
-def causal_mask_mod(
-    _b: torch.Tensor, _h: torch.Tensor, q: torch.Tensor, kv: torch.Tensor
-) -> torch.Tensor:
-    return q >= kv
 
 
 def causal_mask_cache(T: int, device: torch.device) -> BlockMask:
     key = (T, str(device))
     if key not in causal_block_mask_cache:
         causal_block_mask_cache[key] = create_block_mask(
-            causal_mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device
+            lambda b, h, q, kv: q>=kv,
+            B=None,
+            H=None,
+            Q_LEN=T,
+            KV_LEN=T,
+            device=device,
         )
     return causal_block_mask_cache[key]
 
@@ -166,6 +164,7 @@ class PatchEmbedding(nn.Module):
             nn.Linear(patch_size**2 * d_model, d_model, bias=bias) if patch_size > 1 else None
         )
 
+        self.token_usage: torch.Tensor
         self.register_buffer("token_usage", torch.zeros(vocab_size, dtype=torch.long))
         self.char_embed.register_forward_hook(self.usage_hook)
 
@@ -185,9 +184,7 @@ class PatchEmbedding(nn.Module):
         B, T, H, W = x.shape
         P, D = self.patch_size, self.d_model
 
-        emb = self.char_embed(x)
-        if torch.is_autocast_enabled():
-            emb = emb.to(torch.bfloat16)  # nn.Embedding is not autocasted; cast manually
+        emb = self.char_embed(x).to(torch.bfloat16)
 
         if self.patch_proj is not None:
             emb = emb.reshape(B, T, H // P, P, W // P, P, D)
@@ -285,10 +282,7 @@ class SpatioTemporalTransformer(nn.Module):
         self.temporal_pos = nn.Embedding(max_temporal_len, d_model)
         self.drop = nn.Dropout(dropout)
         self.blocks = nn.ModuleList(
-            [
-                SpatioTemporalBlock(d_model, n_heads, dropout, bias, causal)
-                for _ in range(n_layers)
-            ]
+            [SpatioTemporalBlock(d_model, n_heads, dropout, bias, causal) for _ in range(n_layers)]
         )
         self.ln_f = LayerNorm(d_model, bias)
         self.n_spatial_positions = n_spatial_positions
