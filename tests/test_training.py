@@ -8,8 +8,8 @@ needs_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="flex_attention backward requires CUDA"
 )
 
-from lom.config import LAMCfg, LOMCfg, LOMModelCfg, ModelCfg, DataCfg, EnvCfg, TrainCfg
-from lom.training import JEPALAMTrainer, JEPALOMTrainer, LAMTrainer, LOMTrainer, get_lr, jepa_loss, reconstruction_loss
+from lom.config import LOMCfg, LOMModelCfg, ModelCfg, DataCfg, EnvCfg, TrainCfg
+from lom.training import ReconstructionLOMTrainer, LatentLOMTrainer, get_lr, jepa_loss, reconstruction_loss
 
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
 
@@ -81,11 +81,6 @@ def make_env_cfg():
     return EnvCfg(obs_h=OBS_H, obs_w=OBS_W, vocab_size=VOCAB, n_actions=8)
 
 
-def make_model_cfg():
-    return ModelCfg(d_model=D_MODEL, n_layers=N_LAYERS, n_heads=N_HEADS,
-                    context_length=CONTEXT, latent_dim=LATENT_DIM, num_options=16)
-
-
 def make_lom_model_cfg():
     return LOMModelCfg(d_model=D_MODEL, n_layers=N_LAYERS, n_heads=N_HEADS,
                        context_length=CONTEXT, latent_dim=LATENT_DIM, num_options=16)
@@ -95,48 +90,30 @@ def make_data_cfg():
     return DataCfg(context_len=CONTEXT, horizon=HORIZON)
 
 
-def lam_trainer_with_models():
-    cfg = LAMCfg(env=make_env_cfg(), model=make_model_cfg(), data=make_data_cfg())
-    trainer = object.__new__(LAMTrainer)
-    trainer.cfg = cfg
-    trainer.models = trainer.build_models().eval()
-    return trainer
-
-
-def lom_trainer_with_models():
-    cfg = LOMCfg(env=make_env_cfg(), model=make_lom_model_cfg(), data=make_data_cfg())
-    trainer = object.__new__(LOMTrainer)
-    trainer.cfg = cfg
-    trainer.models = trainer.build_models().eval()
-    return trainer
-
-
-def lam_batch():
-    return [_screen(BATCH, CONTEXT), _screen(BATCH)]
-
-
 def lom_batch():
     return [_screen(BATCH, CONTEXT), _screen(BATCH), _screen(BATCH), _screen(BATCH, HORIZON)]
 
 
+def reconstruction_lom_trainer():
+    cfg = LOMCfg(env=make_env_cfg(), model=make_lom_model_cfg(), data=make_data_cfg())
+    trainer = object.__new__(ReconstructionLOMTrainer)
+    trainer.cfg = cfg
+    trainer.models = trainer.build_models().eval()
+    return trainer
+
+
+def latent_lom_trainer():
+    cfg = LOMCfg(env=make_env_cfg(), model=make_lom_model_cfg(), data=make_data_cfg())
+    cfg.model.ema_decay = 0.996
+    trainer = object.__new__(LatentLOMTrainer)
+    trainer.cfg = cfg
+    trainer.models = trainer.build_models().eval()
+    return trainer
+
+
 @torch.no_grad()
-def test_lam_step_keys():
-    trainer = lam_trainer_with_models()
-    out = trainer.step(lam_batch())
-    assert {"recon", "vq_loss", "commit_loss", "entropy", "total_loss"} == set(out.keys())
-
-
-@needs_cuda
-def test_lam_step_backward():
-    trainer = lam_trainer_with_models()
-    trainer.models = trainer.models.cuda()
-    out = trainer.step([t.cuda() for t in lam_batch()])
-    out["total_loss"].backward()
-
-
-@torch.no_grad()
-def test_lom_step_keys():
-    trainer = lom_trainer_with_models()
+def test_reconstruction_lom_step_keys():
+    trainer = reconstruction_lom_trainer()
     out = trainer.step(lom_batch())
     assert {"lam_recon", "lom_recon", "vq_loss_option", "vq_loss_action",
             "commit_loss_option", "commit_loss_action",
@@ -144,8 +121,32 @@ def test_lom_step_keys():
 
 
 @needs_cuda
-def test_lom_step_backward():
-    trainer = lom_trainer_with_models()
+def test_reconstruction_lom_step_backward():
+    trainer = reconstruction_lom_trainer()
+    trainer.models = trainer.models.cuda()
+    out = trainer.step([t.cuda() for t in lom_batch()])
+    out["total_loss"].backward()
+
+
+@torch.no_grad()
+def test_latent_lom_step_keys():
+    trainer = latent_lom_trainer()
+    out = trainer.step(lom_batch())
+    assert {"lam_jepa_loss", "lom_jepa_loss", "vq_loss_option", "vq_loss_action",
+            "commit_loss_option", "commit_loss_action",
+            "entropy_option", "entropy_action", "total_loss"} == set(out.keys())
+
+
+@torch.no_grad()
+def test_latent_lom_step_loss_finite():
+    trainer = latent_lom_trainer()
+    out = trainer.step(lom_batch())
+    assert out["total_loss"].isfinite()
+
+
+@needs_cuda
+def test_latent_lom_step_backward():
+    trainer = latent_lom_trainer()
     trainer.models = trainer.models.cuda()
     out = trainer.step([t.cuda() for t in lom_batch()])
     out["total_loss"].backward()
@@ -157,13 +158,13 @@ def test_lom_step_backward():
 
 
 def make_trainer_for_checkpoint(tmp_path):
-    cfg = LAMCfg(env=make_env_cfg(), model=make_model_cfg(), data=make_data_cfg())
-    trainer = object.__new__(LAMTrainer)
+    cfg = LOMCfg(env=make_env_cfg(), model=make_lom_model_cfg(), data=make_data_cfg())
+    trainer = object.__new__(ReconstructionLOMTrainer)
     trainer.cfg = cfg
     trainer.device = torch.device("cpu")
     trainer.models = trainer.build_models()
     trainer.optimizer = torch.optim.Adam(trainer.models.parameters())
-    trainer.ckpt_path = str(tmp_path / "lam_pretrain.pt")
+    trainer.ckpt_path = str(tmp_path / "lom_pretrain.pt")
     trainer.wandb_run = None
     return trainer
 
@@ -171,7 +172,7 @@ def make_trainer_for_checkpoint(tmp_path):
 def test_save_restore_checkpoint(tmp_path):
     trainer = make_trainer_for_checkpoint(tmp_path)
     trainer.save_checkpoint(step=42)
-    assert (tmp_path / "lam_pretrain.pt").exists()
+    assert (tmp_path / "lom_pretrain.pt").exists()
 
     for p in trainer.models.parameters():
         p.data.zero_()
@@ -200,68 +201,3 @@ def test_jepa_loss_orthogonal():
     pred   = torch.zeros(2, 2); pred[0, 0]   = 1.0; pred[1, 1]   = 1.0
     target = torch.zeros(2, 2); target[0, 1] = 1.0; target[1, 0] = 1.0
     assert abs(jepa_loss(pred, target).item() - 1.0) < 1e-5
-
-
-# --------------------------------------------------------------------------- #
-# --- JEPALAMTrainer -------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
-
-def jepa_lam_trainer():
-    cfg = LAMCfg(env=make_env_cfg(), model=make_model_cfg(), data=make_data_cfg())
-    cfg.model.two_encoder = True
-    trainer = object.__new__(JEPALAMTrainer)
-    trainer.cfg = cfg
-    trainer.models = trainer.build_models().eval()
-    return trainer
-
-
-@torch.no_grad()
-def test_jepa_lam_step_keys():
-    trainer = jepa_lam_trainer()
-    out = trainer.step(lam_batch())
-    assert {"jepa_loss", "vq_loss", "commit_loss", "entropy", "total_loss"} == set(out.keys())
-
-
-@needs_cuda
-def test_jepa_lam_step_backward():
-    trainer = jepa_lam_trainer()
-    trainer.models = trainer.models.cuda()
-    out = trainer.step([t.cuda() for t in lam_batch()])
-    out["total_loss"].backward()
-
-
-# --------------------------------------------------------------------------- #
-# --- JEPALOMTrainer -------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
-
-def jepa_lom_trainer():
-    cfg = LOMCfg(env=make_env_cfg(), model=make_lom_model_cfg(), data=make_data_cfg())
-    cfg.model.two_encoder = True
-    trainer = object.__new__(JEPALOMTrainer)
-    trainer.cfg = cfg
-    trainer.models = trainer.build_models().eval()
-    return trainer
-
-
-@torch.no_grad()
-def test_jepa_lom_step_keys():
-    trainer = jepa_lom_trainer()
-    out = trainer.step(lom_batch())
-    assert {"lam_jepa_loss", "lom_jepa_loss", "vq_loss_option", "vq_loss_action",
-            "commit_loss_option", "commit_loss_action",
-            "entropy_option", "entropy_action", "total_loss"} == set(out.keys())
-
-
-@torch.no_grad()
-def test_jepa_lom_step_loss_finite():
-    trainer = jepa_lom_trainer()
-    out = trainer.step(lom_batch())
-    assert out["total_loss"].isfinite()
-
-
-@needs_cuda
-def test_jepa_lom_step_backward():
-    trainer = jepa_lom_trainer()
-    trainer.models = trainer.models.cuda()
-    out = trainer.step([t.cuda() for t in lom_batch()])
-    out["total_loss"].backward()

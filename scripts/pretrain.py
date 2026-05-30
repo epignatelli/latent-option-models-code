@@ -1,16 +1,16 @@
-"""CLI entry point for LAM / LOM pre-training.
+"""CLI entry point for LOM pre-training.
 
 Usage:
-    python -m scripts.pretrain lam
-    python -m scripts.pretrain lom
+    python -m scripts.pretrain reconstruction-lom
+    python -m scripts.pretrain latent-lom
 
     # Override any field with dotted-path syntax (= or -- both work):
-    python -m scripts.pretrain lam model.d_model=512 train.batch_size=64
-    python -m scripts.pretrain lom --model.num_options=256 --data.horizon=128
+    python -m scripts.pretrain reconstruction-lom model.d_model=512 train.batch_size=64
+    python -m scripts.pretrain latent-lom --model.num_options=256 --data.horizon=128
 
     # Load an experiment config, then override individual fields:
-    python -m scripts.pretrain lam --config experiments/benchmark/config.yaml
-    python -m scripts.pretrain lom --config experiments/benchmark/config.yaml model.d_model=512
+    python -m scripts.pretrain reconstruction-lom --config experiments/benchmark/config.yaml
+    python -m scripts.pretrain latent-lom --config experiments/benchmark/config.yaml model.d_model=512
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from typing import Annotated, Union
 import tyro
 import yaml
 
-from lom.config import LAMCfg, LOMCfg
-from lom.training import LAMTrainer, LOMTrainer
+from lom.config import LOMCfg
+from lom.training import ReconstructionLOMTrainer, LatentLOMTrainer
 
 
 def _yaml_to_args(d: dict, prefix: str = "") -> list[str]:
@@ -86,12 +86,13 @@ def main() -> None:
     )
     cfg = tyro.cli(
         Union[
-            Annotated[LAMCfg, tyro.conf.subcommand("lam")],
-            Annotated[LOMCfg, tyro.conf.subcommand("lom")],
+            Annotated[LOMCfg, tyro.conf.subcommand("reconstruction-lom")],
+            Annotated[LOMCfg, tyro.conf.subcommand("latent-lom")],
         ],
         args=_parse_args(sys.argv[1:]),
     )
-    trainer = LAMTrainer(cfg) if isinstance(cfg, LAMCfg) else LOMTrainer(cfg)
+    subcommand = sys.argv[1] if len(sys.argv) > 1 else ""
+    trainer = LatentLOMTrainer(cfg) if subcommand == "latent-lom" else ReconstructionLOMTrainer(cfg)
     trainer.train()
 
 

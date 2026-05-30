@@ -16,7 +16,6 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .config import LatentLOMCfg, ReconstructionLOMCfg  # noqa: F401  (re-exported for convenience)
 from .modules import (
     DynamicsModel,
     EMAEncoder,

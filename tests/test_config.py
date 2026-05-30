@@ -1,6 +1,5 @@
 import pytest
 from lom.config import (
-    LAMCfg,
     LOMCfg,
     ModelCfg,
     LOMModelCfg,
@@ -27,12 +26,6 @@ def test_train_cfg_bad_warmup():
 def test_train_cfg_bad_eta_min():
     with pytest.raises(ValueError, match="eta_min"):
         TrainCfg(eta_min=1.0, lr=1e-4)
-
-
-def test_lam_cfg_default():
-    cfg = LAMCfg()
-    assert isinstance(cfg.model, ModelCfg)
-    assert not isinstance(cfg.model, LOMModelCfg)
 
 
 def test_lom_cfg_default():
