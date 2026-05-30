@@ -156,15 +156,17 @@ class STTEncoder(nn.Module):
 
 
 class JEPAEncoder(nn.Module):
-    """JEPA encoder: context and future encoded independently → (B, 2 * d_model).
+    """JEPA encoder: past and future encoded by separate causal transformers.
 
-    Context pass: [history, (condition)] → mean over (T, S) → (B, D)
-    Target pass:  [future]               → mean over (T, S) → (B, D)
-    Returns concat of both pooled vectors — no cross-attention between history
-    and future at the transformer level; z_q is the only information bridge.
+    past_encoder:   history  → last-frame spatial mean → (B, D)
+    future_encoder: future   → last-frame spatial mean → (B, D)
+    Returns concat of both → (B, 2 * d_model).
 
-    Also exposes encode(frames) which runs the backbone on an arbitrary frame
-    sequence — used by EMAEncoder to produce JEPA targets without history context.
+    No shared weights between past and future; no cross-attention.
+    Condition (z_opt for action_lam) is injected at the VQ level in
+    LatentActionModel, not here.
+
+    encode(frames) runs future_encoder only — used by EMAEncoder for targets.
     """
 
     def __init__(
@@ -179,32 +181,27 @@ class JEPAEncoder(nn.Module):
         latent_dim: int,
         horizon: int = 1,
         patch_size: int = 1,
-        condition_dim: Optional[int] = None,
         dropout: float = 0.0,
         bias: bool = False,
+        **_kwargs,  # absorb unused kwargs (e.g. condition_dim from STT path)
     ):
         super().__init__()
         self.d_model = d_model
         self.latent_dim = latent_dim
-        self.has_condition = condition_dim is not None
 
         self.tokeniser = ScreenTokeniser()
         self.embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
         S = self.S = self.embed.n_tokens
 
-        extra = 1 if self.has_condition else 0
-        self.cond_proj = (
-            nn.Linear(condition_dim, d_model, bias=bias) if self.has_condition else None
+        self.past_encoder = SpatioTemporalTransformer(
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            n_spatial_positions=S, max_temporal_len=context_length,
+            dropout=dropout, bias=bias, causal_temporal=True,
         )
-        self.transformer = SpatioTemporalTransformer(
-            d_model=d_model,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            n_spatial_positions=S,
-            max_temporal_len=max(context_length + extra, horizon),
-            dropout=dropout,
-            bias=bias,
-            causal_temporal=False,
+        self.future_encoder = SpatioTemporalTransformer(
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            n_spatial_positions=S, max_temporal_len=horizon,
+            dropout=dropout, bias=bias, causal_temporal=True,
         )
         self.proj_target = nn.Linear(d_model, latent_dim, bias=bias)
         self.ln_target = LayerNorm(latent_dim, bias)
@@ -214,53 +211,44 @@ class JEPAEncoder(nn.Module):
         return 2 * self.d_model
 
     def encode(self, frames: torch.Tensor) -> torch.Tensor:
-        """Encode frames without history context: backbone → mean pool → proj → (B, latent_dim).
+        """Encode frames with future_encoder → last-frame spatial mean → proj.
 
         Used by EMAEncoder to produce JEPA targets.
         frames: (B, H, W, 2) or (B, k, H, W, 2) uint8
         """
         tokens = self.tokeniser(frames)
-        if tokens.ndim == 3:          # single frame (B, H, W) → (B, 1, H, W)
+        if tokens.ndim == 3:
             tokens = tokens.unsqueeze(1)
-        emb = self.embed(tokens)                          # (B, k, S, D)
-        pooled = self.transformer(emb).mean(dim=(1, 2))  # (B, D)
-        return self.ln_target(self.proj_target(pooled))  # (B, latent_dim)
+        emb = self.embed(tokens)                                    # (B, k, S, D)
+        out = self.future_encoder(emb)                              # (B, k, S, D)
+        pooled = out[:, -1, :, :].mean(dim=1)                      # (B, D) last frame
+        return self.ln_target(self.proj_target(pooled))             # (B, latent_dim)
 
     def forward(
         self,
         history: torch.Tensor,
         future: torch.Tensor,
-        condition: Optional[torch.Tensor] = None,
+        condition: Optional[torch.Tensor] = None,  # unused; kept for API compat
     ) -> torch.Tensor:
         """
         Args:
-            history:   (B, c, H, W, 2) uint8
-            future:    (B, H, W, 2) or (B, k, H, W, 2) uint8
-            condition: (B, condition_dim) optional
+            history: (B, c, H, W, 2) uint8
+            future:  (B, H, W, 2) or (B, k, H, W, 2) uint8
         Returns:
             (B, 2 * d_model)
         """
-        B = history.shape[0]
         history = self.tokeniser(history)
-        future = self.tokeniser(future)
+        future  = self.tokeniser(future)
         if future.ndim == 3:
             future = future.unsqueeze(1)
 
-        hist_emb = self.embed(history)  # (B, c, S, D)
-        fut_emb = self.embed(future)    # (B, k, S, D)
+        hist_emb = self.embed(history)                              # (B, c, S, D)
+        ctx_pooled = self.past_encoder(hist_emb)[:, -1, :, :].mean(dim=1)   # (B, D)
 
-        ctx_parts = [hist_emb]
-        if condition is not None and self.cond_proj is not None:
-            cond_tok = (
-                self.cond_proj(condition)
-                .view(B, 1, 1, self.d_model)
-                .expand(B, 1, self.S, self.d_model)
-            )
-            ctx_parts.append(cond_tok)
-        ctx_pooled = self.transformer(torch.cat(ctx_parts, dim=1)).mean(dim=(1, 2))  # (B, D)
-        tgt_pooled = self.transformer(fut_emb).mean(dim=(1, 2))                      # (B, D)
+        fut_emb  = self.embed(future)                               # (B, k, S, D)
+        tgt_pooled = self.future_encoder(fut_emb)[:, -1, :, :].mean(dim=1)  # (B, D)
 
-        return torch.cat([ctx_pooled, tgt_pooled], dim=-1)  # (B, 2D)
+        return torch.cat([ctx_pooled, tgt_pooled], dim=-1)          # (B, 2D)
 
 
 class EMAEncoder(nn.Module):
@@ -312,7 +300,8 @@ class LatentActionModel(SerialisableModule):
         codebook_size: int,
         horizon: int = 1,
         patch_size: int = 1,
-        condition_dim: Optional[int] = None,
+        condition_dim: Optional[int] = None,  # STT only: condition token in encoder
+        option_code_dim: Optional[int] = None,  # JEPA only: z_opt concatenated at VQ input
         two_encoder: bool = False,
         vq_dropout: float = 0.1,
         vq_entropy_weight: float = 0.01,
@@ -335,6 +324,7 @@ class LatentActionModel(SerialisableModule):
         self.horizon = horizon
         self.patch_size = patch_size
         self.condition_dim = condition_dim
+        self.option_code_dim = option_code_dim
         self.two_encoder = two_encoder
         self.vq_dropout = vq_dropout
         self.vq_entropy_weight = vq_entropy_weight
@@ -349,13 +339,15 @@ class LatentActionModel(SerialisableModule):
             vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
             d_model=d_model, n_layers=n_layers, n_heads=n_heads,
             context_length=context_length, horizon=horizon,
-            patch_size=patch_size, condition_dim=condition_dim,
-            dropout=dropout, bias=bias,
+            patch_size=patch_size, dropout=dropout, bias=bias,
         )
         if two_encoder:
             encoder_kwargs["latent_dim"] = latent_dim
+        else:
+            encoder_kwargs["condition_dim"] = condition_dim  # STT handles condition in encoder
         self.encoder = encoder_cls(**encoder_kwargs)
-        self.vq_proj = nn.Linear(self.encoder.out_dim, latent_dim, bias=bias)
+        vq_in_dim = self.encoder.out_dim + (option_code_dim or 0)
+        self.vq_proj = nn.Linear(vq_in_dim, latent_dim, bias=bias)
         self.ln_vq = LayerNorm(latent_dim, bias)
         self.vq = VectorQuantizer(
             latent_dim=latent_dim,
@@ -372,16 +364,20 @@ class LatentActionModel(SerialisableModule):
         history: torch.Tensor,
         future: torch.Tensor,
         condition: Optional[torch.Tensor] = None,
+        option_code: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, dict, torch.Tensor]:
         """
         Args:
-            history:   (B, c, H, W, 2) uint8/long — stacked (char, color)
-            future:    (B, H, W, 2) or (B, k, H, W, 2)
-            condition: (B, condition_dim) optional
+            history:     (B, c, H, W, 2) uint8/long
+            future:      (B, H, W, 2) or (B, k, H, W, 2)
+            condition:   (B, condition_dim) — STT encoder conditioning (token-based)
+            option_code: (B, latent_dim)   — JEPA VQ-level conditioning (concat before proj)
         Returns:
             z_q (B, latent_dim), vq loss dict, indices (B,)
         """
         pooled = self.encoder(history, future, condition)
+        if option_code is not None:
+            pooled = torch.cat([pooled, option_code], dim=-1)
         z = self.ln_vq(self.vq_proj(pooled))
         return self.vq(z)
 

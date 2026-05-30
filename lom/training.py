@@ -636,17 +636,13 @@ class JEPALAMTrainer(Trainer):
 class JEPALOMTrainer(Trainer):
     """LOM trainer with JEPA latent prediction for both dynamics models.
 
-    Both lam_dynamics and lom_dynamics predict in latent space (cosine distance
-    to EMA target encoder outputs) instead of doing pixel-level reconstruction.
-    This eliminates the two 144M pixel prediction heads, cutting total params
-    from ~311M to ~50M for the JEPA-compute backbone.
-
-    - option_lam:      JEPAEncoder; encodes (history, sequence) → z_opt
-    - action_lam:      JEPAEncoder; encodes (history, next_frame, z_opt) → z_act
-    - ema_option_enc:  EMA of option_lam.encoder; encodes sequence → z_opt_target
-    - ema_action_enc:  EMA of action_lam.encoder; encodes next_frame → z_act_target
-    - lam_dynamics:    predict z_act_target from (history, z_act)
-    - lom_dynamics:    predict z_opt_target from (history, z_act, option_code=z_opt)
+    Architecture (4 pure encoders, no shared weights):
+    - option_lam:      JEPAEncoder; (history, sequence) → z_opt via LOM VQ
+    - action_lam:      JEPAEncoder; (history, next_frame) + z_opt at VQ level → z_act
+    - ema_option_enc:  EMA of option_lam.encoder.future_encoder; sequence → z_opt_target
+    - ema_action_enc:  EMA of action_lam.encoder.future_encoder; next_frame → z_act_target
+    - lam_dynamics:    (history, z_act) → predict z_act_target
+    - lom_dynamics:    (history, z_opt) → predict z_opt_target  [z_act NOT used]
     """
 
     def build_models(self) -> nn.ModuleDict:
@@ -677,15 +673,14 @@ class JEPALOMTrainer(Trainer):
         )
         action_lam = LatentActionModel(
             **base, codebook_size=e.n_actions, horizon=1,
-            condition_dim=m.latent_dim, two_encoder=True, **vq,
+            option_code_dim=m.latent_dim, two_encoder=True, **vq,
         )
         lam_dynamics = DynamicsModel(
             **base, predict_sequence=False,
             predict_latent=True, target_dim=m.latent_dim,
         )
         lom_dynamics = DynamicsModel(
-            **base, option_dim=m.latent_dim,
-            predict_sequence=m.predict_sequence, horizon=d.horizon,
+            **base, predict_sequence=False,
             predict_latent=True, target_dim=m.latent_dim,
         )
         return nn.ModuleDict({
@@ -701,14 +696,15 @@ class JEPALOMTrainer(Trainer):
         history, next_frame, _, sequence = batch[0], batch[1], batch[2], batch[3]
 
         z_opt, vq_opt, _ = self.models["option_lam"](history, sequence)
-        z_act, vq_act, _ = self.models["action_lam"](history, next_frame, z_opt.detach())
+        z_act, vq_act, _ = self.models["action_lam"](history, next_frame,
+                                                      option_code=z_opt.detach())
 
         with torch.no_grad():
             z_act_target = self.models["ema_action_enc"].encode(next_frame)
             z_opt_target = self.models["ema_option_enc"].encode(sequence)
 
         z_act_hat = self.models["lam_dynamics"](history, z_act)
-        z_opt_hat = self.models["lom_dynamics"](history, z_act, option_code=z_opt)
+        z_opt_hat = self.models["lom_dynamics"](history, z_opt)  # z_act not used
 
         lam_jepa = jepa_loss(z_act_hat, z_act_target)
         lom_jepa = jepa_loss(z_opt_hat, z_opt_target)
