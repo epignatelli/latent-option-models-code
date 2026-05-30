@@ -548,9 +548,9 @@ class STTEncoder(nn.Module):
         fut_emb = self.embed(future)
         opt_emb = self.opt_token.expand(B, 1, self.S, self.d_model)
 
-        seq = torch.cat([hist_emb, opt_emb, fut_emb], dim=1)
         if condition is not None and self.cond_proj is not None:
-            seq = seq + self.cond_proj(condition).view(B, 1, 1, self.d_model)
+            fut_emb = fut_emb + self.cond_proj(condition).view(B, 1, 1, self.d_model)
+        seq = torch.cat([hist_emb, opt_emb, fut_emb], dim=1)
 
         hidden = self.transformer(seq, temporal_mask=self._build_block_mask(c, k, seq.device))
         return hidden[:, c, :, :].mean(dim=1)  # (B, D) — OPT is always at position c
