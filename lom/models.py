@@ -14,7 +14,7 @@ from __future__ import annotations
 import torch
 
 from .encoders import EMAEncoder, JEPAEncoder, STTEncoder
-from .lam import DynamicsModel, LatentActionModel
+from .lam import LatentActionModel, ObservableTransitionModel, LatentTransitionModel
 from .modules import SerialisableModule
 
 
@@ -108,35 +108,18 @@ class ReconstructionLOM(SerialisableModule):
             vq_reset_thresh=vq_reset_thresh,
             vq_ema_decay=vq_ema_decay,
         )
-        self.lam_dynamics = DynamicsModel(
-            vocab_size=vocab_size,
-            obs_h=obs_h,
-            obs_w=obs_w,
-            d_model=d_model,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            context_length=context_length,
-            latent_dim=latent_dim,
-            patch_size=patch_size,
-            dropout=dropout,
-            bias=bias,
-            predict_sequence=False,
+        self.lam_dynamics = ObservableTransitionModel(
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            patch_size=patch_size, dropout=dropout, bias=bias,
         )
-        self.lom_dynamics = DynamicsModel(
-            vocab_size=vocab_size,
-            obs_h=obs_h,
-            obs_w=obs_w,
-            d_model=d_model,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            context_length=context_length,
-            latent_dim=latent_dim,
-            patch_size=patch_size,
-            dropout=dropout,
-            bias=bias,
-            option_dim=latent_dim,
-            predict_sequence=predict_sequence,
-            horizon=horizon,
+        self.lom_dynamics = ObservableTransitionModel(
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim,
+            option_dim=latent_dim, predict_sequence=predict_sequence, horizon=horizon,
+            patch_size=patch_size, dropout=dropout, bias=bias,
         )
 
     def forward(
@@ -262,37 +245,17 @@ class LatentLOM(SerialisableModule):
             vq_reset_thresh=vq_reset_thresh,
             vq_ema_decay=vq_ema_decay,
         )
-        self.lam_dynamics = DynamicsModel(
-            vocab_size=vocab_size,
-            obs_h=obs_h,
-            obs_w=obs_w,
-            d_model=d_model,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            context_length=context_length,
-            latent_dim=latent_dim,
-            patch_size=patch_size,
-            dropout=dropout,
-            bias=bias,
-            predict_sequence=False,
-            predict_latent=True,
-            target_dim=latent_dim,
+        self.lam_dynamics = LatentTransitionModel(
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim, target_dim=latent_dim,
+            patch_size=patch_size, dropout=dropout, bias=bias,
         )
-        self.lom_dynamics = DynamicsModel(
-            vocab_size=vocab_size,
-            obs_h=obs_h,
-            obs_w=obs_w,
-            d_model=d_model,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            context_length=context_length,
-            latent_dim=latent_dim,
-            patch_size=patch_size,
-            dropout=dropout,
-            bias=bias,
-            predict_sequence=False,
-            predict_latent=True,
-            target_dim=latent_dim,
+        self.lom_dynamics = LatentTransitionModel(
+            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
+            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
+            context_length=context_length, latent_dim=latent_dim, target_dim=latent_dim,
+            patch_size=patch_size, dropout=dropout, bias=bias,
         )
         self.ema_opt_enc = EMAEncoder(self.opt_encoder, decay=ema_decay)
         self.ema_act_enc = EMAEncoder(self.act_encoder, decay=ema_decay)

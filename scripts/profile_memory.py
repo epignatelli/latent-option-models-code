@@ -31,7 +31,7 @@ import torch.optim as optim
 
 from lom.config import EnvCfg, ModelCfg
 from lom.encoders import STTEncoder, JEPAEncoder, EMAEncoder
-from lom.lam import LatentActionModel, DynamicsModel
+from lom.lam import LatentActionModel, ObservableTransitionModel
 from lom.tokeniser import tokenise
 from lom.training import NullCtx, jepa_loss, reconstruction_loss
 
@@ -103,7 +103,7 @@ def _build_models(device, method: str, encoder: str,
     if method == "lam":
         enc = enc_cls(**enc_kw, horizon=1).to(device)
         lam = LatentActionModel(enc.out_dim, m.latent_dim, m.num_options, **vq_kw).to(device)
-        dyn = DynamicsModel(**base, predict_sequence=False,
+        dyn = ObservableTransitionModel(**base, predict_sequence=False,
                             predict_latent=jepa,
                             target_dim=m.latent_dim if jepa else None).to(device)
         models = {"enc": enc, "lam": lam, "dyn": dyn}
@@ -119,10 +119,10 @@ def _build_models(device, method: str, encoder: str,
                           **({"condition_dim": m.latent_dim} if not jepa else {})).to(device)
         act_vq  = LatentActionModel(act_in if jepa else act_enc.out_dim,
                                     m.latent_dim, m.num_options, **vq_kw).to(device)
-        lam_dyn = DynamicsModel(**base, predict_sequence=False,
+        lam_dyn = ObservableTransitionModel(**base, predict_sequence=False,
                                 predict_latent=jepa,
                                 target_dim=m.latent_dim if jepa else None).to(device)
-        lom_dyn = DynamicsModel(**base, option_dim=m.latent_dim,
+        lom_dyn = ObservableTransitionModel(**base, option_dim=m.latent_dim,
                                 predict_sequence=False, horizon=horizon,
                                 predict_latent=jepa,
                                 target_dim=m.latent_dim if jepa else None).to(device)

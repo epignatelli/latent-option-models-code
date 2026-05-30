@@ -1,6 +1,6 @@
 import pytest
 import torch
-from lom.lam import DynamicsModel, LatentActionModel
+from lom.lam import LatentActionModel, ObservableTransitionModel
 from lom.encoders import STTEncoder, JEPAEncoder, EMAEncoder
 
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
@@ -15,17 +15,11 @@ def make_lam(in_dim=D_MODEL):
 
 
 def make_dynamics(option_dim=None, predict_sequence=False):
-    return DynamicsModel(
-        vocab_size=VOCAB,
-        obs_h=OBS_H,
-        obs_w=OBS_W,
-        d_model=D_MODEL,
-        n_layers=N_LAYERS,
-        n_heads=N_HEADS,
-        context_length=CONTEXT,
-        latent_dim=LATENT_DIM,
-        option_dim=option_dim,
-        predict_sequence=predict_sequence,
+    return ObservableTransitionModel(
+        vocab_size=VOCAB, obs_h=OBS_H, obs_w=OBS_W,
+        d_model=D_MODEL, n_layers=N_LAYERS, n_heads=N_HEADS,
+        context_length=CONTEXT, latent_dim=LATENT_DIM,
+        option_dim=option_dim, predict_sequence=predict_sequence,
         horizon=HORIZON if predict_sequence else 1,
     )
 
@@ -174,7 +168,7 @@ PATCH = 2  # OBS_H=OBS_W=4, so 4//2=2 tokens per dim → 4 tokens/frame
 
 
 def make_dynamics_patched(predict_sequence=False):
-    return DynamicsModel(
+    return ObservableTransitionModel(
         vocab_size=VOCAB, obs_h=OBS_H, obs_w=OBS_W, d_model=D_MODEL,
         n_layers=N_LAYERS, n_heads=N_HEADS, context_length=CONTEXT,
         latent_dim=LATENT_DIM, predict_sequence=predict_sequence,

@@ -14,7 +14,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
-from .tokeniser import COLOR_VOCAB, ScreenTokeniser, tokenise
 
 # --------------------------------------------------------------------------- #
 # --- flex_attention helpers ------------------------------------------------ #
@@ -42,10 +41,8 @@ def _get_causal_block_mask(T: int, device: torch.device) -> BlockMask:
 def _get_opt_block_mask(T: int, opt_pos: int, device: torch.device) -> BlockMask:
     key = (T, opt_pos, str(device))
     if key not in _opt_block_mask_cache:
-
         def mask_mod(b, h, q_idx, kv_idx):
             return ~((q_idx == opt_pos) & (kv_idx > opt_pos))
-
         _opt_block_mask_cache[key] = create_block_mask(
             mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device
         )
@@ -98,6 +95,7 @@ class SelfAttention(nn.Module):
         self.resid_drop = nn.Dropout(dropout)
         self.n_heads = n_heads
         self.d_model = d_model
+
 
     def attend(self, x: torch.Tensor, block_mask: BlockMask | None) -> torch.Tensor:
         B, T, C = x.shape
