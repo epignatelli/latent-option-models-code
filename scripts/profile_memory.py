@@ -109,16 +109,23 @@ def _build_models(device, method: str, encoder: str,
                          context_length=m.context_length, latent_dim=m.latent_dim,
                          num_options=m.num_options, patch_size=m.patch_size)
         base2 = dict(**base)
-        models = {
-            "option_lam":   LatentActionModel(**base2, codebook_size=m2.num_options,
-                                              horizon=horizon, two_encoder=jepa).to(device),
-            "action_lam":   LatentActionModel(**base2, codebook_size=m2.num_options,
-                                              horizon=1, condition_dim=m2.latent_dim,
-                                              two_encoder=jepa).to(device),
-            "lam_dynamics": DynamicsModel(**base2, predict_sequence=False).to(device),
-            "lom_dynamics": DynamicsModel(**base2, option_dim=m2.latent_dim,
-                                          predict_sequence=False, horizon=horizon).to(device),
-        }
+        option_lam = LatentActionModel(**base2, codebook_size=m2.num_options,
+                                       horizon=horizon, two_encoder=jepa).to(device)
+        action_lam = LatentActionModel(**base2, codebook_size=m2.num_options,
+                                       horizon=1, condition_dim=m2.latent_dim,
+                                       two_encoder=jepa).to(device)
+        lam_dyn = DynamicsModel(**base2, predict_sequence=False,
+                                predict_latent=jepa,
+                                target_dim=m2.latent_dim if jepa else None).to(device)
+        lom_dyn = DynamicsModel(**base2, option_dim=m2.latent_dim,
+                                predict_sequence=False, horizon=horizon,
+                                predict_latent=jepa,
+                                target_dim=m2.latent_dim if jepa else None).to(device)
+        models = {"option_lam": option_lam, "action_lam": action_lam,
+                  "lam_dynamics": lam_dyn, "lom_dynamics": lom_dyn}
+        if jepa:
+            models["ema_action_enc"] = EMAEncoder(action_lam.encoder, decay=0.996).to(device)  # type: ignore[arg-type]
+            models["ema_option_enc"] = EMAEncoder(option_lam.encoder, decay=0.996).to(device)  # type: ignore[arg-type]
         return e, models
 
 
@@ -146,11 +153,21 @@ def _run_step(method: str, encoder: str, models: dict,
         sequence   = batch[3].to(device)
         z_opt, vq_opt, _ = models["option_lam"](history, sequence)
         z_act, vq_act, _ = models["action_lam"](history, next_frame, z_opt.detach())
-        lam_logits = models["lam_dynamics"](history, z_act)
-        lom_logits = models["lom_dynamics"](history, z_act, option_code=z_opt, horizon=1)
-        lam_recon  = reconstruction_loss(lam_logits, tokenise(next_frame), e.vocab_size)
-        lom_recon  = reconstruction_loss(lom_logits, tokenise(future), e.vocab_size)
-        return lam_recon + lom_recon + vq_opt["vq_loss"] + vq_act["vq_loss"]
+        if encoder.startswith("jepa"):
+            with torch.no_grad():
+                z_act_target = models["ema_action_enc"].encode(next_frame)
+                z_opt_target = models["ema_option_enc"].encode(sequence)
+            z_act_hat = models["lam_dynamics"](history, z_act)
+            z_opt_hat = models["lom_dynamics"](history, z_act, option_code=z_opt)
+            return (jepa_loss(z_act_hat, z_act_target)
+                    + jepa_loss(z_opt_hat, z_opt_target)
+                    + vq_opt["vq_loss"] + vq_act["vq_loss"])
+        else:
+            lam_logits = models["lam_dynamics"](history, z_act)
+            lom_logits = models["lom_dynamics"](history, z_act, option_code=z_opt, horizon=1)
+            lam_recon  = reconstruction_loss(lam_logits, tokenise(next_frame), e.vocab_size)
+            lom_recon  = reconstruction_loss(lom_logits, tokenise(future), e.vocab_size)
+            return lam_recon + lom_recon + vq_opt["vq_loss"] + vq_act["vq_loss"]
 
 
 def _make_frame(shape: tuple, rng: torch.Generator) -> torch.Tensor:
@@ -216,14 +233,22 @@ def _run_step_traced(method: str, encoder: str, models: dict,
             z_act, vq_act, _ = models["action_lam"](history, next_frame, z_opt.detach())
         log.info("    [trace] after action_lam:      %.2f GB", _mem(device))
         with ctx:
-            lam_logits = models["lam_dynamics"](history, z_act)
-            lom_logits = models["lom_dynamics"](history, z_act, option_code=z_opt, horizon=1)
+            if encoder.startswith("jepa"):
+                with torch.no_grad():
+                    z_act_target = models["ema_action_enc"].encode(next_frame)
+                    z_opt_target = models["ema_option_enc"].encode(sequence)
+                z_act_hat = models["lam_dynamics"](history, z_act)
+                z_opt_hat = models["lom_dynamics"](history, z_act, option_code=z_opt)
+                loss = (jepa_loss(z_act_hat, z_act_target)
+                        + jepa_loss(z_opt_hat, z_opt_target)
+                        + vq_opt["vq_loss"] + vq_act["vq_loss"])
+            else:
+                lam_logits = models["lam_dynamics"](history, z_act)
+                lom_logits = models["lom_dynamics"](history, z_act, option_code=z_opt, horizon=1)
+                loss = (reconstruction_loss(lam_logits, tokenise(next_frame), e.vocab_size)
+                        + reconstruction_loss(lom_logits, tokenise(future), e.vocab_size)
+                        + vq_opt["vq_loss"] + vq_act["vq_loss"])
         log.info("    [trace] after dynamics:        %.2f GB", _mem(device))
-        with ctx:
-            loss = (reconstruction_loss(lam_logits, tokenise(next_frame), e.vocab_size)
-                    + reconstruction_loss(lom_logits, tokenise(future), e.vocab_size)
-                    + vq_opt["vq_loss"] + vq_act["vq_loss"])
-        log.info("    [trace] after loss:            %.2f GB", _mem(device))
         loss.backward()
         log.info("    [trace] after backward:        %.2f GB", _mem(device))
         return loss
