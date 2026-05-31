@@ -115,15 +115,13 @@ def latent_lom_trainer():
 def test_reconstruction_lom_step_keys():
     trainer = reconstruction_lom_trainer()
     out = trainer.step(lom_batch())
-    assert {"total_loss", "train/lam", "train/lom",
-            "vq/opt_vq_loss", "vq/act_vq_loss",
-            "vq/opt_commit_loss", "vq/act_commit_loss",
-            "vq/opt_entropy", "vq/act_entropy",
-            "vq/opt_perplexity", "vq/act_perplexity",
-            "vq/opt_dead_frac", "vq/act_dead_frac",
-            "vq/opt_repr_std", "vq/act_repr_std",
-            "vq/opt_cb_norm_mean", "vq/opt_cb_norm_max", "vq/opt_cb_norm_std",
-            "vq/act_cb_norm_mean", "vq/act_cb_norm_max", "vq/act_cb_norm_std",
+    assert {"total_loss",
+            "lom/train_loss", "lom/vq_loss", "lom/commit_loss", "lom/entropy",
+            "lom/perplexity", "lom/dead_frac", "lom/repr_std",
+            "lom/cb_norm_mean", "lom/cb_norm_max", "lom/cb_norm_std",
+            "lam/train_loss", "lam/vq_loss", "lam/commit_loss", "lam/entropy",
+            "lam/perplexity", "lam/dead_frac", "lam/repr_std",
+            "lam/cb_norm_mean", "lam/cb_norm_max", "lam/cb_norm_std",
             } == set(out.keys())
 
 
@@ -139,16 +137,13 @@ def test_reconstruction_lom_step_backward():
 def test_latent_lom_step_keys():
     trainer = latent_lom_trainer()
     out = trainer.step(lom_batch())
-    assert {"total_loss", "train/lam_jepa", "train/lom_jepa",
-            "vq/opt_vq_loss", "vq/act_vq_loss",
-            "vq/opt_commit_loss", "vq/act_commit_loss",
-            "vq/opt_entropy", "vq/act_entropy",
-            "vq/opt_perplexity", "vq/act_perplexity",
-            "vq/opt_dead_frac", "vq/act_dead_frac",
-            "vq/opt_repr_std", "vq/act_repr_std",
-            "vq/opt_target_repr_std", "vq/act_target_repr_std",
-            "vq/opt_cb_norm_mean", "vq/opt_cb_norm_max", "vq/opt_cb_norm_std",
-            "vq/act_cb_norm_mean", "vq/act_cb_norm_max", "vq/act_cb_norm_std",
+    assert {"total_loss",
+            "lom/train_loss", "lom/vq_loss", "lom/commit_loss", "lom/entropy",
+            "lom/perplexity", "lom/dead_frac", "lom/repr_std", "lom/target_repr_std",
+            "lom/cb_norm_mean", "lom/cb_norm_max", "lom/cb_norm_std",
+            "lam/train_loss", "lam/vq_loss", "lam/commit_loss", "lam/entropy",
+            "lam/perplexity", "lam/dead_frac", "lam/repr_std", "lam/target_repr_std",
+            "lam/cb_norm_mean", "lam/cb_norm_max", "lam/cb_norm_std",
             } == set(out.keys())
 
 

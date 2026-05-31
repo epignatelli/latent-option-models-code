@@ -380,13 +380,13 @@ class Trainer(ABC):
                     self.wandb_run.log(
                         {k: v.item() for k, v in loss_dict.items() if k != "total_loss"}
                         | {
-                            "train/total": loss_dict["total_loss"].item(),
-                            "optim/lr": lr,
-                            "optim/grad_norm": grad_norm.item(),
-                            "optim/grad_clip_frac": clip_frac,
-                            "optim/step": s + 1,
-                            "optim/progress_pct": pct,
-                            "optim/sps": sps,
+                            "monitor/train_loss": loss_dict["total_loss"].item(),
+                            "monitor/lr": lr,
+                            "monitor/grad_norm": grad_norm.item(),
+                            "monitor/grad_clip_frac": clip_frac,
+                            "monitor/step": s + 1,
+                            "monitor/progress_pct": pct,
+                            "monitor/sps": sps,
                         },
                         step=s + 1,
                     )
@@ -399,14 +399,14 @@ class Trainer(ABC):
                     "  ".join(f"{k.split('/')[-1]}={v:.4f}" for k, v in val_metrics.items()),
                 )
                 if self.wandb_run:
-                    # Map train/* keys to val/*; vq/* metrics are training-state, not logged from val
-                    wandb_val = {
-                        ("val/" + k[len("train/"):]): v
-                        for k, v in val_metrics.items()
-                        if k.startswith("train/")
-                    }
-                    wandb_val["val/total"] = val_metrics["total_loss"]
-                    self.wandb_run.log(wandb_val, step=s + 1)
+                    self.wandb_run.log(
+                        {
+                            "monitor/val_loss": val_metrics["total_loss"],
+                            "lam/val_loss": val_metrics["lam/train_loss"],
+                            "lom/val_loss": val_metrics["lom/train_loss"],
+                        },
+                        step=s + 1,
+                    )
                 self.save_checkpoint(s + 1)
 
         log.info("=== training complete (%d steps) ===", t.max_iters)
@@ -470,26 +470,26 @@ class ReconstructionLOMTrainer(Trainer):
             act_cb_norms = model.act_vq.vq.codebook.norm(dim=-1)
         return {
             "total_loss": total,
-            "train/lam": lam_recon,
-            "train/lom": lom_recon,
-            "vq/opt_vq_loss": out["vq_opt"]["vq_loss"],
-            "vq/act_vq_loss": out["vq_act"]["vq_loss"],
-            "vq/opt_commit_loss": out["vq_opt"]["commit_loss"],
-            "vq/act_commit_loss": out["vq_act"]["commit_loss"],
-            "vq/opt_entropy": out["vq_opt"]["entropy"],
-            "vq/act_entropy": out["vq_act"]["entropy"],
-            "vq/opt_perplexity": torch.exp(out["vq_opt"]["entropy"]),
-            "vq/act_perplexity": torch.exp(out["vq_act"]["entropy"]),
-            "vq/opt_dead_frac": out["vq_opt"]["dead_frac"],
-            "vq/act_dead_frac": out["vq_act"]["dead_frac"],
-            "vq/opt_repr_std": out["z_opt"].detach().std(dim=0).mean(),
-            "vq/act_repr_std": out["z_act"].detach().std(dim=0).mean(),
-            "vq/opt_cb_norm_mean": opt_cb_norms.mean(),
-            "vq/opt_cb_norm_max": opt_cb_norms.max(),
-            "vq/opt_cb_norm_std": opt_cb_norms.std(),
-            "vq/act_cb_norm_mean": act_cb_norms.mean(),
-            "vq/act_cb_norm_max": act_cb_norms.max(),
-            "vq/act_cb_norm_std": act_cb_norms.std(),
+            "lom/train_loss": lom_recon,
+            "lom/vq_loss": out["vq_opt"]["vq_loss"],
+            "lom/commit_loss": out["vq_opt"]["commit_loss"],
+            "lom/entropy": out["vq_opt"]["entropy"],
+            "lom/perplexity": torch.exp(out["vq_opt"]["entropy"]),
+            "lom/dead_frac": out["vq_opt"]["dead_frac"],
+            "lom/repr_std": out["z_opt"].detach().std(dim=0).mean(),
+            "lom/cb_norm_mean": opt_cb_norms.mean(),
+            "lom/cb_norm_max": opt_cb_norms.max(),
+            "lom/cb_norm_std": opt_cb_norms.std(),
+            "lam/train_loss": lam_recon,
+            "lam/vq_loss": out["vq_act"]["vq_loss"],
+            "lam/commit_loss": out["vq_act"]["commit_loss"],
+            "lam/entropy": out["vq_act"]["entropy"],
+            "lam/perplexity": torch.exp(out["vq_act"]["entropy"]),
+            "lam/dead_frac": out["vq_act"]["dead_frac"],
+            "lam/repr_std": out["z_act"].detach().std(dim=0).mean(),
+            "lam/cb_norm_mean": act_cb_norms.mean(),
+            "lam/cb_norm_max": act_cb_norms.max(),
+            "lam/cb_norm_std": act_cb_norms.std(),
         }
 
 
@@ -543,28 +543,28 @@ class LatentLOMTrainer(Trainer):
             act_cb_norms = model.act_vq.vq.codebook.norm(dim=-1)
         return {
             "total_loss": total,
-            "train/lam_jepa": lam_jepa,
-            "train/lom_jepa": lom_jepa,
-            "vq/opt_vq_loss": out["vq_opt"]["vq_loss"],
-            "vq/act_vq_loss": out["vq_act"]["vq_loss"],
-            "vq/opt_commit_loss": out["vq_opt"]["commit_loss"],
-            "vq/act_commit_loss": out["vq_act"]["commit_loss"],
-            "vq/opt_entropy": out["vq_opt"]["entropy"],
-            "vq/act_entropy": out["vq_act"]["entropy"],
-            "vq/opt_perplexity": torch.exp(out["vq_opt"]["entropy"]),
-            "vq/act_perplexity": torch.exp(out["vq_act"]["entropy"]),
-            "vq/opt_dead_frac": out["vq_opt"]["dead_frac"],
-            "vq/act_dead_frac": out["vq_act"]["dead_frac"],
-            "vq/opt_repr_std": out["z_opt"].detach().std(dim=0).mean(),
-            "vq/act_repr_std": out["z_act"].detach().std(dim=0).mean(),
-            "vq/opt_target_repr_std": out["z_opt_target"].detach().std(dim=0).mean(),
-            "vq/act_target_repr_std": out["z_act_target"].detach().std(dim=0).mean(),
-            "vq/opt_cb_norm_mean": opt_cb_norms.mean(),
-            "vq/opt_cb_norm_max": opt_cb_norms.max(),
-            "vq/opt_cb_norm_std": opt_cb_norms.std(),
-            "vq/act_cb_norm_mean": act_cb_norms.mean(),
-            "vq/act_cb_norm_max": act_cb_norms.max(),
-            "vq/act_cb_norm_std": act_cb_norms.std(),
+            "lom/train_loss": lom_jepa,
+            "lom/vq_loss": out["vq_opt"]["vq_loss"],
+            "lom/commit_loss": out["vq_opt"]["commit_loss"],
+            "lom/entropy": out["vq_opt"]["entropy"],
+            "lom/perplexity": torch.exp(out["vq_opt"]["entropy"]),
+            "lom/dead_frac": out["vq_opt"]["dead_frac"],
+            "lom/repr_std": out["z_opt"].detach().std(dim=0).mean(),
+            "lom/target_repr_std": out["z_opt_target"].detach().std(dim=0).mean(),
+            "lom/cb_norm_mean": opt_cb_norms.mean(),
+            "lom/cb_norm_max": opt_cb_norms.max(),
+            "lom/cb_norm_std": opt_cb_norms.std(),
+            "lam/train_loss": lam_jepa,
+            "lam/vq_loss": out["vq_act"]["vq_loss"],
+            "lam/commit_loss": out["vq_act"]["commit_loss"],
+            "lam/entropy": out["vq_act"]["entropy"],
+            "lam/perplexity": torch.exp(out["vq_act"]["entropy"]),
+            "lam/dead_frac": out["vq_act"]["dead_frac"],
+            "lam/repr_std": out["z_act"].detach().std(dim=0).mean(),
+            "lam/target_repr_std": out["z_act_target"].detach().std(dim=0).mean(),
+            "lam/cb_norm_mean": act_cb_norms.mean(),
+            "lam/cb_norm_max": act_cb_norms.max(),
+            "lam/cb_norm_std": act_cb_norms.std(),
         }
 
     def restore_train_mode(self) -> None:
@@ -647,13 +647,13 @@ class LatentLOMTrainer(Trainer):
                     self.wandb_run.log(
                         {k: v.item() for k, v in loss_dict.items() if k != "total_loss"}
                         | {
-                            "train/total": loss_dict["total_loss"].item(),
-                            "optim/lr": lr,
-                            "optim/grad_norm": grad_norm.item(),
-                            "optim/grad_clip_frac": clip_frac,
-                            "optim/step": s + 1,
-                            "optim/progress_pct": pct,
-                            "optim/sps": sps,
+                            "monitor/train_loss": loss_dict["total_loss"].item(),
+                            "monitor/lr": lr,
+                            "monitor/grad_norm": grad_norm.item(),
+                            "monitor/grad_clip_frac": clip_frac,
+                            "monitor/step": s + 1,
+                            "monitor/progress_pct": pct,
+                            "monitor/sps": sps,
                         },
                         step=s + 1,
                     )
