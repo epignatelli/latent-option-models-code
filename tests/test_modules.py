@@ -32,7 +32,7 @@ def test_vq_output_shapes(vq):
 def test_vq_loss_keys(vq):
     z = torch.randn(BATCH, LATENT_DIM)
     _, loss_dict, _ = vq(z)
-    assert {"vq_loss", "commit_loss", "entropy"} == set(loss_dict.keys())
+    assert {"vq_loss", "commit_loss", "entropy", "dead_frac"} == set(loss_dict.keys())
 
 
 def test_vq_straight_through(vq):

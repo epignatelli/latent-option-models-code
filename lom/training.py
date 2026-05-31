@@ -307,9 +307,13 @@ class Trainer(ABC):
             with self.ctx:
                 for k, v in self.step(batch).items():
                     totals[k] = totals.get(k, 0.0) + v.item()
+        self.restore_train_mode()
+        return {k: v / (i + 1) for k, v in totals.items()}
+
+    def restore_train_mode(self) -> None:
+        """Set all modules to train mode. Subclasses may override to keep specific modules in eval."""
         for mod in self.models.values():
             mod.train()
-        return {k: v / (i + 1) for k, v in totals.items()}
 
     def train(self) -> None:
         t = self.cfg.train
@@ -324,6 +328,7 @@ class Trainer(ABC):
             mod.train()
         data_iter = iter(self.train_loader)
         t0 = time.time()
+        clip_count = 0.0
 
         for s in range(self.start_step, t.max_iters):
             try:
@@ -342,7 +347,8 @@ class Trainer(ABC):
 
             self.scaler.scale(loss_dict["total_loss"]).backward()
             self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.models.parameters(), t.grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.models.parameters(), t.grad_clip)
+            clip_count += float(grad_norm >= t.grad_clip)
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad(set_to_none=True)
@@ -351,31 +357,53 @@ class Trainer(ABC):
                 dt = time.time() - t0
                 sps = t.log_interval * t.batch_size / dt
                 pct = 100.0 * (s + 1) / t.max_iters
+                clip_frac = clip_count / t.log_interval
+                clip_count = 0.0
                 log.info(
-                    "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | %.0f samp/s",
+                    "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | gnorm=%.3f | clip=%.2f | %.0f samp/s",
                     s + 1,
                     t.max_iters,
                     pct,
                     loss_dict["total_loss"].item(),
                     "  ".join(
-                        f"{k}={v.item():.4f}" for k, v in loss_dict.items() if k != "total_loss"
+                        f"{k.split('/')[-1]}={v.item():.4f}"
+                        for k, v in loss_dict.items()
+                        if k != "total_loss"
                     ),
                     lr,
+                    grad_norm.item(),
+                    clip_frac,
                     sps,
                 )
                 t0 = time.time()
                 if self.wandb_run:
                     self.wandb_run.log(
-                        {f"train/{k}": v.item() for k, v in loss_dict.items()} | {"lr": lr},
+                        {k: v.item() for k, v in loss_dict.items() if k != "total_loss"}
+                        | {
+                            "train/total": loss_dict["total_loss"].item(),
+                            "optim/lr": lr,
+                            "optim/grad_norm": grad_norm.item(),
+                            "optim/grad_clip_frac": clip_frac,
+                        },
                         step=s + 1,
                     )
 
             if (s + 1) % t.eval_interval == 0:
                 log.info("  [eval] running %d val batches ...", t.eval_iters)
                 val_metrics = self.eval()
-                log.info("  [val]  %s", "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items()))
+                log.info(
+                    "  [val]  %s",
+                    "  ".join(f"{k.split('/')[-1]}={v:.4f}" for k, v in val_metrics.items()),
+                )
                 if self.wandb_run:
-                    self.wandb_run.log({f"val/{k}": v for k, v in val_metrics.items()}, step=s + 1)
+                    # Map train/* keys to val/*; vq/* metrics are training-state, not logged from val
+                    wandb_val = {
+                        ("val/" + k[len("train/"):]): v
+                        for k, v in val_metrics.items()
+                        if k.startswith("train/")
+                    }
+                    wandb_val["val/total"] = val_metrics["total_loss"]
+                    self.wandb_run.log(wandb_val, step=s + 1)
                 self.save_checkpoint(s + 1)
 
         log.info("=== training complete (%d steps) ===", t.max_iters)
@@ -434,15 +462,19 @@ class ReconstructionLOMTrainer(Trainer):
         vq_loss = out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"]
         total = lam_recon + lom_recon + vq_loss
         return {
-            "lam_recon": lam_recon,
-            "lom_recon": lom_recon,
-            "vq_loss_option": out["vq_opt"]["vq_loss"],
-            "vq_loss_action": out["vq_act"]["vq_loss"],
-            "commit_loss_option": out["vq_opt"]["commit_loss"],
-            "commit_loss_action": out["vq_act"]["commit_loss"],
-            "entropy_option": out["vq_opt"]["entropy"],
-            "entropy_action": out["vq_act"]["entropy"],
             "total_loss": total,
+            "train/lam": lam_recon,
+            "train/lom": lom_recon,
+            "vq/opt_vq_loss": out["vq_opt"]["vq_loss"],
+            "vq/act_vq_loss": out["vq_act"]["vq_loss"],
+            "vq/opt_commit_loss": out["vq_opt"]["commit_loss"],
+            "vq/act_commit_loss": out["vq_act"]["commit_loss"],
+            "vq/opt_entropy": out["vq_opt"]["entropy"],
+            "vq/act_entropy": out["vq_act"]["entropy"],
+            "vq/opt_perplexity": torch.exp(out["vq_opt"]["entropy"]),
+            "vq/act_perplexity": torch.exp(out["vq_act"]["entropy"]),
+            "vq/opt_dead_frac": out["vq_opt"]["dead_frac"],
+            "vq/act_dead_frac": out["vq_act"]["dead_frac"],
         }
 
 
@@ -491,25 +523,22 @@ class LatentLOMTrainer(Trainer):
         vq_loss = out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"]
         total = lam_jepa + lom_jepa + vq_loss
         return {
-            "lam_jepa_loss": lam_jepa,
-            "lom_jepa_loss": lom_jepa,
-            "vq_loss_option": out["vq_opt"]["vq_loss"],
-            "vq_loss_action": out["vq_act"]["vq_loss"],
-            "commit_loss_option": out["vq_opt"]["commit_loss"],
-            "commit_loss_action": out["vq_act"]["commit_loss"],
-            "entropy_option": out["vq_opt"]["entropy"],
-            "entropy_action": out["vq_act"]["entropy"],
             "total_loss": total,
+            "train/lam_jepa": lam_jepa,
+            "train/lom_jepa": lom_jepa,
+            "vq/opt_vq_loss": out["vq_opt"]["vq_loss"],
+            "vq/act_vq_loss": out["vq_act"]["vq_loss"],
+            "vq/opt_commit_loss": out["vq_opt"]["commit_loss"],
+            "vq/act_commit_loss": out["vq_act"]["commit_loss"],
+            "vq/opt_entropy": out["vq_opt"]["entropy"],
+            "vq/act_entropy": out["vq_act"]["entropy"],
+            "vq/opt_perplexity": torch.exp(out["vq_opt"]["entropy"]),
+            "vq/act_perplexity": torch.exp(out["vq_act"]["entropy"]),
+            "vq/opt_dead_frac": out["vq_opt"]["dead_frac"],
+            "vq/act_dead_frac": out["vq_act"]["dead_frac"],
         }
 
-    def train(self) -> None:
-        t = self.cfg.train
-        log.info(
-            "--- LatentLOM training start  steps=%d  ema_decay=%.4f ---",
-            t.max_iters,
-            self.cfg.model.ema_decay,
-        )
-
+    def restore_train_mode(self) -> None:
         for mod in self.models.values():
             mod.train()
         # EMA modules stay in eval mode so their dropout is disabled during target encoding
@@ -523,8 +552,19 @@ class LatentLOMTrainer(Trainer):
         model.ema_act_proj.eval()
         model.ema_act_ln.eval()
 
+    def train(self) -> None:
+        t = self.cfg.train
+        log.info(
+            "--- LatentLOM training start  steps=%d  ema_decay=%.4f ---",
+            t.max_iters,
+            self.cfg.model.ema_decay,
+        )
+
+        self.restore_train_mode()
+
         data_iter = iter(self.train_loader)
         t0 = time.time()
+        clip_count = 0.0
 
         for s in range(self.start_step, t.max_iters):
             try:
@@ -543,7 +583,8 @@ class LatentLOMTrainer(Trainer):
 
             self.scaler.scale(loss_dict["total_loss"]).backward()
             self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.models.parameters(), t.grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.models.parameters(), t.grad_clip)
+            clip_count += float(grad_norm >= t.grad_clip)
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad(set_to_none=True)
@@ -554,31 +595,52 @@ class LatentLOMTrainer(Trainer):
                 dt = time.time() - t0
                 sps = t.log_interval * t.batch_size / dt
                 pct = 100.0 * (s + 1) / t.max_iters
+                clip_frac = clip_count / t.log_interval
+                clip_count = 0.0
                 log.info(
-                    "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | %.0f samp/s",
+                    "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | gnorm=%.3f | clip=%.2f | %.0f samp/s",
                     s + 1,
                     t.max_iters,
                     pct,
                     loss_dict["total_loss"].item(),
                     "  ".join(
-                        f"{k}={v.item():.4f}" for k, v in loss_dict.items() if k != "total_loss"
+                        f"{k.split('/')[-1]}={v.item():.4f}"
+                        for k, v in loss_dict.items()
+                        if k != "total_loss"
                     ),
                     lr,
+                    grad_norm.item(),
+                    clip_frac,
                     sps,
                 )
                 t0 = time.time()
                 if self.wandb_run:
                     self.wandb_run.log(
-                        {f"train/{k}": v.item() for k, v in loss_dict.items()} | {"lr": lr},
+                        {k: v.item() for k, v in loss_dict.items() if k != "total_loss"}
+                        | {
+                            "train/total": loss_dict["total_loss"].item(),
+                            "optim/lr": lr,
+                            "optim/grad_norm": grad_norm.item(),
+                            "optim/grad_clip_frac": clip_frac,
+                        },
                         step=s + 1,
                     )
 
             if (s + 1) % t.eval_interval == 0:
                 log.info("  [eval] running %d val batches ...", t.eval_iters)
                 val_metrics = self.eval()
-                log.info("  [val]  %s", "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items()))
+                log.info(
+                    "  [val]  %s",
+                    "  ".join(f"{k.split('/')[-1]}={v:.4f}" for k, v in val_metrics.items()),
+                )
                 if self.wandb_run:
-                    self.wandb_run.log({f"val/{k}": v for k, v in val_metrics.items()}, step=s + 1)
+                    wandb_val = {
+                        ("val/" + k[len("train/"):]): v
+                        for k, v in val_metrics.items()
+                        if k.startswith("train/")
+                    }
+                    wandb_val["val/total"] = val_metrics["total_loss"]
+                    self.wandb_run.log(wandb_val, step=s + 1)
                 self.save_checkpoint(s + 1)
 
         log.info("=== LatentLOM training complete (%d steps) ===", t.max_iters)

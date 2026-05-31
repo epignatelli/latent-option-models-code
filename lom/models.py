@@ -479,7 +479,6 @@ class LatentLOM(SerialisableModule):
             ``z_opt_target``, ``z_opt``, ``z_act``, ``opt_idx``, ``act_idx``,
             ``vq_opt``, ``vq_act``.
         """
-        c = self.context_length
         next_frame = future[:, 0:1]
 
         z_opt, vq_opt, opt_idx = self.opt_vq(self.encode_option(history, future))

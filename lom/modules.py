@@ -637,7 +637,8 @@ class VectorQuantizer(nn.Module):
         entropy = self.entropy(dist)
         vq_loss = self.vq_beta * commit_loss - self.entropy_weight * entropy
 
-        return z_q, {"vq_loss": vq_loss, "commit_loss": commit_loss, "entropy": entropy}, indices
+        dead_frac = (self.last_active >= self.vq_reset_thresh).float().mean()
+        return z_q, {"vq_loss": vq_loss, "commit_loss": commit_loss, "entropy": entropy, "dead_frac": dead_frac}, indices
 
     def entropy(self, dist: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
         """Compute the entropy of the mean soft-assignment distribution.

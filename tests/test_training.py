@@ -115,9 +115,12 @@ def latent_lom_trainer():
 def test_reconstruction_lom_step_keys():
     trainer = reconstruction_lom_trainer()
     out = trainer.step(lom_batch())
-    assert {"lam_recon", "lom_recon", "vq_loss_option", "vq_loss_action",
-            "commit_loss_option", "commit_loss_action",
-            "entropy_option", "entropy_action", "total_loss"} == set(out.keys())
+    assert {"total_loss", "train/lam", "train/lom",
+            "vq/opt_vq_loss", "vq/act_vq_loss",
+            "vq/opt_commit_loss", "vq/act_commit_loss",
+            "vq/opt_entropy", "vq/act_entropy",
+            "vq/opt_perplexity", "vq/act_perplexity",
+            "vq/opt_dead_frac", "vq/act_dead_frac"} == set(out.keys())
 
 
 @needs_cuda
@@ -132,9 +135,12 @@ def test_reconstruction_lom_step_backward():
 def test_latent_lom_step_keys():
     trainer = latent_lom_trainer()
     out = trainer.step(lom_batch())
-    assert {"lam_jepa_loss", "lom_jepa_loss", "vq_loss_option", "vq_loss_action",
-            "commit_loss_option", "commit_loss_action",
-            "entropy_option", "entropy_action", "total_loss"} == set(out.keys())
+    assert {"total_loss", "train/lam_jepa", "train/lom_jepa",
+            "vq/opt_vq_loss", "vq/act_vq_loss",
+            "vq/opt_commit_loss", "vq/act_commit_loss",
+            "vq/opt_entropy", "vq/act_entropy",
+            "vq/opt_perplexity", "vq/act_perplexity",
+            "vq/opt_dead_frac", "vq/act_dead_frac"} == set(out.keys())
 
 
 @torch.no_grad()
