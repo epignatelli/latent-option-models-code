@@ -1,17 +1,19 @@
 """Profile GPU memory and training throughput.
 
-Two model variants:
+Four model variants:
 
-  --encoder stt   — ReconstructionLOM (bidirectional encoder + pixel reconstruction)
-  --encoder jepa  — LatentLOM (causal encoder + EMA targets + latent prediction)
+  --encoder reconstruction  — ReconstructionLOM (bidirectional, pixel reconstruction)
+  --encoder latent          — LatentLOM compute-equivalent (d_model=256, n_layers=4)
+  --encoder latent-medium   — LatentLOM medium (~100M, d_model=512, n_layers=8)
+  --encoder latent-params   — LatentLOM param-matched to reconstruction (~152M)
 
-  --method lam|lom controls only the horizon passed to the model (1 vs --horizon).
+  --method lam|lom controls only the horizon (1 vs --horizon).
 
 Usage:
-    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --encoder stt
-    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --encoder jepa
-    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --encoder stt --horizon 128
-    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --encoder jepa --horizon 128
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --encoder reconstruction
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --encoder latent
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --encoder reconstruction --horizon 128
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --encoder latent --horizon 128
 
 Each batch size runs in a fresh subprocess to avoid CUDA context corruption
 from previous OOM events. Uses synthetic random data — no dataset required.
@@ -48,7 +50,7 @@ _fh.setFormatter(_fmt)
 _root.addHandler(_fh)
 log = logging.getLogger(__name__)
 
-DEFAULT_BATCH_SIZES = [32, 64, 128, 256, 512, 1024]
+DEFAULT_BATCH_SIZES = [32, 64, 128, 256, 512, 1024, 2048, 4096]
 DEFAULT_CTX         = 4
 DEFAULT_HORIZON     = 128
 SEED                = 42
@@ -60,17 +62,18 @@ GPU_MEASURE_STEPS   = 50
 # Model builders
 # --------------------------------------------------------------------------- #
 
-def _model_cfg(context_len: int, encoder: str = "stt") -> tuple[EnvCfg, ModelCfg]:
+def _model_cfg(context_len: int, encoder: str = "reconstruction") -> tuple[EnvCfg, ModelCfg]:
     e = EnvCfg()
-    if encoder == "jepa-params":
-        # Parameter-matched to STT (~152M): d_model=512, n_layers=12, n_heads=8 (head_dim=64)
+    if encoder == "latent-params":
+        # Parameter-matched to reconstruction (~152M): d_model=512, n_layers=12, n_heads=8 (head_dim=64)
         m = ModelCfg(d_model=512, n_layers=12, n_heads=8, context_length=context_len,
                      latent_dim=512, num_options=256, patch_size=8)
-    elif encoder == "jepa-medium":
-        # Medium JEPA: ~100M backbone params; d_model=512, n_layers=8, n_heads=8
+    elif encoder == "latent-medium":
+        # Medium latent: ~100M backbone params; d_model=512, n_layers=8, n_heads=8
         m = ModelCfg(d_model=512, n_layers=8, n_heads=8, context_length=context_len,
                      latent_dim=512, num_options=256, patch_size=8)
     else:
+        # reconstruction or latent (compute-equivalent): d_model=256, n_layers=4, n_heads=4
         m = ModelCfg(d_model=256, n_layers=4, n_heads=4, context_length=context_len,
                      latent_dim=512, num_options=256, patch_size=8)
     return e, m
@@ -80,7 +83,7 @@ def _build_models(device, method: str, encoder: str,
                   context_len: int, horizon: int) -> tuple[EnvCfg, dict]:
     e, m = _model_cfg(context_len, encoder)
     h = 1 if method == "lam" else horizon
-    if encoder.startswith("jepa"):
+    if encoder.startswith("latent"):
         model: ReconstructionLOM | LatentLOM = LatentLOM(
             vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w,
             n_actions=e.n_actions,
@@ -115,7 +118,7 @@ def _run_step(method: str, encoder: str, models: dict,
     history = batch[0].to(device)
     future  = batch[1].to(device)
     out = models["model"](history, future)
-    if encoder.startswith("jepa"):
+    if encoder.startswith("latent"):
         return (jepa_loss(out["z_act_hat"], out["z_act_target"])
                 + jepa_loss(out["z_opt_hat"], out["z_opt_target"])
                 + out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"])
@@ -163,7 +166,7 @@ def _run_step_traced(method: str, encoder: str, models: dict,
         out = models["model"](history, future)
     log.info("    [trace] after forward:         %.2f GB", _mem(device))
     with ctx:
-        if encoder.startswith("jepa"):
+        if encoder.startswith("latent"):
             loss = (jepa_loss(out["z_act_hat"], out["z_act_target"])
                     + jepa_loss(out["z_opt_hat"], out["z_opt_target"])
                     + out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"])
@@ -393,7 +396,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--method",          choices=["lam", "lom"], default="lam")
-    parser.add_argument("--encoder",         choices=["stt", "jepa", "jepa-medium", "jepa-params"], default="stt")
+    parser.add_argument("--encoder",         choices=["reconstruction", "latent", "latent-medium", "latent-params"], default="reconstruction")
     parser.add_argument("--horizon",         type=int, default=DEFAULT_HORIZON)
     parser.add_argument("--context-len",     type=int, default=DEFAULT_CTX)
     parser.add_argument("--batch-sizes",     type=int, nargs="+", default=DEFAULT_BATCH_SIZES)

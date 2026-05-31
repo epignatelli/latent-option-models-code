@@ -19,7 +19,7 @@ data:
 model:
   latent_dim: 512
   num_options: 256
-  patch_size: 4
+  patch_size: 8
 
 train:
   ckpt_dir: /scratch/uceeepi/lom/checkpoints/benchmark
