@@ -384,6 +384,8 @@ class Trainer(ABC):
                             "optim/lr": lr,
                             "optim/grad_norm": grad_norm.item(),
                             "optim/grad_clip_frac": clip_frac,
+                            "optim/step": s + 1,
+                            "optim/progress_pct": pct,
                         },
                         step=s + 1,
                     )
@@ -622,6 +624,8 @@ class LatentLOMTrainer(Trainer):
                             "optim/lr": lr,
                             "optim/grad_norm": grad_norm.item(),
                             "optim/grad_clip_frac": clip_frac,
+                            "optim/step": s + 1,
+                            "optim/progress_pct": pct,
                         },
                         step=s + 1,
                     )
