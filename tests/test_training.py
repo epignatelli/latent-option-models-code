@@ -120,7 +120,11 @@ def test_reconstruction_lom_step_keys():
             "vq/opt_commit_loss", "vq/act_commit_loss",
             "vq/opt_entropy", "vq/act_entropy",
             "vq/opt_perplexity", "vq/act_perplexity",
-            "vq/opt_dead_frac", "vq/act_dead_frac"} == set(out.keys())
+            "vq/opt_dead_frac", "vq/act_dead_frac",
+            "vq/opt_repr_std", "vq/act_repr_std",
+            "vq/opt_cb_norm_mean", "vq/opt_cb_norm_max", "vq/opt_cb_norm_std",
+            "vq/act_cb_norm_mean", "vq/act_cb_norm_max", "vq/act_cb_norm_std",
+            } == set(out.keys())
 
 
 @needs_cuda
@@ -140,7 +144,12 @@ def test_latent_lom_step_keys():
             "vq/opt_commit_loss", "vq/act_commit_loss",
             "vq/opt_entropy", "vq/act_entropy",
             "vq/opt_perplexity", "vq/act_perplexity",
-            "vq/opt_dead_frac", "vq/act_dead_frac"} == set(out.keys())
+            "vq/opt_dead_frac", "vq/act_dead_frac",
+            "vq/opt_repr_std", "vq/act_repr_std",
+            "vq/opt_target_repr_std", "vq/act_target_repr_std",
+            "vq/opt_cb_norm_mean", "vq/opt_cb_norm_max", "vq/opt_cb_norm_std",
+            "vq/act_cb_norm_mean", "vq/act_cb_norm_max", "vq/act_cb_norm_std",
+            } == set(out.keys())
 
 
 @torch.no_grad()

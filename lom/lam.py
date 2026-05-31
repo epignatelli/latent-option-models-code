@@ -65,6 +65,10 @@ class LatentActionModel(SerialisableModule):
             ),
         )
 
+    @property
+    def vq(self) -> VectorQuantizer:
+        return self.lam[2]  # type: ignore[return-value]
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, dict, torch.Tensor]:
         """
         Args:

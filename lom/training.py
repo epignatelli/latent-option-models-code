@@ -386,6 +386,7 @@ class Trainer(ABC):
                             "optim/grad_clip_frac": clip_frac,
                             "optim/step": s + 1,
                             "optim/progress_pct": pct,
+                            "optim/sps": sps,
                         },
                         step=s + 1,
                     )
@@ -449,7 +450,8 @@ class ReconstructionLOMTrainer(Trainer):
 
     def step(self, batch: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         history, future = batch[0], batch[3]
-        out = self.models["model"](history, future)
+        model: ReconstructionLOM = self.models["model"]  # type: ignore[assignment]
+        out = model(history, future)
         lam_recon = reconstruction_loss(
             out["lam_logits"], tokenise(future[:, 0:1]), self.cfg.env.vocab_size
         )
@@ -463,6 +465,9 @@ class ReconstructionLOMTrainer(Trainer):
             )
         vq_loss = out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"]
         total = lam_recon + lom_recon + vq_loss
+        with torch.no_grad():
+            opt_cb_norms = model.opt_vq.vq.codebook.norm(dim=-1)
+            act_cb_norms = model.act_vq.vq.codebook.norm(dim=-1)
         return {
             "total_loss": total,
             "train/lam": lam_recon,
@@ -477,6 +482,14 @@ class ReconstructionLOMTrainer(Trainer):
             "vq/act_perplexity": torch.exp(out["vq_act"]["entropy"]),
             "vq/opt_dead_frac": out["vq_opt"]["dead_frac"],
             "vq/act_dead_frac": out["vq_act"]["dead_frac"],
+            "vq/opt_repr_std": out["z_opt"].detach().std(dim=0).mean(),
+            "vq/act_repr_std": out["z_act"].detach().std(dim=0).mean(),
+            "vq/opt_cb_norm_mean": opt_cb_norms.mean(),
+            "vq/opt_cb_norm_max": opt_cb_norms.max(),
+            "vq/opt_cb_norm_std": opt_cb_norms.std(),
+            "vq/act_cb_norm_mean": act_cb_norms.mean(),
+            "vq/act_cb_norm_max": act_cb_norms.max(),
+            "vq/act_cb_norm_std": act_cb_norms.std(),
         }
 
 
@@ -519,11 +532,15 @@ class LatentLOMTrainer(Trainer):
 
     def step(self, batch: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         history, future = batch[0], batch[3]
-        out = self.models["model"](history, future)
+        model: LatentLOM = self.models["model"]  # type: ignore[assignment]
+        out = model(history, future)
         lam_jepa = jepa_loss(out["z_act_hat"], out["z_act_target"])
         lom_jepa = jepa_loss(out["z_opt_hat"], out["z_opt_target"])
         vq_loss = out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"]
         total = lam_jepa + lom_jepa + vq_loss
+        with torch.no_grad():
+            opt_cb_norms = model.opt_vq.vq.codebook.norm(dim=-1)
+            act_cb_norms = model.act_vq.vq.codebook.norm(dim=-1)
         return {
             "total_loss": total,
             "train/lam_jepa": lam_jepa,
@@ -538,6 +555,16 @@ class LatentLOMTrainer(Trainer):
             "vq/act_perplexity": torch.exp(out["vq_act"]["entropy"]),
             "vq/opt_dead_frac": out["vq_opt"]["dead_frac"],
             "vq/act_dead_frac": out["vq_act"]["dead_frac"],
+            "vq/opt_repr_std": out["z_opt"].detach().std(dim=0).mean(),
+            "vq/act_repr_std": out["z_act"].detach().std(dim=0).mean(),
+            "vq/opt_target_repr_std": out["z_opt_target"].detach().std(dim=0).mean(),
+            "vq/act_target_repr_std": out["z_act_target"].detach().std(dim=0).mean(),
+            "vq/opt_cb_norm_mean": opt_cb_norms.mean(),
+            "vq/opt_cb_norm_max": opt_cb_norms.max(),
+            "vq/opt_cb_norm_std": opt_cb_norms.std(),
+            "vq/act_cb_norm_mean": act_cb_norms.mean(),
+            "vq/act_cb_norm_max": act_cb_norms.max(),
+            "vq/act_cb_norm_std": act_cb_norms.std(),
         }
 
     def restore_train_mode(self) -> None:
@@ -626,6 +653,7 @@ class LatentLOMTrainer(Trainer):
                             "optim/grad_clip_frac": clip_frac,
                             "optim/step": s + 1,
                             "optim/progress_pct": pct,
+                            "optim/sps": sps,
                         },
                         step=s + 1,
                     )
