@@ -1,16 +1,17 @@
 """Profile GPU memory and training throughput.
 
-Two orthogonal axes:
+Two model variants:
 
-  --method lam|lom    — model architecture (Latent Action Model vs Latent Option Model)
-  --encoder stt|jepa  — encoder variant (STTEncoder with pixel reconstruction vs
-                        JEPAEncoder with EMA target encoder and latent prediction)
+  --encoder stt   — ReconstructionLOM (bidirectional encoder + pixel reconstruction)
+  --encoder jepa  — LatentLOM (causal encoder + EMA targets + latent prediction)
+
+  --method lam|lom controls only the horizon passed to the model (1 vs --horizon).
 
 Usage:
-    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --method lam --encoder stt
-    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --method lam --encoder jepa
-    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --method lam --encoder stt
-    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --method lom --encoder stt --horizon 128
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --encoder stt
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --encoder jepa
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --encoder stt --horizon 128
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --encoder jepa --horizon 128
 
 Each batch size runs in a fresh subprocess to avoid CUDA context corruption
 from previous OOM events. Uses synthetic random data — no dataset required.
@@ -30,8 +31,7 @@ import torch
 import torch.optim as optim
 
 from lom.config import EnvCfg, ModelCfg
-from lom.modules import EMAEncoder
-from lom.lam import LatentActionModel, ObservableTransitionModel
+from lom.models import ReconstructionLOM, LatentLOM
 from lom.tokeniser import tokenise
 from lom.training import NullCtx, jepa_loss, reconstruction_loss
 
@@ -65,15 +65,11 @@ def _model_cfg(context_len: int, encoder: str = "stt") -> tuple[EnvCfg, ModelCfg
     if encoder == "jepa-params":
         # Parameter-matched to STT (~152M): d_model=512, n_layers=12, n_heads=8 (head_dim=64)
         m = ModelCfg(d_model=512, n_layers=12, n_heads=8, context_length=context_len,
-                     latent_dim=512, num_options=256, patch_size=8, two_encoder=True)
+                     latent_dim=512, num_options=256, patch_size=8)
     elif encoder == "jepa-medium":
         # Medium JEPA: ~100M backbone params; d_model=512, n_layers=8, n_heads=8
         m = ModelCfg(d_model=512, n_layers=8, n_heads=8, context_length=context_len,
-                     latent_dim=512, num_options=256, patch_size=8, two_encoder=True)
-    elif encoder == "jepa":
-        # Compute-matched to STT: same backbone (d_model=256, n_layers=4, n_heads=4, ~21.7M)
-        m = ModelCfg(d_model=256, n_layers=4, n_heads=4, context_length=context_len,
-                     latent_dim=512, num_options=256, patch_size=8, two_encoder=True)
+                     latent_dim=512, num_options=256, patch_size=8)
     else:
         m = ModelCfg(d_model=256, n_layers=4, n_heads=4, context_length=context_len,
                      latent_dim=512, num_options=256, patch_size=8)
@@ -83,56 +79,31 @@ def _model_cfg(context_len: int, encoder: str = "stt") -> tuple[EnvCfg, ModelCfg
 def _build_models(device, method: str, encoder: str,
                   context_len: int, horizon: int) -> tuple[EnvCfg, dict]:
     e, m = _model_cfg(context_len, encoder)
-    jepa = encoder.startswith("jepa")
-    base = dict(
-        vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w,
-        d_model=m.d_model, n_layers=m.n_layers, n_heads=m.n_heads,
-        context_length=m.context_length, latent_dim=m.latent_dim,
-        patch_size=m.patch_size,
-    )
-
-    enc_cls  = JEPAEncoder if jepa else STTEncoder
-    enc_kw   = dict(vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w,
-                    d_model=m.d_model, n_layers=m.n_layers, n_heads=m.n_heads,
-                    context_length=m.context_length, patch_size=m.patch_size)
-    if jepa:
-        enc_kw["latent_dim"] = m.latent_dim
-    vq_kw = dict(vq_dropout=0.1, vq_entropy_weight=0.01,
-                 vq_beta=0.25, vq_reset_thresh=100, vq_ema_decay=0.99)
-
-    if method == "lam":
-        enc = enc_cls(**enc_kw, horizon=1).to(device)
-        lam = LatentActionModel(enc.out_dim, m.latent_dim, m.num_options, **vq_kw).to(device)
-        dyn = ObservableTransitionModel(**base, predict_sequence=False,
-                            predict_latent=jepa,
-                            target_dim=m.latent_dim if jepa else None).to(device)
-        models = {"enc": enc, "lam": lam, "dyn": dyn}
-        if jepa:
-            models["ema_enc"] = EMAEncoder(enc, decay=0.996).to(device)  # type: ignore[arg-type]
-        return e, models
-
-    else:  # lom
-        opt_enc = enc_cls(**enc_kw, horizon=horizon).to(device)
-        opt_vq  = LatentActionModel(opt_enc.out_dim, m.latent_dim, m.num_options, **vq_kw).to(device)
-        act_in  = opt_enc.out_dim + (m.latent_dim if jepa else 0)
-        act_enc = enc_cls(**enc_kw, horizon=1,
-                          **({"condition_dim": m.latent_dim} if not jepa else {})).to(device)
-        act_vq  = LatentActionModel(act_in if jepa else act_enc.out_dim,
-                                    m.latent_dim, m.num_options, **vq_kw).to(device)
-        lam_dyn = ObservableTransitionModel(**base, predict_sequence=False,
-                                predict_latent=jepa,
-                                target_dim=m.latent_dim if jepa else None).to(device)
-        lom_dyn = ObservableTransitionModel(**base, 
-                                predict_sequence=False, horizon=horizon,
-                                predict_latent=jepa,
-                                target_dim=m.latent_dim if jepa else None).to(device)
-        models = {"opt_enc": opt_enc, "opt_vq": opt_vq,
-                  "act_enc": act_enc, "act_vq": act_vq,
-                  "lam_dynamics": lam_dyn, "lom_dynamics": lom_dyn}
-        if jepa:
-            models["ema_act_enc"] = EMAEncoder(act_enc, decay=0.996).to(device)  # type: ignore[arg-type]
-            models["ema_opt_enc"] = EMAEncoder(opt_enc, decay=0.996).to(device)  # type: ignore[arg-type]
-        return e, models
+    h = 1 if method == "lam" else horizon
+    if encoder.startswith("jepa"):
+        model: ReconstructionLOM | LatentLOM = LatentLOM(
+            vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w,
+            n_actions=e.n_actions,
+            d_model=m.d_model, n_layers=m.n_layers, n_heads=m.n_heads,
+            context_length=m.context_length, horizon=h,
+            latent_dim=m.latent_dim, num_options=m.num_options,
+            patch_size=m.patch_size,
+            ema_decay=0.996,
+            vq_dropout=0.1, vq_entropy_weight=0.01,
+            vq_beta=0.25, vq_reset_thresh=100, vq_ema_decay=0.99,
+        ).to(device)
+    else:
+        model = ReconstructionLOM(
+            vocab_size=e.vocab_size, obs_h=e.obs_h, obs_w=e.obs_w,
+            n_actions=e.n_actions,
+            d_model=m.d_model, n_layers=m.n_layers, n_heads=m.n_heads,
+            context_length=m.context_length, horizon=h,
+            latent_dim=m.latent_dim, num_options=m.num_options,
+            patch_size=m.patch_size,
+            vq_dropout=0.1, vq_entropy_weight=0.01,
+            vq_beta=0.25, vq_reset_thresh=100, vq_ema_decay=0.99,
+        ).to(device)
+    return e, {"model": model}
 
 
 # --------------------------------------------------------------------------- #
@@ -141,44 +112,21 @@ def _build_models(device, method: str, encoder: str,
 
 def _run_step(method: str, encoder: str, models: dict,
               batch: list, device, ctx, e) -> torch.Tensor:
-    if method == "lam":
-        history, next_frame = batch[0].to(device), batch[1].to(device)
-        pooled = models["enc"](history, next_frame)
-        z, vq_out, _ = models["lam"](pooled)
-        if encoder.startswith("jepa"):
-            with torch.no_grad():
-                z_target = models["ema_enc"].encode(next_frame)
-            z_hat = models["dyn"](history, z)
-            return jepa_loss(z_hat, z_target) + vq_out["vq_loss"]
-        else:
-            logits = models["dyn"](history, z)
-            return reconstruction_loss(logits, tokenise(next_frame), e.vocab_size) + vq_out["vq_loss"]
-    else:  # lom
-        history    = batch[0].to(device)
-        next_frame = batch[1].to(device)
-        future     = batch[2].to(device)
-        sequence   = batch[3].to(device)
-        z_opt, vq_opt, _ = models["opt_vq"](models["opt_enc"](history, sequence))
-        if encoder.startswith("jepa"):
-            act_in = torch.cat([models["act_enc"](history, next_frame), z_opt.detach()], dim=-1)
-        else:
-            act_in = models["act_enc"](history, next_frame, condition=z_opt.detach())
-        z_act, vq_act, _ = models["act_vq"](act_in)
-        if encoder.startswith("jepa"):
-            with torch.no_grad():
-                z_act_target = models["ema_act_enc"].encode(next_frame)
-                z_opt_target = models["ema_opt_enc"].encode(sequence)
-            z_act_hat = models["lam_dynamics"](history, z_act)
-            z_opt_hat = models["lom_dynamics"](history, z_opt)
-            return (jepa_loss(z_act_hat, z_act_target)
-                    + jepa_loss(z_opt_hat, z_opt_target)
-                    + vq_opt["vq_loss"] + vq_act["vq_loss"])
-        else:
-            lam_logits = models["lam_dynamics"](history, z_act)
-            lom_logits = models["lom_dynamics"](history, z_opt)
-            lam_recon  = reconstruction_loss(lam_logits, tokenise(next_frame), e.vocab_size)
-            lom_recon  = reconstruction_loss(lom_logits, tokenise(future), e.vocab_size)
-            return lam_recon + lom_recon + vq_opt["vq_loss"] + vq_act["vq_loss"]
+    history = batch[0].to(device)
+    future  = batch[1].to(device)
+    out = models["model"](history, future)
+    if encoder.startswith("jepa"):
+        return (jepa_loss(out["z_act_hat"], out["z_act_target"])
+                + jepa_loss(out["z_opt_hat"], out["z_opt_target"])
+                + out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"])
+    else:
+        lam_recon = reconstruction_loss(
+            out["lam_logits"], tokenise(future[:, 0:1]), e.vocab_size
+        )
+        lom_recon = reconstruction_loss(
+            out["lom_logits"], tokenise(future[:, -1:]), e.vocab_size
+        )
+        return lam_recon + lom_recon + out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"]
 
 
 def _make_frame(shape: tuple, rng: torch.Generator) -> torch.Tensor:
@@ -194,13 +142,10 @@ def _make_dummy_batch(batch_size: int, method: str,
     H, W = e.obs_h, e.obs_w
     rng = torch.Generator()
     rng.manual_seed(SEED)
-    history    = _make_frame((batch_size, context_len, H, W, 2), rng)
-    next_frame = _make_frame((batch_size, 1, H, W, 2), rng)
-    if method == "lom":
-        future   = _make_frame((batch_size, 1, H, W, 2), rng)
-        sequence = _make_frame((batch_size, horizon, H, W, 2), rng)
-        return [history, next_frame, future, sequence]
-    return [history, next_frame]
+    h = 1 if method == "lam" else horizon
+    history = _make_frame((batch_size, context_len, H, W, 2), rng)
+    future  = _make_frame((batch_size, h, H, W, 2), rng)
+    return [history, future]
 
 
 def _mem(device) -> float:
@@ -211,62 +156,29 @@ def _run_step_traced(method: str, encoder: str, models: dict,
                      batch: list, device, ctx, e) -> torch.Tensor:
     """Same as _run_step but logs memory at each major operation."""
     log.info("    [trace] base:                  %.2f GB", _mem(device))
-    if method == "lam":
-        history, next_frame = batch[0].to(device), batch[1].to(device)
-        log.info("    [trace] after data.to(device): %.2f GB", _mem(device))
-        with ctx:
-            pooled = models["enc"](history, next_frame)
-            z, vq_out, _ = models["lam"](pooled)
-        log.info("    [trace] after enc+lam forward: %.2f GB", _mem(device))
-        with ctx:
-            if encoder.startswith("jepa"):
-                with torch.no_grad():
-                    z_target = models["ema_enc"].encode(next_frame)
-                z_hat = models["dyn"](history, z)
-                loss = jepa_loss(z_hat, z_target) + vq_out["vq_loss"]
-            else:
-                logits = models["dyn"](history, z)
-                loss = reconstruction_loss(logits, tokenise(next_frame), e.vocab_size) + vq_out["vq_loss"]
-        log.info("    [trace] after loss:            %.2f GB", _mem(device))
-        loss.backward()
-        log.info("    [trace] after backward:        %.2f GB", _mem(device))
-        return loss
-    else:
-        history    = batch[0].to(device)
-        next_frame = batch[1].to(device)
-        future     = batch[2].to(device)
-        sequence   = batch[3].to(device)
-        log.info("    [trace] after data.to(device): %.2f GB", _mem(device))
-        with ctx:
-            z_opt, vq_opt, _ = models["opt_vq"](models["opt_enc"](history, sequence))
-        log.info("    [trace] after opt_enc+vq:      %.2f GB", _mem(device))
-        with ctx:
-            if encoder.startswith("jepa"):
-                act_in = torch.cat([models["act_enc"](history, next_frame), z_opt.detach()], dim=-1)
-            else:
-                act_in = models["act_enc"](history, next_frame, condition=z_opt.detach())
-            z_act, vq_act, _ = models["act_vq"](act_in)
-        log.info("    [trace] after act_enc+vq:      %.2f GB", _mem(device))
-        with ctx:
-            if encoder.startswith("jepa"):
-                with torch.no_grad():
-                    z_act_target = models["ema_act_enc"].encode(next_frame)
-                    z_opt_target = models["ema_opt_enc"].encode(sequence)
-                z_act_hat = models["lam_dynamics"](history, z_act)
-                z_opt_hat = models["lom_dynamics"](history, z_opt)
-                loss = (jepa_loss(z_act_hat, z_act_target)
-                        + jepa_loss(z_opt_hat, z_opt_target)
-                        + vq_opt["vq_loss"] + vq_act["vq_loss"])
-            else:
-                lam_logits = models["lam_dynamics"](history, z_act)
-                lom_logits = models["lom_dynamics"](history, z_opt)
-                loss = (reconstruction_loss(lam_logits, tokenise(next_frame), e.vocab_size)
-                        + reconstruction_loss(lom_logits, tokenise(future), e.vocab_size)
-                        + vq_opt["vq_loss"] + vq_act["vq_loss"])
-        log.info("    [trace] after dynamics:        %.2f GB", _mem(device))
-        loss.backward()
-        log.info("    [trace] after backward:        %.2f GB", _mem(device))
-        return loss
+    history = batch[0].to(device)
+    future  = batch[1].to(device)
+    log.info("    [trace] after data.to(device): %.2f GB", _mem(device))
+    with ctx:
+        out = models["model"](history, future)
+    log.info("    [trace] after forward:         %.2f GB", _mem(device))
+    with ctx:
+        if encoder.startswith("jepa"):
+            loss = (jepa_loss(out["z_act_hat"], out["z_act_target"])
+                    + jepa_loss(out["z_opt_hat"], out["z_opt_target"])
+                    + out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"])
+        else:
+            lam_recon = reconstruction_loss(
+                out["lam_logits"], tokenise(future[:, 0:1]), e.vocab_size
+            )
+            lom_recon = reconstruction_loss(
+                out["lom_logits"], tokenise(future[:, -1:]), e.vocab_size
+            )
+            loss = lam_recon + lom_recon + out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"]
+    log.info("    [trace] after loss:            %.2f GB", _mem(device))
+    loss.backward()
+    log.info("    [trace] after backward:        %.2f GB", _mem(device))
+    return loss
 
 
 def measure_one_batch_size(batch_size: int, method: str, encoder: str,
@@ -281,12 +193,10 @@ def measure_one_batch_size(batch_size: int, method: str, encoder: str,
 
     e, models = _build_models(device, method, encoder, context_len, horizon)
 
-    total_params = sum(m.num_parameters() for m in models.values()
-                       if hasattr(m, "num_parameters"))
-    for name, m in models.items():
-        if hasattr(m, "num_parameters"):
-            log.info("  params  %-14s  %9.3f M", name, m.num_parameters() / 1e6)
-    log.info("  params  %-14s  %9.3f M", "total", total_params / 1e6)
+    total_params = sum(p.numel() for p in models["model"].parameters())
+    trainable_params = sum(p.numel() for p in models["model"].parameters() if p.requires_grad)
+    log.info("  params  total=%9.3f M  trainable=%9.3f M",
+             total_params / 1e6, trainable_params / 1e6)
 
     if compile_model:
         log.info("  Compiling models ...")

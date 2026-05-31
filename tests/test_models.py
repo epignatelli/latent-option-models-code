@@ -1,6 +1,7 @@
 import pytest
 import torch
 from lom.lam import LatentActionModel, ObservableTransitionModel
+from lom.models import LatentLOM
 from lom.modules import EMAEncoder
 
 from conftest import BATCH, CONTEXT, D_MODEL, HORIZON, LATENT_DIM, N_HEADS, N_LAYERS, OBS_H, OBS_W, S, VOCAB
@@ -171,3 +172,46 @@ def test_ema_encoder_update_changes_weights():
     ema.update(linear)
     after = next(ema.encoder.parameters())
     assert not torch.allclose(before, after)
+
+
+# --------------------------------------------------------------------------- #
+# --- LatentLOM (JEPA model) ------------------------------------------------ #
+# --------------------------------------------------------------------------- #
+
+def make_latent_lom():
+    # context_length > CONTEXT so the history/future split uses history.shape[1], not context_length
+    return LatentLOM(
+        vocab_size=VOCAB, obs_h=OBS_H, obs_w=OBS_W, n_actions=8,
+        d_model=D_MODEL, n_layers=N_LAYERS, n_heads=N_HEADS,
+        context_length=CONTEXT * 2, horizon=HORIZON,
+        latent_dim=LATENT_DIM, num_options=4,
+        ema_decay=0.996,
+    )
+
+
+@torch.no_grad()
+def test_latent_lom_forward_shapes():
+    model = make_latent_lom()
+    hist = _screen(BATCH, CONTEXT)
+    fut  = _screen(BATCH, HORIZON)
+    out = model(hist, fut)
+    assert out["z_opt"].shape == (BATCH, LATENT_DIM)
+    assert out["z_act"].shape == (BATCH, LATENT_DIM)
+    assert out["z_opt_hat"].shape == (BATCH, LATENT_DIM)
+    assert out["z_act_hat"].shape == (BATCH, LATENT_DIM)
+    assert out["z_opt_target"].shape == (BATCH, LATENT_DIM)
+    assert out["z_act_target"].shape == (BATCH, LATENT_DIM)
+
+
+@needs_cuda
+def test_latent_lom_backward_and_ema():
+    model = make_latent_lom().cuda()
+    hist = _screen(BATCH, CONTEXT).cuda()
+    fut  = _screen(BATCH, HORIZON).cuda()
+    out = model(hist, fut)
+    from lom.training import jepa_loss
+    loss = (jepa_loss(out["z_act_hat"], out["z_act_target"])
+            + jepa_loss(out["z_opt_hat"], out["z_opt_target"])
+            + out["vq_opt"]["vq_loss"] + out["vq_act"]["vq_loss"])
+    loss.backward()
+    model.update_ema()

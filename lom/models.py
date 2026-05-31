@@ -95,14 +95,25 @@ class ReconstructionLOM(SerialisableModule):
         S = self.opt_embed.n_tokens
         self.opt_token = nn.Parameter(torch.randn(1, 1, S, d_model) * 0.02)
         self.opt_transformer = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=context_length + 1 + horizon,
-            dropout=dropout, bias=bias, causal=False,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=context_length + 1 + horizon,
+            dropout=dropout,
+            bias=bias,
+            causal=False,
         )
         self.opt_vq = LatentActionModel(
-            in_dim=d_model, latent_dim=latent_dim, num_options=num_options, bias=bias,
-            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+            in_dim=d_model,
+            latent_dim=latent_dim,
+            num_options=num_options,
+            bias=bias,
+            vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
+            vq_ema_decay=vq_ema_decay,
         )
 
         # --- Action encoder (LAM): bidirectional over [history | OPT | next_frame] ---
@@ -111,29 +122,55 @@ class ReconstructionLOM(SerialisableModule):
         self.act_token = nn.Parameter(torch.randn(1, 1, S, d_model) * 0.02)
         self.act_cond_proj = nn.Linear(latent_dim, d_model, bias=bias)  # z_opt → d_model
         self.act_transformer = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=context_length + 2,
-            dropout=dropout, bias=bias, causal=False,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=context_length + 2,
+            dropout=dropout,
+            bias=bias,
+            causal=False,
         )
         self.act_vq = LatentActionModel(
-            in_dim=d_model, latent_dim=latent_dim, num_options=n_actions, bias=bias,
-            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+            in_dim=d_model,
+            latent_dim=latent_dim,
+            num_options=n_actions,
+            bias=bias,
+            vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
+            vq_ema_decay=vq_ema_decay,
         )
 
         # --- Dynamics ---
         self.lam_dynamics = ObservableTransitionModel(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         self.lom_dynamics = ObservableTransitionModel(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            predict_sequence=predict_sequence, horizon=horizon,
-            patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            predict_sequence=predict_sequence,
+            horizon=horizon,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
 
     def encode_option(self, history: torch.Tensor, future: torch.Tensor) -> torch.Tensor:
@@ -151,12 +188,14 @@ class ReconstructionLOM(SerialisableModule):
         emb = self.opt_embed(self.tokeniser(torch.cat([history, future], dim=1)))
         opt = self.opt_token.expand(B, 1, self.opt_embed.n_tokens, emb.shape[-1])
         seq = torch.cat([emb[:, :c], opt, emb[:, c:]], dim=1)
-        hidden = self.opt_transformer(seq, temporal_mask=bidirectional_mask_cache(
-            c + 1 + k, c, seq.device))
+        hidden = self.opt_transformer(
+            seq, temporal_mask=bidirectional_mask_cache(c + 1 + k, c, seq.device)
+        )
         return hidden[:, c].mean(dim=1)  # OPT is always at position c
 
-    def encode_action(self, history: torch.Tensor, next_frame: torch.Tensor,
-                      z_opt: torch.Tensor) -> torch.Tensor:
+    def encode_action(
+        self, history: torch.Tensor, next_frame: torch.Tensor, z_opt: torch.Tensor
+    ) -> torch.Tensor:
         """Encode history + next_frame conditioned on z_opt.
 
         Args:
@@ -173,8 +212,9 @@ class ReconstructionLOM(SerialisableModule):
         emb[:, c:] = emb[:, c:] + self.act_cond_proj(z_opt).view(B, 1, 1, emb.shape[-1])
         opt = self.act_token.expand(B, 1, self.act_embed.n_tokens, emb.shape[-1])
         seq = torch.cat([emb[:, :c], opt, emb[:, c:]], dim=1)
-        hidden = self.act_transformer(seq, temporal_mask=bidirectional_mask_cache(
-            c + 2, c, seq.device))
+        hidden = self.act_transformer(
+            seq, temporal_mask=bidirectional_mask_cache(c + 2, c, seq.device)
+        )
         return hidden[:, c].mean(dim=1)
 
     def forward(self, history: torch.Tensor, future: torch.Tensor) -> dict:
@@ -196,16 +236,21 @@ class ReconstructionLOM(SerialisableModule):
 
         lam_logits = self.lam_dynamics(history, z_act)
         if self.predict_sequence:
-            lom_logits = self.lom_dynamics(history, z_opt, horizon=self.horizon,
-                                           teacher_frames=future)
+            lom_logits = self.lom_dynamics(
+                history, z_opt, horizon=self.horizon, teacher_frames=future
+            )
         else:
             lom_logits = self.lom_dynamics(history, z_opt)
 
         return {
-            "lam_logits": lam_logits, "lom_logits": lom_logits,
-            "z_opt": z_opt, "z_act": z_act,
-            "opt_idx": opt_idx, "act_idx": act_idx,
-            "vq_opt": vq_opt, "vq_act": vq_act,
+            "lam_logits": lam_logits,
+            "lom_logits": lom_logits,
+            "z_opt": z_opt,
+            "z_act": z_act,
+            "opt_idx": opt_idx,
+            "act_idx": act_idx,
+            "vq_opt": vq_opt,
+            "vq_act": vq_act,
         }
 
 
@@ -277,67 +322,115 @@ class LatentLOM(SerialisableModule):
         self.opt_embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
         S = self.opt_embed.n_tokens
         self.opt_context_transformer = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=context_length,
-            dropout=dropout, bias=bias, causal=True,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=context_length,
+            dropout=dropout,
+            bias=bias,
+            causal=True,
         )
         self.opt_target_transformer = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=horizon,
-            dropout=dropout, bias=bias, causal=True,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=horizon,
+            dropout=dropout,
+            bias=bias,
+            causal=True,
         )
         self.opt_proj = nn.Linear(d_model, latent_dim, bias=bias)
-        self.opt_ln   = LayerNorm(latent_dim, bias)
-        self.opt_vq   = LatentActionModel(
-            in_dim=2 * d_model, latent_dim=latent_dim, num_options=num_options, bias=bias,
-            vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+        self.opt_ln = LayerNorm(latent_dim, bias)
+        self.opt_vq = LatentActionModel(
+            in_dim=2 * d_model,
+            latent_dim=latent_dim,
+            num_options=num_options,
+            bias=bias,
+            vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
+            vq_ema_decay=vq_ema_decay,
         )
 
         # --- Action encoder (LAM): separate causal transformers for history and next_frame ---
         self.act_embed = PatchEmbedding(vocab_size, d_model, obs_h, obs_w, patch_size, bias)
         self.act_context_transformer = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=context_length,
-            dropout=dropout, bias=bias, causal=True,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=context_length,
+            dropout=dropout,
+            bias=bias,
+            causal=True,
         )
         self.act_target_transformer = SpatioTemporalTransformer(
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            n_spatial_positions=S, max_temporal_len=1,
-            dropout=dropout, bias=bias, causal=True,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_spatial_positions=S,
+            max_temporal_len=1,
+            dropout=dropout,
+            bias=bias,
+            causal=True,
         )
         self.act_proj = nn.Linear(d_model, latent_dim, bias=bias)
-        self.act_ln   = LayerNorm(latent_dim, bias)
-        self.act_vq   = LatentActionModel(
-            in_dim=2 * d_model + latent_dim, latent_dim=latent_dim, num_options=n_actions,
-            bias=bias, vq_dropout=vq_dropout, vq_entropy_weight=vq_entropy_weight,
-            vq_beta=vq_beta, vq_reset_thresh=vq_reset_thresh, vq_ema_decay=vq_ema_decay,
+        self.act_ln = LayerNorm(latent_dim, bias)
+        self.act_vq = LatentActionModel(
+            in_dim=2 * d_model + latent_dim,
+            latent_dim=latent_dim,
+            num_options=n_actions,
+            bias=bias,
+            vq_dropout=vq_dropout,
+            vq_entropy_weight=vq_entropy_weight,
+            vq_beta=vq_beta,
+            vq_reset_thresh=vq_reset_thresh,
+            vq_ema_decay=vq_ema_decay,
         )
 
         # --- EMA target networks (option path) ---
-        self.ema_opt_embed              = EMAEncoder(self.opt_embed,              decay=ema_decay)
+        self.ema_opt_embed = EMAEncoder(self.opt_embed, decay=ema_decay)
         self.ema_opt_target_transformer = EMAEncoder(self.opt_target_transformer, decay=ema_decay)
-        self.ema_opt_proj               = EMAEncoder(self.opt_proj,               decay=ema_decay)
-        self.ema_opt_ln                 = EMAEncoder(self.opt_ln,                 decay=ema_decay)
+        self.ema_opt_proj = EMAEncoder(self.opt_proj, decay=ema_decay)
+        self.ema_opt_ln = EMAEncoder(self.opt_ln, decay=ema_decay)
 
         # --- EMA target networks (action path) ---
-        self.ema_act_embed              = EMAEncoder(self.act_embed,              decay=ema_decay)
+        self.ema_act_embed = EMAEncoder(self.act_embed, decay=ema_decay)
         self.ema_act_target_transformer = EMAEncoder(self.act_target_transformer, decay=ema_decay)
-        self.ema_act_proj               = EMAEncoder(self.act_proj,               decay=ema_decay)
-        self.ema_act_ln                 = EMAEncoder(self.act_ln,                 decay=ema_decay)
+        self.ema_act_proj = EMAEncoder(self.act_proj, decay=ema_decay)
+        self.ema_act_ln = EMAEncoder(self.act_ln, decay=ema_decay)
 
         # --- Dynamics ---
         self.lam_dynamics = LatentTransitionModel(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            target_dim=latent_dim, patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            target_dim=latent_dim,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
         self.lom_dynamics = LatentTransitionModel(
-            vocab_size=vocab_size, obs_h=obs_h, obs_w=obs_w,
-            d_model=d_model, n_layers=n_layers, n_heads=n_heads,
-            context_length=context_length, latent_dim=latent_dim,
-            target_dim=latent_dim, patch_size=patch_size, dropout=dropout, bias=bias,
+            vocab_size=vocab_size,
+            obs_h=obs_h,
+            obs_w=obs_w,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            context_length=context_length,
+            latent_dim=latent_dim,
+            target_dim=latent_dim,
+            patch_size=patch_size,
+            dropout=dropout,
+            bias=bias,
         )
 
     def update_ema(self) -> None:
@@ -357,7 +450,7 @@ class LatentLOM(SerialisableModule):
         Returns:
             Concatenated context and target poolings of shape ``(B, 2 * d_model)``.
         """
-        c = self.context_length
+        c = history.shape[1]
         emb = self.opt_embed(self.tokeniser(torch.cat([history, future], dim=1)))
         ctx = self.opt_context_transformer(emb[:, :c])[:, -1].mean(dim=1)
         tgt = self.opt_target_transformer(emb[:, c:])[:, -1].mean(dim=1)
@@ -369,7 +462,7 @@ class LatentLOM(SerialisableModule):
         Returns:
             Concatenated context and target poolings of shape ``(B, 2 * d_model)``.
         """
-        c = self.context_length
+        c = history.shape[1]
         emb = self.act_embed(self.tokeniser(torch.cat([history, next_frame], dim=1)))
         ctx = self.act_context_transformer(emb[:, :c])[:, -1].mean(dim=1)
         tgt = self.act_target_transformer(emb[:, c:])[:, -1].mean(dim=1)
@@ -392,29 +485,32 @@ class LatentLOM(SerialisableModule):
         z_opt, vq_opt, opt_idx = self.opt_vq(self.encode_option(history, future))
 
         act_repr = self.encode_action(history, next_frame)
-        z_act, vq_act, act_idx = self.act_vq(
-            torch.cat([act_repr, z_opt.detach()], dim=-1)
-        )
+        z_act, vq_act, act_idx = self.act_vq(torch.cat([act_repr, z_opt.detach()], dim=-1))
 
         # EMA targets: embed → target transformer → pool → proj → ln
         with torch.no_grad():
             opt_emb_ema = self.ema_opt_embed(self.tokeniser(future))
-            z_opt_target = self.ema_opt_ln(self.ema_opt_proj(
-                self.ema_opt_target_transformer(opt_emb_ema)[:, -1].mean(dim=1)
-            ))
+            z_opt_target = self.ema_opt_ln(
+                self.ema_opt_proj(self.ema_opt_target_transformer(opt_emb_ema)[:, -1].mean(dim=1))
+            )
 
             act_emb_ema = self.ema_act_embed(self.tokeniser(next_frame))
-            z_act_target = self.ema_act_ln(self.ema_act_proj(
-                self.ema_act_target_transformer(act_emb_ema)[:, -1].mean(dim=1)
-            ))
+            z_act_target = self.ema_act_ln(
+                self.ema_act_proj(self.ema_act_target_transformer(act_emb_ema)[:, -1].mean(dim=1))
+            )
 
         z_act_hat = self.lam_dynamics(history, z_act)
         z_opt_hat = self.lom_dynamics(history, z_opt)
 
         return {
-            "z_act_hat": z_act_hat, "z_act_target": z_act_target,
-            "z_opt_hat": z_opt_hat, "z_opt_target": z_opt_target,
-            "z_opt": z_opt, "z_act": z_act,
-            "opt_idx": opt_idx, "act_idx": act_idx,
-            "vq_opt": vq_opt, "vq_act": vq_act,
+            "z_act_hat": z_act_hat,
+            "z_act_target": z_act_target,
+            "z_opt_hat": z_opt_hat,
+            "z_opt_target": z_opt_target,
+            "z_opt": z_opt,
+            "z_act": z_act,
+            "opt_idx": opt_idx,
+            "act_idx": act_idx,
+            "vq_opt": vq_opt,
+            "vq_act": vq_act,
         }

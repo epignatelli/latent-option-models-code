@@ -82,7 +82,7 @@ def test_stt_causal():
         n_heads=N_HEADS,
         n_spatial_positions=S,
         max_temporal_len=MAX_T,
-        causal_temporal=True,
+        causal=True,
     )
     x = torch.randn(BATCH, T, S, D_MODEL)
     out = model(x)

@@ -418,7 +418,7 @@ class ReconstructionLOMTrainer(Trainer):
         return nn.ModuleDict({"model": model})
 
     def step(self, batch: list[torch.Tensor]) -> dict[str, torch.Tensor]:
-        history, _, _, future = batch[0], batch[1], batch[2], batch[3]
+        history, future = batch[0], batch[3]
         out = self.models["model"](history, future)
         lam_recon = reconstruction_loss(
             out["lam_logits"], tokenise(future[:, 0:1]), self.cfg.env.vocab_size
@@ -484,7 +484,7 @@ class LatentLOMTrainer(Trainer):
         return nn.ModuleDict({"model": model})
 
     def step(self, batch: list[torch.Tensor]) -> dict[str, torch.Tensor]:
-        history, _, _, future = batch[0], batch[1], batch[2], batch[3]
+        history, future = batch[0], batch[3]
         out = self.models["model"](history, future)
         lam_jepa = jepa_loss(out["z_act_hat"], out["z_act_target"])
         lom_jepa = jepa_loss(out["z_opt_hat"], out["z_opt_target"])
@@ -512,9 +512,16 @@ class LatentLOMTrainer(Trainer):
 
         for mod in self.models.values():
             mod.train()
-        # EMA encoders stay in eval mode — not trained by optimizer
-        self.models["model"].ema_option_enc.eval()
-        self.models["model"].ema_action_enc.eval()
+        # EMA modules stay in eval mode so their dropout is disabled during target encoding
+        model: LatentLOM = self.models["model"]  # type: ignore[assignment]
+        model.ema_opt_embed.eval()
+        model.ema_opt_target_transformer.eval()
+        model.ema_opt_proj.eval()
+        model.ema_opt_ln.eval()
+        model.ema_act_embed.eval()
+        model.ema_act_target_transformer.eval()
+        model.ema_act_proj.eval()
+        model.ema_act_ln.eval()
 
         data_iter = iter(self.train_loader)
         t0 = time.time()
