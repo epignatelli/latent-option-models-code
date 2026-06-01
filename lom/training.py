@@ -118,16 +118,18 @@ class Trainer(ABC):
             )
         index_path = os.path.join(d.dataset_dir, "index.npz")
         log.info(
-            "Loading dataset from %s  (context=%d  horizon=%d  buffer=%d)",
+            "Loading dataset from %s  (context=%d  horizon=%d  stride=%d  buffer=%d)",
             index_path,
             d.context_len,
             d.horizon,
+            d.stride,
             d.buffer_size,
         )
         self.train_loader, self.val_loader = build_npz_dataloaders(
             index_path=index_path,
             context_len=d.context_len,
             horizon=d.horizon,
+            stride=d.stride,
             batch_size=t.batch_size,
             buffer_size=d.buffer_size,
             val_fraction=d.val_fraction,
@@ -156,7 +158,7 @@ class Trainer(ABC):
         if t.compile_model:
             log.info("Compiling models with torch.compile ...")
             for key in list(self.models.keys()):
-                self.models[key] = torch.compile(self.models[key])
+                self.models[key] = torch.compile(self.models[key])  # type: ignore[assignment]
             log.info("Compilation done.")
 
         decay = [p for p in self.models.parameters() if p.requires_grad and p.dim() >= 2]
@@ -618,7 +620,7 @@ class LatentLOMTrainer(Trainer):
             self.scaler.update()
             self.optimizer.zero_grad(set_to_none=True)
 
-            self.models["model"].update_ema()
+            self.models["model"].update_ema()  # type: ignore[union-attr]
 
             if (s + 1) % t.log_interval == 0:
                 dt = time.time() - t0

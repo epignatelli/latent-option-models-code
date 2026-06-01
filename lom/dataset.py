@@ -52,6 +52,7 @@ class GameBuffer:
         buffer_size: int,
         context_len: int,
         horizon: int,
+        stride: int = 1,
         refresh_fraction: float = 0.1,
         refresh_every: float = 60.0,
         seed: int = 0,
@@ -59,8 +60,9 @@ class GameBuffer:
         self._paths = paths
         self._ctx = context_len
         self._horizon = horizon
+        self._stride = stride
 
-        valid = np.maximum(lengths.astype(np.float64) - (context_len + horizon - 1), 0.0)
+        valid = np.maximum(lengths.astype(np.float64) - (context_len + horizon * stride - 1), 0.0)
         total = valid.sum()
         self._player_weights = valid / total if total > 0 else np.ones(len(paths)) / len(paths)
 
@@ -107,7 +109,7 @@ class GameBuffer:
                 )
                 n_games = len(offsets) - 1
                 game_lens = (offsets[1:] - offsets[:-1]).astype(np.float64)
-                valid_lens = np.maximum(game_lens - (self._ctx + self._horizon - 1), 0.0)
+                valid_lens = np.maximum(game_lens - (self._ctx + self._horizon * self._stride - 1), 0.0)
                 total_w = valid_lens.sum()
                 if total_w <= 0:
                     return None
@@ -128,7 +130,7 @@ class GameBuffer:
 
     def _make_weights(self, games: list) -> np.ndarray:
         valid = np.maximum(
-            np.array([len(g) for g in games], dtype=np.float64) - (self._ctx + self._horizon - 1),
+            np.array([len(g) for g in games], dtype=np.float64) - (self._ctx + self._horizon * self._stride - 1),
             0.0,
         )
         s = valid.sum()
@@ -155,7 +157,7 @@ class GameBuffer:
         game_idx = int(rng.choice(len(games), p=weights))
         game = games[game_idx]
         lo = self._ctx - 1
-        hi = len(game) - self._horizon - 1
+        hi = len(game) - self._horizon * self._stride - 1
         t = int(rng.integers(lo, max(lo, hi), endpoint=True))
         return game, t
 
@@ -176,8 +178,8 @@ class NpzTrajectoryDataset(Dataset):
     Each item:
         history:      (context_len, H, W) long  — frames [t-c+1 … t]
         next_frame:   (H, W) long               — frame t+1
-        future_frame: (H, W) long               — frame t+horizon
-        sequence:     (horizon, H, W) long      — frames [t+1 … t+horizon] (if return_sequence)
+        future_frame: (H, W) long               — frame t+horizon*stride
+        sequence:     (horizon, H, W) long      — frames [t+stride, t+2*stride … t+horizon*stride] (if return_sequence)
     """
 
     def __init__(
@@ -186,6 +188,7 @@ class NpzTrajectoryDataset(Dataset):
         lengths: np.ndarray,
         context_len: int = 4,
         horizon: int = 8,
+        stride: int = 1,
         buffer_size: int = 1_000,
         refresh_fraction: float = 0.1,
         refresh_every: float = 60.0,
@@ -197,13 +200,14 @@ class NpzTrajectoryDataset(Dataset):
     ) -> None:
         self.context_len = context_len
         self.horizon = horizon
+        self.stride = stride
         self.obs_h = obs_h
         self.obs_w = obs_w
         self.return_sequence = return_sequence
         self._steps = steps_per_epoch
 
         self._buffer = GameBuffer(
-            paths, lengths, buffer_size, context_len, horizon,
+            paths, lengths, buffer_size, context_len, horizon, stride,
             refresh_fraction=refresh_fraction, refresh_every=refresh_every, seed=seed,
         )
         self._rng = np.random.default_rng(seed + 2)
@@ -258,11 +262,13 @@ class NpzTrajectoryDataset(Dataset):
 
         history      = torch.from_numpy(game[t - self.context_len + 1 : t + 1].copy())
         next_frame   = torch.from_numpy(game[t + 1].copy())
-        future_frame = torch.from_numpy(game[t + self.horizon].copy())
+        future_frame = torch.from_numpy(game[t + self.horizon * self.stride].copy())
 
         out = (history, next_frame, future_frame)
         if self.return_sequence:
-            out = out + (torch.from_numpy(game[t + 1 : t + self.horizon + 1].copy()),)
+            out = out + (torch.from_numpy(
+                game[t + self.stride : t + self.horizon * self.stride + 1 : self.stride].copy()
+            ),)
         return out
 
     def close(self) -> None:
@@ -280,6 +286,7 @@ def build_npz_dataloaders(
     context_len: int,
     horizon: int,
     batch_size: int,
+    stride: int = 1,
     buffer_size: int = 1_000,
     val_fraction: float = 0.05,
     steps_per_epoch: int = 10_000,
@@ -298,6 +305,7 @@ def build_npz_dataloaders(
         seed=seed,
         context_len=context_len,
         horizon=horizon,
+        stride=stride,
         buffer_size=buffer_size,
         refresh_fraction=refresh_fraction,
         refresh_every=refresh_every,

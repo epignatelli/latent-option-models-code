@@ -44,6 +44,7 @@ class DataCfg:
     dataset_dir: str = ""
     context_len: int = 4
     horizon: int = 8
+    stride: int = 1
     val_fraction: float = 0.05
     buffer_size: int = 100
     steps_per_epoch: int = 10_000
