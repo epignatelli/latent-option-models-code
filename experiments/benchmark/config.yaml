@@ -26,7 +26,7 @@ model:
 
 train:
   ckpt_dir: /scratch/uceeepi/lom/checkpoints/benchmark
-  max_iters: 100_000
+  max_iters: 200_000
   log_interval: 50
   eval_interval: 500
   eval_iters: 50
