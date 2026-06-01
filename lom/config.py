@@ -47,7 +47,7 @@ class DataCfg:
     stride: int = 1
     val_fraction: float = 0.05
     buffer_size: int = 100
-    steps_per_epoch: int = 10_000
+    refresh_every: float = 60.0
 
 
 @dataclass

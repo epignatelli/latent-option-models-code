@@ -192,7 +192,6 @@ class NpzTrajectoryDataset(Dataset):
         buffer_size: int = 1_000,
         refresh_fraction: float = 0.1,
         refresh_every: float = 60.0,
-        steps_per_epoch: int = 10_000,
         seed: int = 0,
         obs_h: int = SCREEN_H,
         obs_w: int = SCREEN_W,
@@ -204,7 +203,6 @@ class NpzTrajectoryDataset(Dataset):
         self.obs_h = obs_h
         self.obs_w = obs_w
         self.return_sequence = return_sequence
-        self._steps = steps_per_epoch
 
         self._buffer = GameBuffer(
             paths, lengths, buffer_size, context_len, horizon, stride,
@@ -213,8 +211,8 @@ class NpzTrajectoryDataset(Dataset):
         self._rng = np.random.default_rng(seed + 2)
 
         log.info(
-            "NpzTrajectoryDataset: %d games in pool, buffer=%d, steps/epoch=%d",
-            len(paths), buffer_size, steps_per_epoch,
+            "NpzTrajectoryDataset: %d games in pool, buffer=%d, refresh_every=%.0fs",
+            len(paths), buffer_size, refresh_every,
         )
 
     @classmethod
@@ -255,7 +253,7 @@ class NpzTrajectoryDataset(Dataset):
         return train_ds, val_ds
 
     def __len__(self) -> int:
-        return self._steps
+        return 10_000
 
     def __getitem__(self, idx: int):
         game, t = self._buffer.sample(self._rng)
@@ -289,7 +287,6 @@ def build_npz_dataloaders(
     stride: int = 1,
     buffer_size: int = 1_000,
     val_fraction: float = 0.05,
-    steps_per_epoch: int = 10_000,
     refresh_fraction: float = 0.1,
     refresh_every: float = 60.0,
     seed: int = 42,
@@ -309,7 +306,6 @@ def build_npz_dataloaders(
         buffer_size=buffer_size,
         refresh_fraction=refresh_fraction,
         refresh_every=refresh_every,
-        steps_per_epoch=steps_per_epoch,
         return_sequence=return_sequence,
     )
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=0)

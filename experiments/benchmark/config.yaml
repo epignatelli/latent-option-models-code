@@ -18,7 +18,7 @@ data:
   horizon: 128
   stride: 4
   buffer_size: 100
-  steps_per_epoch: 10_000
+  refresh_every: 60
 
 model:
   latent_dim: 512

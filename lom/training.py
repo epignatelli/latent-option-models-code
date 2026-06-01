@@ -133,7 +133,7 @@ class Trainer(ABC):
             batch_size=t.batch_size,
             buffer_size=d.buffer_size,
             val_fraction=d.val_fraction,
-            steps_per_epoch=d.steps_per_epoch,
+            refresh_every=d.refresh_every,
             seed=t.seed,
             return_sequence=True,
         )
@@ -326,18 +326,18 @@ class Trainer(ABC):
             t.eval_interval,
         )
 
+        def _infinite(loader):
+            while True:
+                yield from loader
+
         for mod in self.models.values():
             mod.train()
-        data_iter = iter(self.train_loader)
+        data_iter = _infinite(self.train_loader)
         t0 = time.time()
         clip_count = 0.0
 
         for s in range(self.start_step, t.max_iters):
-            try:
-                batch = next(data_iter)
-            except StopIteration:
-                data_iter = iter(self.train_loader)
-                batch = next(data_iter)
+            batch = next(data_iter)
 
             batch = [x.to(self.device) for x in batch]
             lr = get_lr(s, t.lr, t.warmup_iters, t.max_iters, t.eta_min)
