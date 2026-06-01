@@ -4,32 +4,25 @@
 # Sweeps horizon over [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192] for all
 # 4 encoder architectures (LOM only — LAM uses horizon=1 by definition).
 # Runs once per context length listed in CTX_LENGTHS.
-# Produces one JSON per (encoder, context_len) pair in --out-dir.
+# Produces one JSON per (encoder, context_len) pair in OUT_DIR.
 # Results feed into scripts/plot_pareto.py (horizon.png).
 #
 # Usage:
 #   CUDA_VISIBLE_DEVICES=0 bash experiments/profile_horizon/run.sh [--out-dir DIR] [--no-compile]
-#   CUDA_VISIBLE_DEVICES=0 bash experiments/profile_horizon/run.sh --out-dir profiling_results/ --no-compile
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${ROOT}"
 
-OUT_DIR="profiling_results"
+OUT_DIR="${ROOT}/profiling_results"
 EXTRA_ARGS=()
-for arg in "$@"; do
-  case "$arg" in
-    --out-dir) ;;
-    --no-compile) EXTRA_ARGS+=("--no-compile") ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out-dir)    OUT_DIR="$2"; shift 2 ;;
+    --no-compile) EXTRA_ARGS+=("--no-compile"); shift ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
-done
-i=0; args=("$@")
-while [ $i -lt ${#args[@]} ]; do
-  if [ "${args[$i]}" = "--out-dir" ]; then
-    i=$((i+1)); OUT_DIR="${args[$i]}"
-  fi
-  i=$((i+1))
 done
 
 mkdir -p "${OUT_DIR}"
@@ -49,7 +42,7 @@ for ctx in "${CTX_LENGTHS[@]}"; do
       --encoder      "${encoder}" \
       --context-len  "${ctx}" \
       --json-out     "${out}" \
-      "${EXTRA_ARGS[@]}"
+      "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
   done
 done
 

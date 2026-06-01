@@ -3,7 +3,7 @@
 #
 # Sweeps context_len over [4, 8, 16, 32, 64, 128, 256] for all 4 encoder
 # architectures × LAM and LOM. Produces one JSON per (method, encoder) pair
-# in --out-dir. Results feed into scripts/plot_pareto.py (context_length.png).
+# in OUT_DIR. Results feed into scripts/plot_pareto.py (context_length.png).
 #
 # Usage:
 #   CUDA_VISIBLE_DEVICES=0 bash experiments/profile_context/run.sh [--out-dir DIR] [--no-compile]
@@ -13,21 +13,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${ROOT}"
 
-OUT_DIR="profiling_results"
+OUT_DIR="${ROOT}/profiling_results"
 EXTRA_ARGS=()
-for arg in "$@"; do
-  case "$arg" in
-    --out-dir) ;;
-    --no-compile) EXTRA_ARGS+=("--no-compile") ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out-dir)    OUT_DIR="$2"; shift 2 ;;
+    --no-compile) EXTRA_ARGS+=("--no-compile"); shift ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
-done
-# handle --out-dir VAL
-i=0; args=("$@")
-while [ $i -lt ${#args[@]} ]; do
-  if [ "${args[$i]}" = "--out-dir" ]; then
-    i=$((i+1)); OUT_DIR="${args[$i]}"
-  fi
-  i=$((i+1))
 done
 
 mkdir -p "${OUT_DIR}"
@@ -47,7 +40,7 @@ for encoder in "${ENCODERS[@]}"; do
       --method   "${method}" \
       --encoder  "${encoder}" \
       --json-out "${out}" \
-      "${EXTRA_ARGS[@]}"
+      "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
   done
 done
 
