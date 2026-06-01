@@ -5,7 +5,7 @@ Four model variants:
   --encoder reconstruction  — ReconstructionLOM (bidirectional, pixel reconstruction)
   --encoder latent          — LatentLOM compute-equivalent (d_model=256, n_layers=4)
   --encoder latent-medium   — LatentLOM medium (~100M, d_model=512, n_layers=8)
-  --encoder latent-params   — LatentLOM param-matched to reconstruction (~152M)
+  --encoder latent-params   — LatentLOM param-matched to reconstruction (~314M trainable)
 
   --method lam|lom controls only the horizon (1 vs --horizon).
 
@@ -14,6 +14,13 @@ Usage:
     CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --encoder latent
     CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --encoder reconstruction --horizon 128
     CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --pareto --encoder latent --horizon 128
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --full-sweep --out-dir results/
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.profile_memory --full-sweep --no-compile --out-dir results/
+
+--full-sweep runs all 12 combinations in one go:
+  - pareto (ctx × batch) for all 4 encoders × LAM + LOM  (8 runs)
+  - horizon sweep for all 4 encoders, LOM only            (4 runs)
+Results are written to --out-dir as JSON files named after each combination.
 
 Each batch size runs in a fresh subprocess to avoid CUDA context corruption
 from previous OOM events. Uses synthetic random data — no dataset required.
@@ -65,8 +72,11 @@ GPU_MEASURE_STEPS   = 50
 def _model_cfg(context_len: int, encoder: str = "reconstruction") -> tuple[EnvCfg, ModelCfg]:
     e = EnvCfg()
     if encoder == "latent-params":
-        # Parameter-matched to reconstruction (~152M): d_model=512, n_layers=12, n_heads=8 (head_dim=64)
-        m = ModelCfg(d_model=512, n_layers=12, n_heads=8, context_length=context_len,
+        # Parameter-matched to reconstruction (~311M trainable): d_model=512, n_layers=9, n_heads=8
+        # ReconstructionLOM is dominated by two state_heads: Linear(256, 8192*64) = 134M each.
+        # LatentLOM has no output heads; at D=512 each layer adds ~25.2M across 6 transformers.
+        # L=9 → ~314M trainable; L=12 → ~389M (overshoots by 25%).
+        m = ModelCfg(d_model=512, n_layers=9, n_heads=8, context_length=context_len,
                      latent_dim=512, num_options=256, patch_size=8)
     elif encoder == "latent-medium":
         # Medium latent: ~100M backbone params; d_model=512, n_layers=8, n_heads=8
@@ -333,8 +343,8 @@ def pareto_sweep(batch_sizes: list[int], context_lens: list[int],
         log.info("  context_len=%d  tokens/sample=%d", ctx, toks)
         results = sweep_batch_sizes(batch_sizes, method, encoder, ctx, horizon, compile_model)
         if results:
-            best_bs  = max(results, key=results.__getitem__)
-            best_sps = results[best_bs]
+            best_bs  = max(results.keys())           # largest fitting batch (memory frontier)
+            best_sps = max(results.values())         # peak throughput across all batch sizes
             peak_gb  = None  # peak_gb per-bs is already logged; summary uses best
         else:
             best_bs, best_sps = 0, 0.0
@@ -371,8 +381,8 @@ def horizon_sweep(batch_sizes: list[int], horizon_lengths: list[int],
         log.info("  horizon=%d  tokens/sample=%d", h, toks)
         results = sweep_batch_sizes(batch_sizes, method, encoder, ctx, h, compile_model)
         if results:
-            best_bs  = max(results, key=results.__getitem__)
-            best_sps = results[best_bs]
+            best_bs  = max(results.keys())
+            best_sps = max(results.values())
         else:
             best_bs, best_sps = 0, 0.0
         rows.append({"horizon": h, "tokens_per_sample": toks,
@@ -386,6 +396,49 @@ def horizon_sweep(batch_sizes: list[int], horizon_lengths: list[int],
         log.info("  %-10d  %-14d  %-12d  %.0f",
                  r["horizon"], r["tokens_per_sample"], r["max_batch"], r["samp_s"])
     return rows
+
+
+# --------------------------------------------------------------------------- #
+# Full sweep
+# --------------------------------------------------------------------------- #
+
+ALL_ENCODERS = ["reconstruction", "latent", "latent-medium", "latent-params"]
+
+
+def full_sweep(batch_sizes: list[int], context_lengths: list[int],
+               horizon_lengths: list[int], horizon: int,
+               out_dir: str, compile_model: bool = False) -> None:
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+
+    log.info("")
+    log.info("█" * 70)
+    log.info("  FULL SWEEP  — 8 pareto runs + 4 horizon runs")
+    log.info("█" * 70)
+
+    for encoder in ALL_ENCODERS:
+        for method in ("lam", "lom"):
+            h = 1 if method == "lam" else horizon
+            rows = pareto_sweep(batch_sizes, context_lengths, method, encoder, h, compile_model)
+            path = os.path.join(out_dir, f"pareto_{method}_{encoder}.json")
+            payload = {"method": method, "encoder": encoder,
+                       "horizon": h, "sweep": "ctx", "rows": rows}
+            with open(path, "w") as f:
+                json.dump(payload, f, indent=2)
+            log.info("  Written %s", path)
+
+    for encoder in ALL_ENCODERS:
+        rows = horizon_sweep(batch_sizes, horizon_lengths, "lom", encoder,
+                             DEFAULT_CTX, compile_model)
+        path = os.path.join(out_dir, f"horizon_lom_{encoder}.json")
+        payload = {"method": "lom", "encoder": encoder,
+                   "ctx": DEFAULT_CTX, "sweep": "horizon", "rows": rows}
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2)
+        log.info("  Written %s", path)
+
+    log.info("")
+    log.info("  Full sweep complete. Results in %s", out_dir)
 
 
 # --------------------------------------------------------------------------- #
@@ -410,18 +463,27 @@ def main() -> None:
     parser.add_argument("--horizon-lengths", type=int, nargs="+",
                         default=[32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
                         help="horizon lengths to sweep with --horizon-sweep")
-    parser.add_argument("--compile",         action="store_true",
-                        help="apply torch.compile to all models before profiling")
+    parser.add_argument("--full-sweep",      action="store_true",
+                        help="run all 12 combinations: pareto for all encoders × LAM+LOM, "
+                             "horizon sweep for all encoders LOM only")
+    parser.add_argument("--out-dir",         default="profiling_results",
+                        help="directory for JSON outputs when using --full-sweep (default: profiling_results/)")
+    parser.add_argument("--no-compile",      action="store_true",
+                        help="skip torch.compile (compile is on by default)")
     parser.add_argument("--json-out",        default=None,
                         help="write sweep results to this JSON file")
     args = parser.parse_args()
 
+    compile_model = not args.no_compile
     log.info("=== profile_memory  method=%s  encoder=%s  horizon=%d  compile=%s ===",
-             args.method, args.encoder, args.horizon, args.compile)
+             args.method, args.encoder, args.horizon, compile_model)
 
-    if args.pareto:
+    if args.full_sweep:
+        full_sweep(args.batch_sizes, args.context_lengths, args.horizon_lengths,
+                   args.horizon, args.out_dir, compile_model)
+    elif args.pareto:
         rows = pareto_sweep(args.batch_sizes, args.context_lengths,
-                            args.method, args.encoder, args.horizon, args.compile)
+                            args.method, args.encoder, args.horizon, compile_model)
         if args.json_out:
             payload = {"method": args.method, "encoder": args.encoder,
                        "horizon": args.horizon, "sweep": "ctx", "rows": rows}
@@ -430,7 +492,7 @@ def main() -> None:
             log.info("Pareto results written to %s", args.json_out)
     elif args.horizon_sweep:
         rows = horizon_sweep(args.batch_sizes, args.horizon_lengths,
-                             args.method, args.encoder, args.context_len, args.compile)
+                             args.method, args.encoder, args.context_len, compile_model)
         if args.json_out:
             payload = {"method": args.method, "encoder": args.encoder,
                        "ctx": args.context_len, "sweep": "horizon", "rows": rows}
@@ -441,7 +503,7 @@ def main() -> None:
         log.info("Sweeping batch sizes  (method=%s  encoder=%s  ctx=%d  horizon=%d)",
                  args.method, args.encoder, args.context_len, args.horizon)
         results = sweep_batch_sizes(args.batch_sizes, args.method, args.encoder,
-                                    args.context_len, args.horizon, args.compile)
+                                    args.context_len, args.horizon, compile_model)
         if results:
             best_bs = max(results, key=results.__getitem__)
             log.info("")
