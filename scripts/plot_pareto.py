@@ -98,7 +98,7 @@ def plot_context(in_dir: Path, out_dir: Path) -> None:
     axes[1].set_title("Throughput frontier")
     _add_legend(axes[1], [("LAM", LAM_COLOR), ("LOM", LOM_COLOR)])
 
-    fig.suptitle("Context length sweep  (patch_size=8)", fontsize=11)
+    fig.suptitle("Context length sweep  (patch_size=8, H100 96 GB)", fontsize=11)
     fig.tight_layout()
     out = out_dir / "context_length.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
