@@ -12,7 +12,7 @@ sweep:
 
 data:
   dataset_dir: /scratch/uceeepi/lom/datasets/nle/nao
-  context_len: 4
+  context_len: 16
   horizon: 128
   buffer_size: 100
 
