@@ -406,14 +406,15 @@ ALL_ENCODERS = ["reconstruction", "latent", "latent-medium", "latent-params"]
 
 
 def full_sweep(batch_sizes: list[int], context_lengths: list[int],
-               horizon_lengths: list[int], horizon: int,
+               horizon_lengths: list[int], horizon_ctxs: list[int], horizon: int,
                out_dir: str, compile_model: bool = False) -> None:
     import os
     os.makedirs(out_dir, exist_ok=True)
 
+    n_horizon = len(ALL_ENCODERS) * len(horizon_ctxs)
     log.info("")
     log.info("█" * 70)
-    log.info("  FULL SWEEP  — 8 pareto runs + 4 horizon runs")
+    log.info("  FULL SWEEP  — 8 pareto runs + %d horizon runs", n_horizon)
     log.info("█" * 70)
 
     for encoder in ALL_ENCODERS:
@@ -427,15 +428,15 @@ def full_sweep(batch_sizes: list[int], context_lengths: list[int],
                 json.dump(payload, f, indent=2)
             log.info("  Written %s", path)
 
-    for encoder in ALL_ENCODERS:
-        rows = horizon_sweep(batch_sizes, horizon_lengths, "lom", encoder,
-                             DEFAULT_CTX, compile_model)
-        path = os.path.join(out_dir, f"horizon_lom_{encoder}.json")
-        payload = {"method": "lom", "encoder": encoder,
-                   "ctx": DEFAULT_CTX, "sweep": "horizon", "rows": rows}
-        with open(path, "w") as f:
-            json.dump(payload, f, indent=2)
-        log.info("  Written %s", path)
+    for ctx in horizon_ctxs:
+        for encoder in ALL_ENCODERS:
+            rows = horizon_sweep(batch_sizes, horizon_lengths, "lom", encoder, ctx, compile_model)
+            path = os.path.join(out_dir, f"horizon_lom_{encoder}_ctx{ctx}.json")
+            payload = {"method": "lom", "encoder": encoder,
+                       "ctx": ctx, "sweep": "horizon", "rows": rows}
+            with open(path, "w") as f:
+                json.dump(payload, f, indent=2)
+            log.info("  Written %s", path)
 
     log.info("")
     log.info("  Full sweep complete. Results in %s", out_dir)
@@ -464,8 +465,10 @@ def main() -> None:
                         default=[32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
                         help="horizon lengths to sweep with --horizon-sweep")
     parser.add_argument("--full-sweep",      action="store_true",
-                        help="run all 12 combinations: pareto for all encoders × LAM+LOM, "
-                             "horizon sweep for all encoders LOM only")
+                        help="run all combinations: pareto for all encoders × LAM+LOM, "
+                             "horizon sweep for all encoders × --horizon-ctxs")
+    parser.add_argument("--horizon-ctxs",   type=int, nargs="+", default=[4, 16],
+                        help="context lengths for the horizon sweep in --full-sweep (default: 4 16)")
     parser.add_argument("--out-dir",         default="profiling_results",
                         help="directory for JSON outputs when using --full-sweep (default: profiling_results/)")
     parser.add_argument("--no-compile",      action="store_true",
@@ -480,7 +483,7 @@ def main() -> None:
 
     if args.full_sweep:
         full_sweep(args.batch_sizes, args.context_lengths, args.horizon_lengths,
-                   args.horizon, args.out_dir, compile_model)
+                   args.horizon_ctxs, args.horizon, args.out_dir, compile_model)
     elif args.pareto:
         rows = pareto_sweep(args.batch_sizes, args.context_lengths,
                             args.method, args.encoder, args.horizon, compile_model)

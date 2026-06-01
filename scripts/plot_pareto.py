@@ -30,7 +30,8 @@ ENC_LABELS = {"reconstruction": "Reconstruction",
               "latent":         "Latent",
               "latent-medium":  "Latent-medium",
               "latent-params":  "Latent-params"}
-LINESTYLES = ["-", "--", "-.", ":"]
+LINESTYLES = ["-",  "--", "-.", ":"]
+MARKERS    = ["o", "s",  "^", "D"]
 
 LAM_COLOR = "black"
 LOM_COLOR = "red"
@@ -71,8 +72,9 @@ def _add_legend(ax: matplotlib.axes.Axes, method_labels: list[tuple[str, str]]) 
         for label, color in method_labels
     ]
     enc_handles = [
-        mlines.Line2D([], [], color="black", linestyle=ls, linewidth=1.5, label=ENC_LABELS[enc])
-        for enc, ls in zip(ENCODERS, LINESTYLES)
+        mlines.Line2D([], [], color="black", linestyle=ls, marker=mk, markersize=4,
+                      linewidth=1.5, label=ENC_LABELS[enc])
+        for enc, ls, mk in zip(ENCODERS, LINESTYLES, MARKERS)
     ]
     ax.legend(handles=method_handles + enc_handles, fontsize=8,
               loc="upper right", framealpha=0.8)
@@ -82,13 +84,13 @@ def plot_context(in_dir: Path, out_dir: Path) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     for i, enc in enumerate(ENCODERS):
-        ls = LINESTYLES[i]
+        ls, mk = LINESTYLES[i], MARKERS[i]
         for method, color in [("lam", LAM_COLOR), ("lom", LOM_COLOR)]:
             data = load(in_dir / f"pareto_{method}_{enc}.json")
             xs, batch, sps = _rows(data)
             if not xs:
                 continue
-            kw = dict(color=color, linestyle=ls, linewidth=1.8, markersize=0)
+            kw = dict(color=color, linestyle=ls, linewidth=1.8, marker=mk, markersize=4)
             axes[0].plot(xs, batch, **kw)
             axes[1].plot(xs, sps,   **kw)
 
@@ -105,26 +107,36 @@ def plot_context(in_dir: Path, out_dir: Path) -> None:
     print(f"Saved: {out}")
 
 
+HORIZON_CTXS = [4, 16]
+
+
 def plot_horizon(in_dir: Path, out_dir: Path) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    ctxs = [c for c in HORIZON_CTXS
+            if any((in_dir / f"horizon_lom_{enc}_ctx{c}.json").exists() for enc in ENCODERS)]
+    if not ctxs:
+        print("No horizon files found — skipping horizon plot")
+        return
 
-    for i, enc in enumerate(ENCODERS):
-        ls   = LINESTYLES[i]
-        data = load(in_dir / f"horizon_lom_{enc}.json")
-        xs, batch, sps = _rows(data)
-        if not xs:
-            continue
-        kw = dict(color=LOM_COLOR, linestyle=ls, linewidth=1.8, markersize=0)
-        axes[0].plot(xs, batch, **kw)
-        axes[1].plot(xs, sps,   **kw)
+    fig, axes = plt.subplots(len(ctxs), 2, figsize=(10, 4 * len(ctxs)), squeeze=False)
 
-    _style_ax(axes[0], "Horizon (frames)", "Max batch size")
-    _style_ax(axes[1], "Horizon (frames)", "Throughput (samp/s)")
-    axes[0].set_title("Memory frontier")
-    axes[1].set_title("Throughput frontier")
-    _add_legend(axes[1], [("LOM", LOM_COLOR)])
+    for row, ctx in enumerate(ctxs):
+        for i, enc in enumerate(ENCODERS):
+            ls, mk = LINESTYLES[i], MARKERS[i]
+            data = load(in_dir / f"horizon_lom_{enc}_ctx{ctx}.json")
+            xs, batch, sps = _rows(data)
+            if not xs:
+                continue
+            kw = dict(color=LOM_COLOR, linestyle=ls, linewidth=1.8, marker=mk, markersize=4)
+            axes[row, 0].plot(xs, batch, **kw)
+            axes[row, 1].plot(xs, sps,   **kw)
 
-    fig.suptitle("Horizon sweep  (patch_size=8, ctx=4)", fontsize=11)
+        _style_ax(axes[row, 0], "Horizon (frames)", "Max batch size")
+        _style_ax(axes[row, 1], "Horizon (frames)", "Throughput (samp/s)")
+        axes[row, 0].set_title(f"ctx={ctx} — memory frontier")
+        axes[row, 1].set_title(f"ctx={ctx} — throughput frontier")
+        _add_legend(axes[row, 1], [("LOM", LOM_COLOR)])
+
+    fig.suptitle("Horizon sweep  (patch_size=8, H100 96 GB)", fontsize=11)
     fig.tight_layout()
     out = out_dir / "horizon.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
