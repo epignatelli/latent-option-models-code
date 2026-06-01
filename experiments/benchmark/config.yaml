@@ -9,11 +9,14 @@
 
 sweep:
   seeds: [0, 1, 2]
+  lam_batch_size: 512
+  lom_batch_size: 256
 
 data:
   dataset_dir: /scratch/uceeepi/lom/datasets/nle/nao-top10
   context_len: 16
   horizon: 128
+  stride: 4
   buffer_size: 100
 
 model:
@@ -23,7 +26,6 @@ model:
 
 train:
   ckpt_dir: /scratch/uceeepi/lom/checkpoints/benchmark
-  batch_size: 2048
   max_iters: 100_000
   log_interval: 50
   eval_interval: 500

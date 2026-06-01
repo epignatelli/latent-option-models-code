@@ -99,7 +99,9 @@ trap _cleanup SIGINT SIGTERM
 
 # ---------------------------------------------------------------------------
 CKPT_ROOT=$(_cfg train.ckpt_dir)
-read -ra SEEDS <<< "$(_cfg sweep.seeds)"
+read -ra SEEDS        <<< "$(_cfg sweep.seeds)"
+LAM_BATCH=$(_cfg sweep.lam_batch_size)
+LOM_BATCH=$(_cfg sweep.lom_batch_size)
 
 # ---------------------------------------------------------------------------
 echo "===== benchmark — LAM vs LOM, ${#SEEDS[@]} seeds ====="
@@ -109,12 +111,13 @@ for seed in "${SEEDS[@]}"; do
 
   CKPT_LAM="${CKPT_ROOT}/lam_seed${seed}"
   mkdir -p "${CKPT_LAM}"
-  echo "  LAM  horizon=1  num_options=100"
+  echo "  LAM  horizon=1  num_options=100  batch=${LAM_BATCH}"
   if ! _done "${CKPT_LAM}"; then
     _launch bash -c "python3 -m scripts.pretrain --method lam --signal latent \
-      --config         '${CFG}' \
-      --train.seed     '${seed}' \
-      --train.ckpt_dir '${CKPT_LAM}' \
+      --config              '${CFG}' \
+      --train.seed          '${seed}' \
+      --train.ckpt_dir      '${CKPT_LAM}' \
+      --train.batch_size    '${LAM_BATCH}' \
       2>&1 | tee '${CKPT_LAM}/train.log' \
       && touch '${CKPT_LAM}/done'"
   fi
@@ -122,12 +125,13 @@ for seed in "${SEEDS[@]}"; do
   if [ "${LAM_ONLY}" = "0" ]; then
     CKPT_LOM="${CKPT_ROOT}/lom_seed${seed}"
     mkdir -p "${CKPT_LOM}"
-    echo "  LOM  horizon=128  num_options=256"
+    echo "  LOM  horizon=128  stride=4  num_options=256  batch=${LOM_BATCH}"
     if ! _done "${CKPT_LOM}"; then
       _launch bash -c "python3 -m scripts.pretrain --method lom --signal latent \
-        --config         '${CFG}' \
-        --train.seed     '${seed}' \
-        --train.ckpt_dir '${CKPT_LOM}' \
+        --config              '${CFG}' \
+        --train.seed          '${seed}' \
+        --train.ckpt_dir      '${CKPT_LOM}' \
+        --train.batch_size    '${LOM_BATCH}' \
         2>&1 | tee '${CKPT_LOM}/train.log' \
         && touch '${CKPT_LOM}/done'"
     fi
