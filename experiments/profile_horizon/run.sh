@@ -28,7 +28,7 @@ done
 mkdir -p "${OUT_DIR}"
 
 ENCODERS=(reconstruction latent latent-medium latent-params)
-CTX_LENGTHS=(4 16)
+CTX_LENGTHS=(16)
 
 echo "===== profile_horizon — ${#ENCODERS[@]} encoders × ${#CTX_LENGTHS[@]} context lengths (LOM only) ====="
 echo "  out-dir: ${OUT_DIR}"
