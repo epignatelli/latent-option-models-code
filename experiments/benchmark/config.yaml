@@ -18,6 +18,7 @@ data:
   horizon: 128
   stride: 4
   buffer_size: 100
+  steps_per_epoch: 10_000
 
 model:
   latent_dim: 512
@@ -27,6 +28,7 @@ model:
 train:
   ckpt_dir: /scratch/uceeepi/lom/checkpoints/benchmark
   max_iters: 200_000
+  warmup_iters: 2_000
   log_interval: 50
   eval_interval: 500
   eval_iters: 50
