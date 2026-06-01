@@ -222,3 +222,6 @@ __marimo__/
 
 # Generated figures (belong in the paper repo)
 figures/
+
+# Profiling results (generated data, not source)
+profiling_results/
