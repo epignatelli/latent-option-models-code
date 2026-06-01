@@ -615,21 +615,24 @@ class VectorQuantizer(nn.Module):
                 smoothed = (self.ema_cluster_size + 1e-5) / (n + self.num_options * 1e-5) * n
                 self.codebook.copy_(self.ema_embed_sum / smoothed.unsqueeze(1))
 
-                # Dead-code reset: copy a random live entry into each dead slot
+                # Dead-code reset: copy a random entry into each dead slot.
+                # All ops use fixed output shapes so torch.compile never recompiles
+                # when the active-code count changes between steps.
                 if self.vq_reset_thresh > 0:
                     self.last_active += 1
-                    self.last_active[indices.view(-1).unique()] = 0
-                    dead = (self.last_active >= self.vq_reset_thresh).nonzero(as_tuple=True)[0]
-                    if dead.numel():
-                        alive = (self.last_active < self.vq_reset_thresh).nonzero(as_tuple=True)[0]
-                        if alive.numel():
-                            src = alive[
-                                torch.randint(alive.numel(), (dead.numel(),), device=z.device)
-                            ]
-                            self.codebook[dead] = self.codebook[src]
-                            self.ema_embed_sum[dead] = self.ema_embed_sum[src]
-                            self.ema_cluster_size[dead] = self.ema_cluster_size[src]
-                            self.last_active[dead] = 0
+                    active = torch.zeros(self.num_options, dtype=torch.bool, device=z.device)
+                    active.scatter_(0, indices.view(-1), True)
+                    self.last_active.masked_fill_(active, 0)
+
+                    dead_mask = self.last_active >= self.vq_reset_thresh
+                    rand_idx = torch.randint(0, self.num_options, (self.num_options,), device=z.device)
+                    self.codebook.copy_(
+                        torch.where(dead_mask[:, None], self.codebook[rand_idx], self.codebook))
+                    self.ema_embed_sum.copy_(
+                        torch.where(dead_mask[:, None], self.ema_embed_sum[rand_idx], self.ema_embed_sum))
+                    self.ema_cluster_size.copy_(
+                        torch.where(dead_mask, self.ema_cluster_size[rand_idx], self.ema_cluster_size))
+                    self.last_active.masked_fill_(dead_mask, 0)
 
         z_q = z + (z_hard - z).detach()  # straight-through estimator
 

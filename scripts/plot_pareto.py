@@ -1,14 +1,16 @@
-"""Plot pareto frontiers from JSON files produced by profile_memory.
+"""Plot profiling results from profile_memory --full-sweep.
 
-Accepts any number of JSON files; labels are derived from filenames unless
-overridden with --labels.
+Produces two figures from a directory of JSON files:
+
+  context_length.pdf  — 1×2:  batch vs ctx  |  sps vs ctx
+                               colour = method (LAM/LOM)
+                               linestyle = architecture
+
+  horizon.pdf         — 1×2:  batch vs horizon  |  sps vs horizon
+                               linestyle = architecture (LOM only)
 
 Usage:
-    python -m scripts.plot_pareto \\
-        /tmp/pareto_stt.json /tmp/pareto_jepa_compute.json ... \\
-        --labels "STT 155M" "JEPA-compute 22M" \\
-        --title "LAM: encoder comparison" \\
-        --out figures/pareto_lam.pdf
+    python -m scripts.plot_pareto --in-dir profiling_results/ --out-dir figures/
 """
 from __future__ import annotations
 
@@ -18,62 +20,113 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.axes
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+import matplotlib.lines as mlines
 
-PALETTE = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
-           "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
-MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
+ENCODERS   = ["reconstruction", "latent", "latent-medium", "latent-params"]
+ENC_LABELS = {"reconstruction": "Reconstruction",
+              "latent":         "Latent",
+              "latent-medium":  "Latent-medium",
+              "latent-params":  "Latent-params"}
+LINESTYLES = ["-", "--", "-.", ":"]
+
+LAM_COLOR = "black"
+LOM_COLOR = "red"
 
 
-def load(path: str) -> dict:
+def load(path: Path) -> dict | None:
+    if not path.exists():
+        return None
     with open(path) as f:
         return json.load(f)
 
 
-def _auto_label(path: str) -> str:
-    stem = Path(path).stem
-    for prefix in ("pareto_lam_", "pareto_lom_", "pareto_"):
-        if stem.startswith(prefix):
-            stem = stem[len(prefix):]
-    return stem.replace("_", "-")
+def _rows(data: dict | None) -> tuple[list, list, list]:
+    if data is None:
+        return [], [], []
+    rows  = [r for r in data["rows"] if r["max_batch"] > 0]
+    xkey  = "ctx" if data["sweep"] == "ctx" else "horizon"
+    xs    = [r[xkey]        for r in rows]
+    batch = [r["max_batch"] for r in rows]
+    sps   = [r["samp_s"]    for r in rows]
+    return xs, batch, sps
 
 
-def plot(data: list[dict], labels: list[str], title: str, out: str,
-         xaxis: str = "ctx") -> None:
-    xkey    = "ctx" if xaxis == "ctx" else "horizon"
-    xlabel  = "Context length (frames)" if xaxis == "ctx" else "Horizon (frames)"
+def _style_ax(ax: matplotlib.axes.Axes, xlabel: str, ylabel: str) -> None:
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log", base=2)
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: str(int(x))))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: str(int(x))))
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
+    ax.spines[["top", "right"]].set_visible(False)
 
+
+def _add_legend(ax: matplotlib.axes.Axes, method_labels: list[tuple[str, str]]) -> None:
+    method_handles = [
+        mlines.Line2D([], [], color=color, linewidth=2, label=label)
+        for label, color in method_labels
+    ]
+    enc_handles = [
+        mlines.Line2D([], [], color="black", linestyle=ls, linewidth=1.5, label=ENC_LABELS[enc])
+        for enc, ls in zip(ENCODERS, LINESTYLES)
+    ]
+    ax.legend(handles=method_handles + enc_handles, fontsize=8,
+              loc="upper right", framealpha=0.8)
+
+
+def plot_context(in_dir: Path, out_dir: Path) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    for i, enc in enumerate(ENCODERS):
+        ls = LINESTYLES[i]
+        for method, color in [("lam", LAM_COLOR), ("lom", LOM_COLOR)]:
+            data = load(in_dir / f"pareto_{method}_{enc}.json")
+            xs, batch, sps = _rows(data)
+            if not xs:
+                continue
+            kw = dict(color=color, linestyle=ls, linewidth=1.8, markersize=0)
+            axes[0].plot(xs, batch, **kw)
+            axes[1].plot(xs, sps,   **kw)
+
+    _style_ax(axes[0], "Context length (frames)", "Max batch size")
+    _style_ax(axes[1], "Context length (frames)", "Throughput (samp/s)")
+    axes[0].set_title("Memory frontier")
+    axes[1].set_title("Throughput frontier")
+    _add_legend(axes[1], [("LAM", LAM_COLOR), ("LOM", LOM_COLOR)])
+
+    fig.suptitle("Context length sweep  (patch_size=8)", fontsize=11)
+    fig.tight_layout()
+    out = out_dir / "context_length.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    print(f"Saved: {out}")
+
+
+def plot_horizon(in_dir: Path, out_dir: Path) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-    for i, (d, lbl) in enumerate(zip(data, labels)):
-        rows  = [r for r in d["rows"] if r["max_batch"] > 0]
-        xs    = [r[xkey] for r in rows]
-        batch = [r["max_batch"] for r in rows]
-        sps   = [r["samp_s"] for r in rows]
-        c, m  = PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]
+    for i, enc in enumerate(ENCODERS):
+        ls   = LINESTYLES[i]
+        data = load(in_dir / f"horizon_lom_{enc}.json")
+        xs, batch, sps = _rows(data)
+        if not xs:
+            continue
+        kw = dict(color=LOM_COLOR, linestyle=ls, linewidth=1.8, markersize=0)
+        axes[0].plot(xs, batch, **kw)
+        axes[1].plot(xs, sps,   **kw)
 
-        axes[0].plot(xs, batch, color=c, marker=m, linewidth=1.8, markersize=6, label=lbl)
-        axes[1].plot(xs, sps,   color=c, marker=m, linewidth=1.8, markersize=6, label=lbl)
+    _style_ax(axes[0], "Horizon (frames)", "Max batch size")
+    _style_ax(axes[1], "Horizon (frames)", "Throughput (samp/s)")
+    axes[0].set_title("Memory frontier")
+    axes[1].set_title("Throughput frontier")
+    _add_legend(axes[1], [("LOM", LOM_COLOR)])
 
-    for ax, ylabel, subtitle in zip(
-        axes,
-        ["Max batch size", "Throughput (samp/s)"],
-        ["Memory frontier", "Throughput frontier"],
-    ):
-        ax.set_xscale("log", base=2)
-        ax.set_yscale("log", base=2)
-        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: str(int(x))))
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: str(int(x))))
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        ax.set_title(subtitle)
-        ax.legend(fontsize=8)
-        ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
-        ax.spines[["top", "right"]].set_visible(False)
-
-    fig.suptitle(title, fontsize=10)
+    fig.suptitle("Horizon sweep  (patch_size=8, ctx=4)", fontsize=11)
     fig.tight_layout()
+    out = out_dir / "horizon.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Saved: {out}")
 
@@ -81,22 +134,18 @@ def plot(data: list[dict], labels: list[str], title: str, out: str,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("files", nargs="+", help="JSON files from profile_memory --json-out")
-    parser.add_argument("--labels", nargs="+", default=None,
-                        help="display labels, one per file (default: derived from filename)")
-    parser.add_argument("--title", default="Pareto frontier  (patch\\_size=8, 85 GB GPU)")
-    parser.add_argument("--out", default="pareto.pdf",
-                        help="output path (PDF or PNG)")
-    parser.add_argument("--xaxis", choices=["ctx", "horizon"], default="ctx",
-                        help="x-axis variable: ctx (default) or horizon")
+    parser.add_argument("--in-dir",  default="profiling_results",
+                        help="directory containing JSON files from --full-sweep")
+    parser.add_argument("--out-dir", default="figures",
+                        help="directory for output PDFs")
     args = parser.parse_args()
 
-    data   = [load(f) for f in args.files]
-    labels = args.labels if args.labels else [_auto_label(f) for f in args.files]
-    if len(labels) != len(data):
-        parser.error(f"--labels count ({len(labels)}) must match file count ({len(data)})")
+    in_dir  = Path(args.in_dir)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    plot(data, labels, args.title, args.out, xaxis=args.xaxis)
+    plot_context(in_dir, out_dir)
+    plot_horizon(in_dir, out_dir)
 
 
 if __name__ == "__main__":
