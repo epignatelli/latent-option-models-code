@@ -6,13 +6,18 @@
 # If 2+ GPUs are available, fills one slot per GPU, waits when all are busy.
 #
 # Usage:
-#   bash run.sh [--force]
+#   bash experiments/benchmark/run.sh [--lam-only] [--force]
 #
-#   --force   re-run jobs even if a 'done' sentinel exists
+#   --lam-only  run only the LAM condition (horizon=1)
+#   --force     re-run jobs even if a 'done' sentinel exists
 set -euo pipefail
 
 FORCE=0
-for _arg in "$@"; do [ "$_arg" = "--force" ] && FORCE=1; done
+LAM_ONLY=0
+for _arg in "$@"; do
+  [ "$_arg" = "--force" ]    && FORCE=1
+  [ "$_arg" = "--lam-only" ] && LAM_ONLY=1
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -106,27 +111,28 @@ for seed in "${SEEDS[@]}"; do
   mkdir -p "${CKPT_LAM}"
   echo "  LAM  horizon=1  num_options=98"
   if ! _done "${CKPT_LAM}"; then
-    _launch bash -c "python3 -m scripts.pretrain lam \
-      --config           '${CFG}' \
-      --data.horizon     1 \
+    _launch bash -c "python3 -m scripts.pretrain latent-lom \
+      --config            '${CFG}' \
+      --data.horizon      1 \
       --model.num_options 98 \
-      --train.seed       '${seed}' \
-      --train.ckpt_dir   '${CKPT_LAM}' \
-      2>&1 | tee '${CKPT_LAM}/train.log'" \
-    && touch "${CKPT_LAM}/done"
+      --train.seed        '${seed}' \
+      --train.ckpt_dir    '${CKPT_LAM}' \
+      2>&1 | tee '${CKPT_LAM}/train.log' \
+      && touch '${CKPT_LAM}/done'"
   fi
 
-  CKPT_LOM="${CKPT_ROOT}/lom_seed${seed}"
-  mkdir -p "${CKPT_LOM}"
-  echo "  LOM  horizon=128  num_options=256"
-  if ! _done "${CKPT_LOM}"; then
-    _launch bash -c "python3 -m scripts.pretrain lom \
-      --config           '${CFG}' \
-      --train.seed       '${seed}' \
-      --train.ckpt_dir   '${CKPT_LOM}' \
-      2>&1 | tee '${CKPT_LOM}/train.log'" \
-
-    && touch "${CKPT_LOM}/done"
+  if [ "${LAM_ONLY}" = "0" ]; then
+    CKPT_LOM="${CKPT_ROOT}/lom_seed${seed}"
+    mkdir -p "${CKPT_LOM}"
+    echo "  LOM  horizon=128  num_options=256"
+    if ! _done "${CKPT_LOM}"; then
+      _launch bash -c "python3 -m scripts.pretrain latent-lom \
+        --config            '${CFG}' \
+        --train.seed        '${seed}' \
+        --train.ckpt_dir    '${CKPT_LOM}' \
+        2>&1 | tee '${CKPT_LOM}/train.log' \
+        && touch '${CKPT_LOM}/done'"
+    fi
   fi
 done
 
