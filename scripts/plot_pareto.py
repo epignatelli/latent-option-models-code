@@ -134,7 +134,13 @@ def plot_horizon(in_dir: Path, out_dir: Path) -> None:
         _style_ax(axes[row, 1], "Horizon (frames)", "Throughput (samp/s)")
         axes[row, 0].set_title(f"ctx={ctx} — memory frontier")
         axes[row, 1].set_title(f"ctx={ctx} — throughput frontier")
-        _add_legend(axes[row, 1], [("LOM", LOM_COLOR)])
+        enc_handles = [
+            mlines.Line2D([], [], color=LOM_COLOR, linestyle=ls, marker=mk, markersize=4,
+                          linewidth=1.5, label=ENC_LABELS[enc])
+            for enc, ls, mk in zip(ENCODERS, LINESTYLES, MARKERS)
+        ]
+        axes[row, 1].legend(handles=enc_handles, fontsize=8,
+                            loc="upper right", framealpha=0.8)
 
     fig.suptitle("Horizon sweep  (patch_size=8, H100 96 GB)", fontsize=11)
     fig.tight_layout()
