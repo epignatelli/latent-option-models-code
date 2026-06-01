@@ -39,6 +39,7 @@ for ctx in "${CTX_LENGTHS[@]}"; do
     echo "  encoder=${encoder}  ctx=${ctx}  -> ${out}"
     python -m scripts.profile_memory \
       --horizon-sweep \
+      --method       lom \
       --encoder      "${encoder}" \
       --context-len  "${ctx}" \
       --json-out     "${out}" \

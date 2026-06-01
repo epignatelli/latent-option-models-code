@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flake8 *)",
+      "Bash(pip show *)",
+      "Bash(conda env list)"
+    ]
+  }
+}
