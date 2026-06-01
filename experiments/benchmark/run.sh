@@ -109,14 +109,12 @@ for seed in "${SEEDS[@]}"; do
 
   CKPT_LAM="${CKPT_ROOT}/lam_seed${seed}"
   mkdir -p "${CKPT_LAM}"
-  echo "  LAM  horizon=1  num_options=98"
+  echo "  LAM  horizon=1  num_options=100"
   if ! _done "${CKPT_LAM}"; then
-    _launch bash -c "python3 -m scripts.pretrain latent-lom \
-      --config            '${CFG}' \
-      --data.horizon      1 \
-      --model.num_options 98 \
-      --train.seed        '${seed}' \
-      --train.ckpt_dir    '${CKPT_LAM}' \
+    _launch bash -c "python3 -m scripts.pretrain --method lam --signal latent \
+      --config         '${CFG}' \
+      --train.seed     '${seed}' \
+      --train.ckpt_dir '${CKPT_LAM}' \
       2>&1 | tee '${CKPT_LAM}/train.log' \
       && touch '${CKPT_LAM}/done'"
   fi
@@ -126,10 +124,10 @@ for seed in "${SEEDS[@]}"; do
     mkdir -p "${CKPT_LOM}"
     echo "  LOM  horizon=128  num_options=256"
     if ! _done "${CKPT_LOM}"; then
-      _launch bash -c "python3 -m scripts.pretrain latent-lom \
-        --config            '${CFG}' \
-        --train.seed        '${seed}' \
-        --train.ckpt_dir    '${CKPT_LOM}' \
+      _launch bash -c "python3 -m scripts.pretrain --method lom --signal latent \
+        --config         '${CFG}' \
+        --train.seed     '${seed}' \
+        --train.ckpt_dir '${CKPT_LOM}' \
         2>&1 | tee '${CKPT_LOM}/train.log' \
         && touch '${CKPT_LOM}/done'"
     fi

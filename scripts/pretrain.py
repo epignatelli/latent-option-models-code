@@ -1,24 +1,32 @@
 """CLI entry point for LOM pre-training.
 
-Usage:
-    python -m scripts.pretrain reconstruction-lom
-    python -m scripts.pretrain latent-lom
+Two required flags control what to train:
 
-    # Override any field with dotted-path syntax (= or -- both work):
-    python -m scripts.pretrain reconstruction-lom model.d_model=512 train.batch_size=64
-    python -m scripts.pretrain latent-lom --model.num_options=256 --data.horizon=128
+  --signal reconstruction|latent   pixel reconstruction vs latent JEPA dynamics
+  --method lam|lom                 LAM (atomic, horizon=1) vs LOM (temporal, horizon from config)
+
+Usage:
+    python -m scripts.pretrain --method lam --signal latent
+    python -m scripts.pretrain --method lom --signal reconstruction
 
     # Load an experiment config, then override individual fields:
-    python -m scripts.pretrain reconstruction-lom --config experiments/benchmark/config.yaml
-    python -m scripts.pretrain latent-lom --config experiments/benchmark/config.yaml model.d_model=512
+    python -m scripts.pretrain --method lam --signal latent \\
+        --config experiments/benchmark/config.yaml
+
+    python -m scripts.pretrain --method lom --signal latent \\
+        --config experiments/benchmark/config.yaml model.d_model=512
+
+    # key=value overrides (Hydra-style) and --key value are both accepted:
+    python -m scripts.pretrain --method lom --signal reconstruction \\
+        train.batch_size=64 model.num_options=256
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 import re
 import sys
-from typing import Annotated, Union
 
 import tyro
 import yaml
@@ -46,25 +54,18 @@ def _yaml_to_args(d: dict, prefix: str = "") -> list[str]:
 
 def _parse_args(argv: list[str]) -> list[str]:
     """Expand --config FILE and normalise key=value overrides to --key value."""
-    if not argv:
-        return argv
-
-    subcommand, rest = argv[0], argv[1:]
-
-    # Expand --config FILE into individual --key value flags
     config_args: list[str] = []
     remaining: list[str] = []
     i = 0
-    while i < len(rest):
-        if rest[i] == "--config" and i + 1 < len(rest):
-            with open(rest[i + 1]) as f:
+    while i < len(argv):
+        if argv[i] == "--config" and i + 1 < len(argv):
+            with open(argv[i + 1]) as f:
                 config_args = _yaml_to_args(yaml.safe_load(f))
             i += 2
         else:
-            remaining.append(rest[i])
+            remaining.append(argv[i])
             i += 1
 
-    # Convert bare key=value overrides (Hydra-style) to --key value
     expanded: list[str] = []
     for arg in config_args + remaining:
         if re.match(r"^[a-z][a-z0-9_.]*=", arg):
@@ -73,7 +74,7 @@ def _parse_args(argv: list[str]) -> list[str]:
         else:
             expanded.append(arg)
 
-    return [subcommand] + expanded
+    return expanded
 
 
 def main() -> None:
@@ -84,15 +85,19 @@ def main() -> None:
         stream=sys.stdout,
         force=True,
     )
-    cfg = tyro.cli(
-        Union[
-            Annotated[LOMCfg, tyro.conf.subcommand("reconstruction-lom")],
-            Annotated[LOMCfg, tyro.conf.subcommand("latent-lom")],
-        ],
-        args=_parse_args(sys.argv[1:]),
-    )
-    subcommand = sys.argv[1] if len(sys.argv) > 1 else ""
-    trainer = LatentLOMTrainer(cfg) if subcommand == "latent-lom" else ReconstructionLOMTrainer(cfg)
+
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--method", choices=["lam", "lom"], required=True)
+    pre.add_argument("--signal", choices=["reconstruction", "latent"], required=True)
+    known, rest = pre.parse_known_args(sys.argv[1:])
+
+    cfg = tyro.cli(LOMCfg, args=_parse_args(rest))
+
+    if known.method == "lam":
+        cfg.data.horizon = 1
+        cfg.model.num_options = 100
+
+    trainer = LatentLOMTrainer(cfg) if known.signal == "latent" else ReconstructionLOMTrainer(cfg)
     trainer.train()
 
 
