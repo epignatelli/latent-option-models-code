@@ -11,7 +11,7 @@ sweep:
   seeds: [0, 1, 2]
 
 data:
-  dataset_dir: /scratch/uceeepi/lom/datasets/nle/nao
+  dataset_dir: /scratch/uceeepi/lom/datasets/nle/nao-top10
   context_len: 16
   horizon: 128
   buffer_size: 100
