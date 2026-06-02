@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Tuple
+import math
 
 import torch
 import torch.nn as nn
@@ -638,7 +639,8 @@ class VectorQuantizer(nn.Module):
 
         commit_loss = (1 - F.cosine_similarity(z, z_hard.detach(), dim=-1)).mean()
         entropy = self.entropy(dist)
-        vq_loss = self.vq_beta * commit_loss - self.entropy_weight * entropy
+        entropy_deficit = math.log(self.num_options) - entropy
+        vq_loss = self.vq_beta * commit_loss + self.entropy_weight * entropy_deficit
 
         dead_frac = (self.last_active >= self.vq_reset_thresh).float().mean()
         return z_q, {"vq_loss": vq_loss, "commit_loss": commit_loss, "entropy": entropy, "dead_frac": dead_frac}, indices
