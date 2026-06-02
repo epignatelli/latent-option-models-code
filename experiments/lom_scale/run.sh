@@ -63,7 +63,7 @@ _launch() {
       done
       _PIDS=("${alive[@]+"${alive[@]}"}")
     fi
-    CUDA_VISIBLE_DEVICES=${GPU_IDS[${_GPU_SLOT}]} "$@" &
+    setsid env CUDA_VISIBLE_DEVICES=${GPU_IDS[${_GPU_SLOT}]} "$@" &
     _PIDS+=($!)
     _GPU_SLOT=$(( (_GPU_SLOT + 1) % NUM_GPUS ))
     sleep "${_COMPILE_STAGGER}" & wait $!
@@ -85,9 +85,9 @@ _flush() {
 _cleanup() {
   echo ""
   echo "Caught signal — killing all background jobs..."
-  if [ ${#_PIDS[@]} -gt 0 ]; then
-    kill "${_PIDS[@]}" 2>/dev/null || true
-  fi
+  for pid in "${_PIDS[@]}"; do
+    kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  done
   exit 1
 }
 trap _cleanup SIGINT SIGTERM
