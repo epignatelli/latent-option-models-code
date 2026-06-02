@@ -92,6 +92,8 @@ def main() -> None:
     known, rest = pre.parse_known_args(sys.argv[1:])
 
     cfg = tyro.cli(LOMCfg, args=_parse_args(rest))
+    cfg.method = known.method
+    cfg.signal = known.signal
 
     if known.method == "lam":
         cfg.data.horizon = 1
