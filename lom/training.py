@@ -379,10 +379,14 @@ class Trainer(ABC):
                 )
                 t0 = time.time()
                 if self.wandb_run:
+                    def _train_key(k: str) -> str:
+                        if k == "total_loss":
+                            return "monitor/train_loss"
+                        section, name = k.split("/", 1)
+                        return f"train/{section}/{name.replace('train_loss', 'loss')}"
                     self.wandb_run.log(
-                        {k: v.item() for k, v in loss_dict.items() if k != "total_loss"}
+                        {_train_key(k): v.item() for k, v in loss_dict.items()}
                         | {
-                            "monitor/train_loss": loss_dict["total_loss"].item(),
                             "monitor/lr": lr,
                             "monitor/grad_norm": grad_norm.item(),
                             "monitor/grad_clip_frac": clip_frac,
@@ -405,7 +409,7 @@ class Trainer(ABC):
                         if k == "total_loss":
                             return "monitor/val_loss"
                         section, name = k.split("/", 1)
-                        return f"{section}/val_{name.replace('train_loss', 'loss')}"
+                        return f"val/{section}/{name.replace('train_loss', 'loss')}"
                     self.wandb_run.log(
                         {_val_key(k): v for k, v in val_metrics.items()},
                         step=s + 1,
