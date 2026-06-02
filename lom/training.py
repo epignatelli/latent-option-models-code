@@ -403,9 +403,9 @@ class Trainer(ABC):
                 if self.wandb_run:
                     self.wandb_run.log(
                         {
-                            "monitor/val_loss": val_metrics["total_loss"],
-                            "lam/val_loss": val_metrics["lam/train_loss"],
-                            "lom/val_loss": val_metrics["lom/train_loss"],
+                            "monitor/val_loss":     val_metrics["total_loss"],
+                            "monitor/lam_val_loss": val_metrics["lam/train_loss"],
+                            "monitor/lom_val_loss": val_metrics["lom/train_loss"],
                         },
                         step=s + 1,
                     )
