@@ -636,7 +636,7 @@ class VectorQuantizer(nn.Module):
 
         z_q = z + (z_hard - z).detach()  # straight-through estimator
 
-        commit_loss = F.mse_loss(z, z_hard.detach())
+        commit_loss = (1 - F.cosine_similarity(z, z_hard.detach(), dim=-1)).mean()
         entropy = self.entropy(dist)
         vq_loss = self.vq_beta * commit_loss - self.entropy_weight * entropy
 
