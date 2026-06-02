@@ -17,7 +17,7 @@ data:
   context_len: 16
   horizon: 128
   stride: 4
-  buffer_size: 50
+  buffer_size: 4
   refresh_every: 60
 
 model:
