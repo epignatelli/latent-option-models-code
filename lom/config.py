@@ -92,5 +92,3 @@ class LOMCfg:
     data: DataCfg = field(default_factory=DataCfg)
     train: TrainCfg = field(default_factory=TrainCfg)
     wandb: WandbCfg = field(default_factory=WandbCfg)
-    method: str = ""   # lam | lom
-    signal: str = ""   # reconstruction | latent

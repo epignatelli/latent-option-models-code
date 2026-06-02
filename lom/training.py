@@ -90,8 +90,10 @@ class NullCtx:
 class Trainer(ABC):
     """Shared scaffolding: data loading, optimiser, AMP, training loop, logging, checkpointing."""
 
-    def __init__(self, cfg: LOMCfg) -> None:
+    def __init__(self, cfg: LOMCfg, method: str = "", signal: str = "") -> None:
         self.cfg = cfg
+        self.method = method
+        self.signal = signal
         t, d, m = cfg.train, cfg.data, cfg.model
 
         if d.context_len > m.context_length:
@@ -207,6 +209,8 @@ class Trainer(ABC):
             os.makedirs(cfg.wandb.dir, exist_ok=True)
 
             run_cfg = asdict(cfg)
+            run_cfg["method"] = self.method
+            run_cfg["signal"] = self.signal
             run_cfg["_git_commit"] = _git_commit()
             run_cfg["_git_dirty"] = _git_dirty()
             run_cfg["_argv"] = " ".join(sys.argv)
