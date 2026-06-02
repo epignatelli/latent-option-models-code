@@ -401,12 +401,13 @@ class Trainer(ABC):
                     "  ".join(f"{k.split('/')[-1]}={v:.4f}" for k, v in val_metrics.items()),
                 )
                 if self.wandb_run:
+                    def _val_key(k: str) -> str:
+                        if k == "total_loss":
+                            return "monitor/val_loss"
+                        section, name = k.split("/", 1)
+                        return f"{section}/val_{name.replace('train_loss', 'loss')}"
                     self.wandb_run.log(
-                        {
-                            "monitor/val_loss":     val_metrics["total_loss"],
-                            "monitor/lam_val_loss": val_metrics["lam/train_loss"],
-                            "monitor/lom_val_loss": val_metrics["lom/train_loss"],
-                        },
+                        {_val_key(k): v for k, v in val_metrics.items()},
                         step=s + 1,
                     )
                 self.save_checkpoint(s + 1)
