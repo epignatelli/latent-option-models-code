@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from tqdm import tqdm
 from typing import Tuple
 
 import numpy as np
@@ -63,6 +64,8 @@ class GameBuffer:
         self._horizon = horizon
         self._stride = stride
         self._min_len = context_len + horizon * stride
+        self._position_map: dict = {}
+        self._position_lock = threading.Lock()
 
         valid = np.maximum(lengths.astype(np.float64) - self._min_len, 0.0)
         total = valid.sum()
@@ -81,9 +84,11 @@ class GameBuffer:
         n_workers = min(8, n_slots)
         slots = []
         with ThreadPool(n_workers) as pool:
-            for games in pool.imap_unordered(self._load_player, player_idxs.tolist()):
-                if games:
-                    slots.append(games)
+            with tqdm(total=n_slots, desc="buffer", unit="player", position=0, leave=True) as overall:
+                for games in pool.imap_unordered(self._load_player, player_idxs.tolist()):
+                    if games:
+                        slots.append(games)
+                    overall.update(1)
         self._slots: list[list] = slots
         games = [g for s in slots for g in s]
         self._state: tuple = (games, self._make_weights(games))
@@ -93,29 +98,42 @@ class GameBuffer:
         self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
         self._thread.start()
 
+    def _thread_position(self) -> int:
+        tid = threading.current_thread().ident
+        with self._position_lock:
+            if tid not in self._position_map:
+                self._position_map[tid] = len(self._position_map) + 1
+        return self._position_map[tid]
+
     def _load_player(self, player_idx: int) -> list:
         """Load all valid games from a player file. Returns list of (T, H, W, 2) uint8."""
         path = str(self._paths[player_idx])
+        name = os.path.basename(path)
+        pos = self._thread_position()
         try:
-            with np.load(path) as f:
-                chars_full = f["tty_chars"].astype(np.uint8)
-                n_frames = len(chars_full)
-                offsets = (
-                    f["offsets"][:]
-                    if "offsets" in f
-                    else np.array([0, n_frames], dtype=np.int64)
-                )
-                colors_full = (
-                    np.clip(f["tty_colors"], 0, COLOR_VOCAB - 1).astype(np.uint8)
-                    if "tty_colors" in f
-                    else np.zeros_like(chars_full)
-                )
-            games = []
-            for i in range(len(offsets) - 1):
-                a, b = int(offsets[i]), int(offsets[i + 1])
-                if b - a < self._min_len:
-                    continue
-                games.append(np.stack([chars_full[a:b].copy(), colors_full[a:b].copy()], axis=-1))
+            with tqdm(total=3, desc=name, position=pos, leave=False, unit="step") as bar:
+                with np.load(path) as f:
+                    chars_full = f["tty_chars"].astype(np.uint8)
+                    n_frames = len(chars_full)
+                    offsets = (
+                        f["offsets"][:]
+                        if "offsets" in f
+                        else np.array([0, n_frames], dtype=np.int64)
+                    )
+                    bar.update(1)  # chars loaded
+                    colors_full = (
+                        np.clip(f["tty_colors"], 0, COLOR_VOCAB - 1).astype(np.uint8)
+                        if "tty_colors" in f
+                        else np.zeros_like(chars_full)
+                    )
+                    bar.update(1)  # colors loaded
+                games = []
+                for i in range(len(offsets) - 1):
+                    a, b = int(offsets[i]), int(offsets[i + 1])
+                    if b - a < self._min_len:
+                        continue
+                    games.append(np.stack([chars_full[a:b].copy(), colors_full[a:b].copy()], axis=-1))
+                bar.update(1)  # games split
             return games
         except Exception as exc:
             log.warning("Failed to load player %s: %s", path, exc)
