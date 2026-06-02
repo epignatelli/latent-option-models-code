@@ -19,6 +19,8 @@ for _arg in "$@"; do
   [ "$_arg" = "--lam-only" ] && LAM_ONLY=1
 done
 
+export TORCHINDUCTOR_FX_GRAPH_CACHE=1  # reuse compiled kernels across seeds
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CFG="${SCRIPT_DIR}/config.yaml"
@@ -56,7 +58,7 @@ echo "Using ${NUM_GPUS} GPU(s): ${GPU_IDS[*]}"
 _GPU_SLOT=0
 _PIDS=()
 
-_COMPILE_STAGGER=30
+_COMPILE_STAGGER=600  # 10 min — stagger backward-graph compilations so they don't overlap
 
 _launch() {
   if [ "${NUM_GPUS}" -ge 2 ]; then
