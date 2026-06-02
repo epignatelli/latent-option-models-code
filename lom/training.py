@@ -208,13 +208,36 @@ class Trainer(ABC):
 
             os.makedirs(cfg.wandb.dir, exist_ok=True)
 
-            run_cfg = asdict(cfg)
-            run_cfg["method"] = self.method
-            run_cfg["signal"] = self.signal
-            run_cfg["_git_commit"] = _git_commit()
-            run_cfg["_git_dirty"] = _git_dirty()
-            run_cfg["_argv"] = " ".join(sys.argv)
-            run_cfg["_model_type"] = self.label()
+            run_cfg = {
+                "method":               self.method,
+                "signal":               self.signal,
+                "data/dataset":         os.path.basename(d.dataset_dir),
+                "data/context_len":     d.context_len,
+                "data/horizon":         d.horizon,
+                "data/stride":          d.stride,
+                "data/buffer_size":     d.buffer_size,
+                "data/refresh_every":   d.refresh_every,
+                "model/d_model":        m.d_model,
+                "model/n_layers":       m.n_layers,
+                "model/n_heads":        m.n_heads,
+                "model/context_length": m.context_length,
+                "model/latent_dim":     m.latent_dim,
+                "model/num_options":    m.num_options,
+                "model/patch_size":     m.patch_size,
+                "model/vq_beta":        m.vq_beta,
+                "model/vq_entropy_weight": m.vq_entropy_weight,
+                "model/vq_reset_thresh":   m.vq_reset_thresh,
+                "model/vq_ema_decay":      m.vq_ema_decay,
+                "model/ema_decay":         m.ema_decay,
+                "train/max_iters":      t.max_iters,
+                "train/batch_size":     t.batch_size,
+                "train/lr":             t.lr,
+                "train/warmup_iters":   t.warmup_iters,
+                "train/grad_clip":      t.grad_clip,
+                "train/seed":           t.seed,
+                "_git_commit":          _git_commit(),
+                "_git_dirty":           _git_dirty(),
+            }
 
             run_name = (
                 f"{self.label()}"
