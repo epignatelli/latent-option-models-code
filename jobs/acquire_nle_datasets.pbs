@@ -24,11 +24,12 @@
 # --------------------------------------------------------------------------- #
 # CONFIGURATION — edit before submitting
 # --------------------------------------------------------------------------- #
-DEST_BASE="uceeepi@bologna.ee.ucl.ac.uk:/scratch/uceeepi/lom/datasets"
+DEST_BASE="$USER@bologna.ee.ucl.ac.uk:/scratch/$USER/lom/datasets"
 WORKERS=28
-OUTPUT_DIR="$HOME/lom/datasets"
-RAW_DIR="/dev/shm/lom_$$"
+NFS_DIR="$HOME/lom/datasets"   # used when FAST_IO=false or /dev/shm unavailable
+LOCAL_DIR="/dev/shm/lom_$$"
 CODE_DIR="$HOME/repos/latent-option-models-code"
+FAST_IO=true                   # true: npz to /dev/shm (fast, lost on crash); false: npz to NFS (slow, survives crash)
 
 # --------------------------------------------------------------------------- #
 # Environment
@@ -44,22 +45,24 @@ if ! conda env list | grep -q "^lom-convert "; then
 fi
 conda activate lom-convert
 
-mkdir -p "$OUTPUT_DIR" logs
-# RAW_DIR is fast local storage for extraction only; OUTPUT_DIR (NFS) always
-# holds the .npz output so partial progress survives a job crash.
-if mkdir -p "$RAW_DIR" && touch "$RAW_DIR/.write_test" 2>/dev/null; then
-    rm -f "$RAW_DIR/.write_test"
-    echo "RAW_DIR=$RAW_DIR (local /dev/shm)  OUTPUT_DIR=$OUTPUT_DIR (NFS)"
+mkdir -p logs
+OUTPUT_DIR="$NFS_DIR"
+if [ "$FAST_IO" = "true" ] && mkdir -p "$LOCAL_DIR" && touch "$LOCAL_DIR/.write_test" 2>/dev/null; then
+    rm -f "$LOCAL_DIR/.write_test"
+    OUTPUT_DIR="$LOCAL_DIR"
+    echo "OUTPUT_DIR=$OUTPUT_DIR (local /dev/shm, fast)"
 else
-    echo "WARNING: cannot write to $RAW_DIR — raw data will also go to $OUTPUT_DIR (NFS)"
-    RAW_DIR="$OUTPUT_DIR"
+    [ "$FAST_IO" = "true" ] && echo "WARNING: /dev/shm not writable — falling back to NFS"
+    LOCAL_DIR="$OUTPUT_DIR"
+    mkdir -p "$OUTPUT_DIR"
+    echo "OUTPUT_DIR=$OUTPUT_DIR (NFS)"
 fi
 
 # Background monitor — logs CPU/RAM/net every 60s to logs/monitor.log
 (while true; do
     echo "=== $(date) ==="
     free -h
-    top -b -n 1 -u uceeepi | grep -E "top|PID|python"
+    top -b -n 1 -u "$USER" | grep -E "top|PID|python"
     awk 'NR>2 {printf "%-10s rx:%s tx:%s\n",$1,$2,$10}' /proc/net/dev
     echo ""
     sleep 60
@@ -76,17 +79,19 @@ run_dataset() {
 
     echo "[$(date)] [$dataset] Starting..."
     python -u "$CODE_DIR/scripts/prepare_data.py" "$dataset" \
-        --raw-dir    "$RAW_DIR" \
+        --raw-dir    "$LOCAL_DIR" \
         --output-dir "$OUTPUT_DIR" \
         --log-dir    "$CODE_DIR/logs" \
         --workers    "$WORKERS" \
         $skip_db_flag
 
     echo "[$(date)] [$dataset] Rsyncing to $dest..."
+    ssh "${DEST_BASE%%:*}" "mkdir -p '${dest#*:}'"
     rsync -avz --progress "$npz_dir/" "$dest/"
 
-    echo "[$(date)] [$dataset] Cleaning up ephemeral raw data..."
-    rm -rf "${RAW_DIR:?}/${dataset}" "${RAW_DIR:?}/zips/${dataset}" "${RAW_DIR:?}/${dataset}.db"
+    echo "[$(date)] [$dataset] Cleaning up local data..."
+    [ "$FAST_IO" = "true" ] && rm -rf "${OUTPUT_DIR:?}/nle/${npz_subdir}"
+    rm -rf "${LOCAL_DIR:?}/${dataset}" "${LOCAL_DIR:?}/zips/${dataset}" "${LOCAL_DIR:?}/${dataset}.db"
 
     echo "[$(date)] [$dataset] Done."
 }
