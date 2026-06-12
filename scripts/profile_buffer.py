@@ -48,9 +48,7 @@ SEED            = 42
 
 def load_index(path: str):
     idx = np.load(path)
-    if "player_paths" in idx:
-        return idx["player_paths"].astype(str), idx["player_lengths"].astype(np.int32)
-    return idx["paths"].astype(str), idx["lengths"].astype(np.int32)
+    return idx["game_paths"].astype(str), idx["game_lengths"].astype(np.int32)
 
 
 def profile_one(paths, lengths, buffer_size: int, horizon: int) -> dict:
@@ -66,7 +64,7 @@ def profile_one(paths, lengths, buffer_size: int, horizon: int) -> dict:
     )
     startup_s = time.perf_counter() - t0
 
-    games, _ = buf._state
+    games, _ = buf.state
     game_lens   = np.array([len(g) for g in games], dtype=np.int64)
     ram_bytes   = sum(int(g.nbytes) for g in games)
     valid_lens  = np.maximum(game_lens - (CTX + horizon - 1), 0)
@@ -123,7 +121,7 @@ def main() -> None:
 
     log.info("Loading index from %s ...", args.index)
     paths, lengths = load_index(args.index)
-    log.info("  %d players  total frames: %.1fM  median: %.0f",
+    log.info("  %d games  total frames: %.1fM  median: %.0f",
              len(paths), lengths.sum() / 1e6, float(np.median(lengths)))
 
     if args.samp_per_sec == DEFAULT_SPS:

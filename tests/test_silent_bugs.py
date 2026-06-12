@@ -205,7 +205,7 @@ class TestH3PoolWeightsOffByOne:
         lengths = np.array([T + 1], dtype=np.int32)   # lie: say T+1 frames
         buf = GameBuffer(paths, lengths, buffer_size=1,
                           context_len=CTX, horizon=HORIZON, seed=0)
-        games, weights = buf._state
+        games, weights = buf.state
         buf.stop()
         assert weights[0] > 0, (
             f"_make_weights gave weight={weights[0]} to a valid game. "
@@ -305,15 +305,14 @@ class TestH5EndToEndInt8Chars:
 
         index_path = str(tmp_path / "index.npz")
         np.savez(index_path,
-                 paths=np.array(paths, dtype="U512"),
-                 lengths=np.array([T, T, T], dtype=np.int32))
+                 game_paths=np.array(paths, dtype="U512"),
+                 game_lengths=np.array([T, T, T], dtype=np.int32))
 
         ds = NpzTrajectoryDataset.from_index(
             index_path,
             context_len=CTX,
             horizon=HORIZON,
             buffer_size=3,
-            steps_per_epoch=4,
             seed=0,
             obs_h=H,
             obs_w=W,
