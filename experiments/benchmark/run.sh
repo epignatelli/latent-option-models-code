@@ -20,6 +20,9 @@ for _arg in "$@"; do
 done
 
 export TORCHINDUCTOR_FX_GRAPH_CACHE=1  # reuse compiled kernels across seeds
+export OMP_NUM_THREADS=1               # prevent libgomp thread explosion on GPU training
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
