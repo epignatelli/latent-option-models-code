@@ -395,8 +395,10 @@ class Trainer(ABC):
                 pct = 100.0 * (s + 1) / t.max_iters
                 clip_frac = clip_count / t.log_interval
                 clip_count = 0.0
+                mem_alloc = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+                mem_reserved = torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0.0
                 log.info(
-                    "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | gnorm=%.3f | clip=%.2f | %.0f samp/s",
+                    "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | gnorm=%.3f | clip=%.2f | %.0f samp/s | mem=%.1f/%.1f GB",
                     s + 1,
                     t.max_iters,
                     pct,
@@ -410,6 +412,8 @@ class Trainer(ABC):
                     grad_norm.item(),
                     clip_frac,
                     sps,
+                    mem_alloc,
+                    mem_reserved,
                 )
                 t0 = time.time()
                 if self.wandb_run:
@@ -665,8 +669,10 @@ class LatentLOMTrainer(Trainer):
                 pct = 100.0 * (s + 1) / t.max_iters
                 clip_frac = clip_count / t.log_interval
                 clip_count = 0.0
+                mem_alloc = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+                mem_reserved = torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0.0
                 log.info(
-                    "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | gnorm=%.3f | clip=%.2f | %.0f samp/s",
+                    "step %6d/%d (%4.1f%%) | loss=%.4f | %s | lr=%.2e | gnorm=%.3f | clip=%.2f | %.0f samp/s | mem=%.1f/%.1f GB",
                     s + 1,
                     t.max_iters,
                     pct,
@@ -680,6 +686,8 @@ class LatentLOMTrainer(Trainer):
                     grad_norm.item(),
                     clip_frac,
                     sps,
+                    mem_alloc,
+                    mem_reserved,
                 )
                 t0 = time.time()
                 if self.wandb_run:
